@@ -1,0 +1,10 @@
+Primary: Midnight Blue #0F172A
+
+Accent: Champagne Gold #E5C07B
+
+Background: Off-White #F8FAFC
+
+Text: Slate Gray #334155
+
+Hover: Soft Gold #FCD34D
+

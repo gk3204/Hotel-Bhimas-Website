@@ -1,0 +1,16 @@
+fastapi
+uvicorn
+sqlalchemy
+psycopg2-binary
+passlib[bcrypt]==1.7.4
+bcrypt==4.0.1
+python-multipart
+jinja2
+python-dotenv
+razorpay
+python-jose[cryptography]
+reportlab
+jose
+fastapi-mail
+email-validator
+slowapi
