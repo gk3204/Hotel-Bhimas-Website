@@ -8,12 +8,11 @@ import logging
 from datetime import datetime
 import hmac
 import hashlib
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from database import SessionLocal
 from models import Booking, Payment
 from utils.pdf_generator import generate_booking_pdf
 from utils.email_service import send_booking_email
+from utils.auth_utils import require_reception_or_admin
 
 logger = logging.getLogger(__name__)
 
@@ -21,9 +20,6 @@ router = APIRouter(
     prefix="/payments",
     tags=["Payments"]
 )
-
-# Rate limiting
-limiter = Limiter(key_func=get_remote_address)
 
 # DB dependency
 def get_db():
@@ -40,10 +36,35 @@ razorpay_client = razorpay.Client(
 )
 
 
+# 📊 GET all payments (admin only)
+@router.get("/", dependencies=[Depends(require_reception_or_admin)])
+def get_all_payments(db: Session = Depends(get_db)):
+    """Get all payments"""
+    try:
+        payments = db.query(Payment).order_by(Payment.created_at.desc()).all()
+        return payments
+    except Exception as e:
+        logger.error(f"Error fetching payments: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to fetch payments")
+
+
+# 📊 GET payment details
+@router.get("/{payment_id}")
+def get_payment(payment_id: int, db: Session = Depends(get_db)):
+    """Get specific payment details"""
+    payment = db.query(Payment).filter(
+        Payment.payment_id == payment_id
+    ).first()
+
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+
+    return payment
+
+
 @router.post("/create-order/{booking_id}")
-@limiter.limit("10/minute")
-def create_payment_order(request: Request, booking_id: int, db: Session = Depends(get_db)):
-    """Create payment order with rate limiting (10 per minute)"""
+def create_payment_order(booking_id: int, db: Session = Depends(get_db)):
+    """Create payment order"""
     try:
         booking = db.query(Booking).filter(
             Booking.booking_id == booking_id,
@@ -92,7 +113,6 @@ def create_payment_order(request: Request, booking_id: int, db: Session = Depend
 
 
 @router.post("/verify")
-@limiter.limit("10/minute")
 async def verify_payment(
     request: Request,
     background_tasks: BackgroundTasks,

@@ -1,10 +1,11 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import RoomTypeAvailability, RoomType
 from schemas import AvailabilityBlockCreate
 from utils.auth_utils import require_reception_or_admin
+from datetime import datetime
 
 router = APIRouter(
     prefix="/room-type-availability",
@@ -43,6 +44,7 @@ def block_date(
     block = RoomTypeAvailability(
         room_type_id=data.room_type_id,
         date=data.date,
+        is_available=False,  # ✅ EXPLICITLY SET TO FALSE WHEN BLOCKING
         reason=data.reason
     )
 
@@ -55,13 +57,21 @@ def block_date(
 # 🔓 UNBLOCK a date
 @router.delete("/unblock",dependencies=[Depends(require_reception_or_admin)])
 def unblock_date(
-    room_type_id: int,
-    date: str,
+    room_type_id: int = Query(...),
+    date: str = Query(...),
     db: Session = Depends(get_db)
 ):
+    """Unblock a date for a room type"""
+    
+    # Convert string to date object
+    try:
+        block_date = datetime.strptime(date, "%Y-%m-%d").date()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
     block = db.query(RoomTypeAvailability).filter(
         RoomTypeAvailability.room_type_id == room_type_id,
-        RoomTypeAvailability.date == date
+        RoomTypeAvailability.date == block_date
     ).first()
 
     if not block:

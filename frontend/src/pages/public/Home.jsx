@@ -1,10 +1,10 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import heroImg from "./hero.png";
-import doubleOrdinary from "./images/rooms/double-ordinary.png";
 import doubleDeluxe from "./images/rooms/double-deluxe.png";
-import fourBed from "./images/rooms/4-bed.png";
-import fiveBed from "./images/rooms/5-bed.png";
+import threeBedAc from "./images/rooms/3 bed ac.png";
+import fourBed from "./images/rooms/4 bed nonac.png";
+import fiveBed from "./images/rooms/4-bed.png";
 import balajiImg from "./images/temples/tirumala.png";
 import food1 from "./images/idly.png";
 import food2 from "./images/dosa.jpg";
@@ -134,24 +134,28 @@ React.useEffect(() => {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-8">
           {[
             {
-              name: "Double Ordinary",
-              desc: "Comfortable and budget-friendly room ideal for short stays.",
-              img: doubleOrdinary,
-            },
-            {
               name: "Double Deluxe",
               desc: "Spacious deluxe room with AC and modern amenities.",
               img: doubleDeluxe,
+              price: 1150,
+            },
+            {
+              name: "Triple Bed",
+              desc: "Premium triple bed room with AC, ideal for family relaxation.",
+              img: threeBedAc,
+              price: 1550,
             },
             {
               name: "4 Bed Room",
               desc: "Perfect choice for families and small groups.",
               img: fourBed,
+              price: 1750,
             },
             {
               name: "5 Bed Room",
               desc: "Large room suitable for bigger families and group stays.",
               img: fiveBed,
+              price: 1950,
             },
           ].map((room) => (
             <div
@@ -169,8 +173,11 @@ React.useEffect(() => {
                 <h3 className="text-lg font-bold text-[#0F172A] mb-2">
                   {room.name}
                 </h3>
-                <p className="text-gray-600 text-sm mb-4">
+                <p className="text-gray-600 text-sm mb-3">
                   {room.desc}
+                </p>
+                <p className="text-[#E5C07B] font-bold text-lg mb-4">
+                  Starting from ₹{room.price}/night
                 </p>
 
                 <Link

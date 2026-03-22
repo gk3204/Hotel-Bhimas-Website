@@ -73,11 +73,13 @@ def create_booking(
         ).first()
 
         if blocked:
-            logger.info(f"Room type {data.room_type_id} blocked for dates {data.check_in}-{data.check_out}")
+            logger.warning(f"Room type {data.room_type_id} blocked for dates {data.check_in}-{data.check_out}. Reason: {blocked.reason}")
             raise HTTPException(
                 status_code=409,
-                detail=f"Room type not available for selected dates. Reason: {blocked.reason}"
+                detail=f"Room type not available for selected dates. Reason: {blocked.reason or 'Maintenance'}"
             )
+        else:
+            logger.debug(f"Room type {data.room_type_id} availability check passed for {data.check_in}-{data.check_out}")
 
         # 4️⃣ Create guest
         guest = Guest(
@@ -143,79 +145,6 @@ def create_booking(
         logger.error(f"Error creating booking: {str(e)}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to create booking")
-
-    db.commit()
-    db.refresh(guest)
-
-    # 6️⃣ Calculate amount (with GST)
-    nights = (data.check_out - data.check_in).days
-
-    base_amount = round(
-        nights * float(room_type.price_per_night),
-        2
-    )
-
-    gst_amount = round(
-        base_amount * float(room_type.gst_percent) / 100,
-        2
-    )
-
-    total_amount = round(
-        base_amount + gst_amount,
-        2
-    )
-
-    # Razorpay convenience fee (2% + 18% GST)
-    convenience_base = round(total_amount * 0.02, 2)
-    convenience_gst = round(convenience_base * 0.18, 2)
-    convenience_fee_total = round(convenience_base + convenience_gst, 2)
-
-    grand_total = round(total_amount + convenience_fee_total, 2)
-
-
-
-    # 7️⃣ Create booking
-    booking = Booking(             # free_room.room_id,
-        room_type_id=data.room_type_id,   
-        guest_id=guest.guest_id,
-        check_in=data.check_in,
-        check_out=data.check_out,
-        booking_source=data.booking_source,
-        status="pending_payment",
-        base_amount=base_amount,
-        gst_amount=gst_amount,
-        total_amount=total_amount,
-        convenience_fee=convenience_base,
-        convenience_gst=convenience_gst,
-        grand_total=grand_total
-    )
-    
-
-    db.add(booking)
-    db.commit()
-    db.refresh(booking)
-
-    # return {
-    #     "booking_id": booking.booking_id,
-    #     "total_amount": total_amount,
-    #     "status": booking.status
-    # }
-
-    return {
-    "booking_id": booking.booking_id,
-    "nights": nights,
-    "price_per_night": float(room_type.price_per_night),
-
-    "room_amount": base_amount,
-    "room_gst": gst_amount,
-    "room_total": total_amount,
-
-    "convenience_fee": convenience_base,
-    "convenience_gst": convenience_gst,
-
-    "payable_amount": grand_total,
-    "status": booking.status
-}
 
 
 @router.patch("/{booking_id}/cancel",dependencies=[Depends(require_admin)])

@@ -90,11 +90,11 @@ const Booking = () => {
       openRazorpay(orderData, bookingData.booking_id);
 
     } catch (error) {
-      if (error.message) {
-        setError(error.message);
-      } else {
-        setError("Payment service not available. Please refresh the page.");
-      }
+      const errorMessage = 
+        typeof error === 'string' ? error :
+        error?.response?.data?.detail ? error.response.data.detail :
+        error?.message || "An unexpected error occurred";
+      setError(errorMessage);
     } finally {
       setLoading(false);
     }

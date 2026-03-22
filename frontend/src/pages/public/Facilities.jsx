@@ -3,7 +3,7 @@ import React, { useEffect, useState } from "react";
 // HERO SLIDESHOW IMAGES
 import hero1 from "./images/rooms/double-deluxe.png";
 import hero2 from "./images/ac-restaurant.png";
-import hero3 from "./images/rooms/5-bed.png";
+import hero3 from "./images/rooms/double-deluxe1.png";
 
 const heroImages = [hero1, hero2, hero3];
 

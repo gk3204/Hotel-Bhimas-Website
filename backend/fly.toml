@@ -1,0 +1,35 @@
+# fly.toml app configuration file generated for hotel-bhimas-backend on 2026-03-22T00:00:00Z
+
+app = "hotel-bhimas-backend"
+primary_region = "bom"
+
+[build]
+builder = "paacketo"
+
+[build.args]
+BP_PYTHON_VERSION = "3.11"
+
+[[services]]
+protocol = "tcp"
+internal_port = 8000
+processes = ["app"]
+
+  [services.http_checks]
+  interval = 10000
+  timeout = 5000
+  grace_period = "30s"
+  method = "GET"
+  path = "/"
+  protocol = "http"
+  restart_limit = 5
+
+[env]
+PYTHONUNBUFFERED = "true"
+
+[http_service]
+internal_port = 8000
+force_https = true
+auto_stop_machines = true
+auto_start_machines = true
+min_machines_running = 1
+processes = ["app"]

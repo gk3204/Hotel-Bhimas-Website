@@ -7,8 +7,6 @@ from passlib.context import CryptContext
 import os
 import logging
 from dotenv import load_dotenv
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 from database import SessionLocal
 from models import User
 
@@ -24,9 +22,6 @@ def get_db():
 router = APIRouter(prefix="/admin")
 load_dotenv()
 
-# Rate limiting
-limiter = Limiter(key_func=get_remote_address)
-
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = "HS256"
 
@@ -39,9 +34,8 @@ class LoginSchema(BaseModel):
 
 
 @router.post("/login")
-@limiter.limit("5/minute")
-def admin_login(request, data: LoginSchema, db: Session = Depends(get_db)):
-    """Login endpoint with rate limiting (5 attempts per minute)"""
+def admin_login(data: LoginSchema, db: Session = Depends(get_db)):
+    """Login endpoint (rate limiting handled by middleware)"""
     
     # 🔎 Find user in DB
     user = db.query(User).filter(User.username == data.username).first()

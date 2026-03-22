@@ -37,6 +37,12 @@ const ReceptionHeader = () => {
             <Link to="/reception/availability" className="hover:text-[#FCD34D]">
               Room Availability
             </Link>
+            <Link to="/reception/payments" className="hover:text-[#FCD34D]">
+              Payments
+            </Link>
+            <Link to="/reception/enquiries" className="hover:text-[#FCD34D]">
+              Enquiries
+            </Link>
 
             <button
               onClick={handleLogout}
@@ -90,6 +96,12 @@ const ReceptionHeader = () => {
           </Link>
           <Link to="/reception/availability" onClick={() => setMenuOpen(false)}>
             Room Availability
+          </Link>
+          <Link to="/reception/payments" onClick={() => setMenuOpen(false)}>
+            Payments
+          </Link>
+          <Link to="/reception/enquiries" onClick={() => setMenuOpen(false)}>
+            Enquiries
           </Link>
 
           <button

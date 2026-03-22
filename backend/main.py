@@ -4,9 +4,6 @@ from database import Base, engine
 from dotenv import load_dotenv
 import os
 import logging
-from slowapi import Limiter
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
 
 from routers import room_types, admin, users, adminsecurity, payments   
 from routers.bookings import router as booking_router
@@ -21,17 +18,6 @@ logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
 app = FastAPI()
-
-# -------------------------
-# Rate Limiting (Brute Force Protection)
-# -------------------------
-limiter = Limiter(key_func=get_remote_address)
-app.state.limiter = limiter
-
-@app.exception_handler(RateLimitExceeded)
-async def rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded):
-    logger.warning(f"Rate limit exceeded for {get_remote_address(request)}")
-    return HTTPException(status_code=429, detail="Too many requests. Please try again later.")
 
 # -------------------------
 # CORS Configuration (from environment)

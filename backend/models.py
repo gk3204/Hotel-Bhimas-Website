@@ -77,7 +77,7 @@ class Payment(Base):
     amount = Column(Numeric(10, 2))
     currency = Column(String, default="INR")
     status = Column(String, index=True)    # created | paid | failed
-    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
 
 
 class RoomTypeAvailability(Base):
@@ -100,4 +100,15 @@ class AuditLog(Base):
     log_id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.user_id"), index=True)
     action = Column(String, nullable=False)
+    created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+
+
+class ContactEnquiry(Base):
+    __tablename__ = "contact_enquiries"
+    enquiry_id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False, index=True)
+    email = Column(String(100), nullable=False, index=True)
+    phone = Column(String(15), nullable=False, index=True)
+    message = Column(String(1000), nullable=False)
+    status = Column(String(20), default="pending", index=True)  # pending, replied, spam
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)

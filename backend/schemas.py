@@ -68,7 +68,7 @@ class BookingCreate(BaseModel):
     email: Optional[EmailStr] = None
     check_in: date
     check_out: date
-    booking_source: str = Field("online", pattern="^(online|frontdesk)$")
+    booking_source: str = Field("online", pattern="^(online|frontdesk|website)$")
 
     @field_validator('check_out')
     @classmethod

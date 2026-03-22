@@ -25,7 +25,8 @@ const RoomTypes = () => {
   const loadRoomTypes = async () => {
     setLoading(true);
     const data = await getRoomTypes();
-    setRoomTypes(data);
+    const sorted = data.sort((a, b) => a.room_type_id - b.room_type_id);
+    setRoomTypes(sorted);
     setLoading(false);
   };
 
@@ -116,7 +117,8 @@ const RoomTypes = () => {
             <table className="w-full text-left">
               <thead>
                 <tr className="border-b border-[#E5C07B]/30">
-                  <th className="py-3">Name</th>
+                  <th className="py-3">ID</th>
+                  <th>Name</th>
                   <th>Price</th>
                   <th>GST</th>
                   <th>Occupancy</th>
@@ -131,6 +133,7 @@ const RoomTypes = () => {
                     key={room.room_type_id}
                     className="border-b border-[#E5C07B]/10 hover:bg-[#1F2937] transition"
                   >
+                    <td className="py-3 font-semibold text-[#FCD34D]">{room.room_type_id}</td>
                     <td className="py-3">{room.name}</td>
                     <td>₹{room.price_per_night}</td>
                     <td>{room.gst_percent}%</td>

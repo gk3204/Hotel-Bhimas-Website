@@ -241,6 +241,43 @@ def generate_booking_pdf(booking, payment):
     elements.append(Spacer(1, 0.6 * inch))
 
     # =====================================================
+    # HOTEL POLICIES
+    # =====================================================
+
+    elements.append(Paragraph("<b>Hotel Policies</b>", styles["Heading2"]))
+    elements.append(Spacer(1, 0.2 * inch))
+
+    policy_style = ParagraphStyle(
+        name="PolicyStyle",
+        parent=styles["Normal"],
+        fontSize=9,
+        leading=14
+    )
+
+    policies = [
+        "<b>Check-in & Check-out:</b> 24-hour check-in and check-out is available. Stay duration is calculated from the time of check-in.",
+        "Early check-in or late check-out is subject to availability and additional charges.",
+
+        "<b>Cancellation Policy:</b> Free cancellation up to 24 hours before check-in.",
+        "Cancellations within 24 hours of check-in are non-refundable.",
+        "Refunds (if applicable) will be processed within 5–7 working days.",
+
+        "<b>Identification:</b> Valid government-issued photo ID is mandatory for all guests.",
+        "Accepted IDs: Aadhaar Card, Passport, Driving License, Voter ID.",
+        "Foreign guests must present Passport and valid Visa.",
+        "Guests below 18 years are not allowed to check in alone.",
+
+        "<b>Occupancy Rules:</b> Maximum occupancy per room must be strictly followed.",
+        "Extra guests beyond room capacity will be charged.",
+    ]
+
+    for policy in policies:
+        elements.append(Paragraph("• " + policy, policy_style))
+        elements.append(Spacer(1, 0.12 * inch))
+
+    elements.append(Spacer(1, 0.3 * inch))
+
+    # =====================================================
     # FOOTER
     # =====================================================
 

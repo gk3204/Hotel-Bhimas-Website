@@ -27,9 +27,13 @@ import RoomAvailability from "./pages/admin/RoomAvailability";
 import UserSecurityCheck from "./pages/admin/UserSecurityCheck";
 import UserManagement from "./pages/admin/UserManagement";
 import Bookings from "./pages/admin/Bookings";
+import Payments from "./pages/admin/Payments";
+import Enquiries from "./pages/admin/Enquiries";
 
 //Reception Pages
 import ReceptionDashboard from "./pages/reception/ReceptionDashboard";
+import ReceptionPayments from "./pages/reception/Payments";
+import ReceptionEnquiries from "./pages/reception/Enquiries";
 
 function App() {
   return (
@@ -65,6 +69,8 @@ function App() {
         <Route path="/admin/room-types" element={<RoomTypes />} />
         <Route path="/admin/room-availability" element={<RoomAvailability />} />
         <Route path="/admin/bookings" element={<Bookings />} />
+        <Route path="/admin/payments" element={<Payments />} />
+        <Route path="/admin/enquiries" element={<Enquiries />} />
         <Route path="/admin/user-check" element={<UserSecurityCheck />} />
         <Route path="/admin/users" element={<UserManagement />} />
       </Route>
@@ -80,6 +86,8 @@ function App() {
         <Route path="/reception" element={<ReceptionDashboard />} />
         <Route path="/reception/bookings" element={<Bookings />} />
         <Route path="/reception/availability" element={<RoomAvailability />} />
+        <Route path="/reception/payments" element={<ReceptionPayments />} />
+        <Route path="/reception/enquiries" element={<ReceptionEnquiries />} />
       </Route>
 
     </Routes>
