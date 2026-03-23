@@ -16,4 +16,3 @@ pydantic==2.5.0
 pydantic-settings==2.1.0
 requests==2.31.0
 aiofiles==23.2.1
-aiosmtplib==3.0.1
