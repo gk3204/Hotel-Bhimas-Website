@@ -1,9 +1,10 @@
 //import { BASE_URL } from "./config";
+const BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 // ADMIN LOGIN using fetch
 export async function adminLogin(username, password) {
   try {
-    const response = await fetch(`http://127.0.0.1:8000/admin/login`, {
+    const response = await fetch(`${BASE_URL}/admin/login`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

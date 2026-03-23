@@ -1,8 +1,10 @@
 // GET all room types
-// Aftr deploytment --> http://localhost:8000/room-types
+// After deployment --> use environment variable
+const BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+
 export async function getRoomTypes() {
   try {
-    const response = await fetch("http://127.0.0.1:8000/room-types", {
+    const response = await fetch(`${BASE_URL}/room-types`, {
       method: "GET",
     });
 
