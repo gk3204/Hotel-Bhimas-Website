@@ -74,7 +74,8 @@ async def restrict_admin_access(request: Request, call_next):
     """Restrict admin routes to allowed networks (configurable)"""
     if request.url.path.startswith("/admin"):
         # Check if admin restriction is enabled
-        restrict_admin = os.getenv("RESTRICT_ADMIN_ACCESS", "true").lower() == "true"
+        # Default: false (open in production, can enable with env var)
+        restrict_admin = os.getenv("RESTRICT_ADMIN_ACCESS", "false").lower() == "true"
         
         if restrict_admin:
             allowed_networks = os.getenv("ALLOWED_ADMIN_NETWORKS", "192.168.0.0/16,127.0.0.1").split(",")
