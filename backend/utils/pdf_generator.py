@@ -37,8 +37,10 @@ room_extra_details = {
 }
 
 def generate_booking_pdf(booking, payment):
-    os.makedirs("booking_data", exist_ok=True)
-    file_path = f"booking_data/booking_{booking.booking_id}.pdf"
+    import tempfile
+    # Use temp directory that works on Railway
+    temp_dir = tempfile.gettempdir()
+    file_path = os.path.join(temp_dir, f"booking_{booking.booking_id}.pdf")
 
     doc = SimpleDocTemplate(
         file_path,

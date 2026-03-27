@@ -1,6 +1,9 @@
 from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
 from pydantic import EmailStr
 import os
+import logging
+
+logger = logging.getLogger(__name__)
 
 conf = ConnectionConfig(
     MAIL_USERNAME=os.getenv("MAIL_USERNAME"),
@@ -18,7 +21,30 @@ async def send_booking_email(booking, pdf_path):
         booking.guest.email,
         "gk200432@gmail.com"
     ]
-    
+
+    # Get absolute path to logo
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    logo_path = os.path.join(backend_dir, "assets", "logo-gold.png")
+
+    # Build attachments list
+    attachments = [
+        {
+            "file": pdf_path,
+        }
+    ]
+
+    # Only attach logo if it exists
+    if os.path.exists(logo_path):
+        attachments.append({
+            "file": logo_path,
+            "headers": {
+                "Content-ID": "<logo_image>"
+            }
+        })
+        logger.debug(f"Logo attached from: {logo_path}")
+    else:
+        logger.warning(f"Logo not found at: {logo_path}")
+
     message = MessageSchema(
         headers={"X-Priority": "1"},
         subject="Hotel Bhimas Booking Confirmation",
@@ -28,11 +54,11 @@ async def send_booking_email(booking, pdf_path):
 <body style="font-family: Arial, sans-serif; background-color:#f9f9f9; padding:20px;">
 
     <table width="100%" cellpadding="0" cellspacing="0" style="max-width:600px; margin:auto; background:white; border-radius:8px; overflow:hidden;">
-        
+
         <!-- HEADER -->
         <tr>
     <td style="background-color:#000; padding:25px; text-align:center;">
-        
+
        <img src="cid:logo_image"
         width="100"
         style="display:block; margin:0 auto 10px auto;" />
@@ -108,17 +134,8 @@ async def send_booking_email(booking, pdf_path):
 
 </body>
 </html>
-""",attachments=[
-        {
-            "file": pdf_path,
-        },
-        {
-            "file": "assets/logo-gold.png",
-            "headers": {
-                "Content-ID": "<logo_image>"
-            }
-        }
-    ],
+""",
+        attachments=attachments,
         subtype="html",
         reply_to=["hotelbhimas@gmail.com"]
     )

@@ -167,12 +167,35 @@ async def verify_payment(
     db.commit()
 
     async def process_confirmation(booking, payment):
-        pdf_path = generate_booking_pdf(booking, payment)
-        await send_booking_email(booking, pdf_path)
+        try:
+            logger.info(f"Starting confirmation process for booking {booking.booking_id}")
 
-        import os
-        if os.path.exists(pdf_path):
-            os.remove(pdf_path)
+            # Generate PDF
+            try:
+                pdf_path = generate_booking_pdf(booking, payment)
+                logger.info(f"PDF generated successfully: {pdf_path}")
+            except Exception as e:
+                logger.error(f"PDF generation failed for booking {booking.booking_id}: {str(e)}", exc_info=True)
+                return
+
+            # Send email
+            try:
+                await send_booking_email(booking, pdf_path)
+                logger.info(f"Email sent successfully for booking {booking.booking_id}")
+            except Exception as e:
+                logger.error(f"Email sending failed for booking {booking.booking_id}: {str(e)}", exc_info=True)
+                return
+
+            # Cleanup PDF
+            try:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    logger.debug(f"PDF cleaned up: {pdf_path}")
+            except Exception as e:
+                logger.warning(f"Failed to cleanup PDF {pdf_path}: {str(e)}")
+
+        except Exception as e:
+            logger.error(f"Unexpected error in confirmation process for booking {booking.booking_id}: {str(e)}", exc_info=True)
 
     background_tasks.add_task(process_confirmation, booking, payment)
 
