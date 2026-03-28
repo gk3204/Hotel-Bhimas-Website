@@ -1,18 +1,19 @@
-from mailjet_rest import Client
 import base64
 import os
 import logging
+import requests
+import json
 
 logger = logging.getLogger(__name__)
 
-# Initialize Mailjet client
+# Mailjet credentials
 MAILJET_API_KEY = os.getenv("MAILJET_API_KEY")
 MAILJET_API_SECRET = os.getenv("MAILJET_API_SECRET")
 
 if not MAILJET_API_KEY or not MAILJET_API_SECRET:
     logger.warning("Mailjet credentials not fully configured. Email sending will fail. Set MAILJET_API_KEY and MAILJET_API_SECRET in environment variables.")
 
-mailjet = Client(auth=(MAILJET_API_KEY, MAILJET_API_SECRET)) if MAILJET_API_KEY and MAILJET_API_SECRET else None
+MAILJET_API_URL = "https://api.mailjet.com/v3.1/send"
 
 
 async def send_booking_email(booking, pdf_path):
@@ -184,7 +185,7 @@ async def send_booking_email(booking, pdf_path):
         simple_data = {
             "Messages": [
                 {
-                    "From": {"Email": from_email},
+                    "From": {"Email": from_email, "Name": "Hotel Bhimas"},
                     "To": recipients,
                     "Subject": "Hotel Bhimas Booking Confirmation",
                     "HTMLPart": email_body
