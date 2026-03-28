@@ -27,9 +27,9 @@ async def send_booking_email(booking, pdf_path):
         "Messages": [
             {
                 "From": {
-                    "Email": from_email,
-                    "Name": "Hotel Bhimas"
-                },
+    "Email": "pilot@mailjet.com",
+    "Name": "Hotel Bhimas"
+},
                 "To": recipients,
                 "Subject": "Booking Confirmed",
                 "TextPart": f"Booking ID: {booking.booking_id}"
@@ -40,7 +40,8 @@ async def send_booking_email(booking, pdf_path):
     result = mailjet.send.create(data=data)
 
     if result.status_code == 200:
-        logger.info("✅ Email sent")
+        logger.info(f"✅ Email sent for booking {booking.booking_id}")
     else:
-        logger.error(f"❌ Failed: {result.status_code}")
+        logger.error(f"❌ Mailjet failed: {result.status_code}")
         logger.error(result.text)
+        raise Exception("Email sending failed")
