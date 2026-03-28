@@ -8,6 +8,10 @@ logger = logging.getLogger(__name__)
 # Initialize Mailjet client
 MAILJET_API_KEY = os.getenv("MAILJET_API_KEY")
 MAILJET_API_SECRET = os.getenv("MAILJET_API_SECRET")
+
+if not MAILJET_API_KEY or not MAILJET_API_SECRET:
+    logger.warning("Mailjet credentials not fully configured. Email sending will fail. Set MAILJET_API_KEY and MAILJET_API_SECRET in environment variables.")
+
 mailjet = Client(auth=(MAILJET_API_KEY, MAILJET_API_SECRET)) if MAILJET_API_KEY and MAILJET_API_SECRET else None
 
 
@@ -174,7 +178,12 @@ async def send_booking_email(booking, pdf_path):
         if result.status_code == 200:
             logger.info(f"Email sent successfully for booking {booking.booking_id}")
         else:
-            logger.error(f"Mailjet returned status {result.status_code}: {result.json()}")
+            # Try to parse JSON response, fallback to text if it fails
+            try:
+                error_msg = result.json()
+            except:
+                error_msg = result.text or f"HTTP {result.status_code}"
+            logger.error(f"Mailjet returned status {result.status_code}: {error_msg}")
 
     except Exception as e:
         logger.error(f"Failed to send email for booking {booking.booking_id}: {str(e)}", exc_info=True)
