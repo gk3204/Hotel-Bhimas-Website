@@ -41,10 +41,6 @@ async def send_booking_email(booking, pdf_path):
         <tr>
     <td style="background-color:#000; padding:25px; text-align:center;">
 
-       <img src="cid:logo_image"
-        width="100"
-        style="display:block; margin:0 auto 10px auto;" />
-
         <h1 style="
             color:#D4AF37;
             font-family: Arial, sans-serif;
@@ -121,35 +117,38 @@ async def send_booking_email(booking, pdf_path):
     # Build attachments list
     attachments = []
 
-    # Attach PDF
-    try:
-        with open(pdf_path, 'rb') as pdf_file:
-            pdf_content = base64.b64encode(pdf_file.read()).decode()
-            attachments.append({
-                "ContentType": "application/pdf",
-                "Filename": "booking_confirmation.pdf",
-                "Base64Content": pdf_content
-            })
-            logger.debug(f"PDF attached: {pdf_path}")
-    except Exception as e:
-        logger.warning(f"Failed to attach PDF: {str(e)}")
+    # For now, skip attachments to test basic functionality
+    # TODO: Re-enable attachments after basic email works
 
-    # Attach logo
-    if os.path.exists(logo_path):
-        try:
-            with open(logo_path, 'rb') as logo_file:
-                logo_content = base64.b64encode(logo_file.read()).decode()
-                attachments.append({
-                    "ContentType": "image/png",
-                    "Filename": "logo-gold.png",
-                    "Base64Content": logo_content,
-                    "ContentID": "logo_image"
-                })
-                logger.debug(f"Logo attached: {logo_path}")
-        except Exception as e:
-            logger.warning(f"Failed to attach logo: {str(e)}")
-    else:
-        logger.warning(f"Logo not found at: {logo_path}")
+    # # Attach PDF
+    # try:
+    #     with open(pdf_path, 'rb') as pdf_file:
+    #         pdf_content = base64.b64encode(pdf_file.read()).decode()
+    #         attachments.append({
+    #             "ContentType": "application/pdf",
+    #             "Filename": "booking_confirmation.pdf",
+    #             "Base64Content": pdf_content
+    #         })
+    #         logger.debug(f"PDF attached: {pdf_path}")
+    # except Exception as e:
+    #     logger.warning(f"Failed to attach PDF: {str(e)}")
+
+    # # Attach logo
+    # if os.path.exists(logo_path):
+    #     try:
+    #         with open(logo_path, 'rb') as logo_file:
+    #             logo_content = base64.b64encode(logo_file.read()).decode()
+    #             attachments.append({
+    #                 "ContentType": "image/png",
+    #                 "Filename": "logo-gold.png",
+    #                 "Base64Content": logo_content,
+    #                 "ContentID": "logo_image"
+    #             })
+    #             logger.debug(f"Logo attached: {logo_path}")
+    #     except Exception as e:
+    #         logger.warning(f"Failed to attach logo: {str(e)}")
+    # else:
+    #     logger.warning(f"Logo not found at: {logo_path}")
 
     try:
         # Build Mailjet message
@@ -177,17 +176,24 @@ async def send_booking_email(booking, pdf_path):
 
         # Send email via Mailjet
         logger.debug(f"Sending email to {len(recipients)} recipients via Mailjet")
+        logger.debug(f"Message recipients: {recipients}")
+        logger.debug(f"From email: {from_email}")
+        logger.debug(f"Attachments count: {len(attachments)}")
+
         result = mailjet.send.create(data=data)
 
         if result.status_code == 200:
             logger.info(f"Email sent successfully for booking {booking.booking_id}")
         else:
-            # Try to parse JSON response, fallback to text if it fails
+            # Get full response for debugging
+            response_text = result.text if hasattr(result, 'text') else str(result)
             try:
                 error_msg = result.json()
             except:
-                error_msg = result.text or f"HTTP {result.status_code}"
-            logger.error(f"Mailjet API Error {result.status_code}: {error_msg}")
+                error_msg = response_text or f"HTTP {result.status_code}"
+
+            logger.error(f"Mailjet API Error {result.status_code}")
+            logger.error(f"Response: {error_msg}")
             raise Exception(f"Mailjet failed with status {result.status_code}: {error_msg}")
 
     except Exception as e:
