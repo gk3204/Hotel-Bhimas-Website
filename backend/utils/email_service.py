@@ -153,11 +153,14 @@ async def send_booking_email(booking, pdf_path):
 
     try:
         # Build Mailjet message
+        from_email = os.getenv("MAIL_FROM", "noreply@hotelbhimas.com")
+        logger.debug(f"Preparing email from: {from_email}")
+
         data = {
             "Messages": [
                 {
                     "From": {
-                        "Email": os.getenv("MAIL_FROM", "noreply@hotelbhimas.com"),
+                        "Email": from_email,
                         "Name": "Hotel Bhimas"
                     },
                     "To": recipients,
@@ -173,6 +176,7 @@ async def send_booking_email(booking, pdf_path):
         }
 
         # Send email via Mailjet
+        logger.debug(f"Sending email to {len(recipients)} recipients via Mailjet")
         result = mailjet.send.create(data=data)
 
         if result.status_code == 200:
@@ -183,7 +187,8 @@ async def send_booking_email(booking, pdf_path):
                 error_msg = result.json()
             except:
                 error_msg = result.text or f"HTTP {result.status_code}"
-            logger.error(f"Mailjet returned status {result.status_code}: {error_msg}")
+            logger.error(f"Mailjet API Error {result.status_code}: {error_msg}")
+            raise Exception(f"Mailjet failed with status {result.status_code}: {error_msg}")
 
     except Exception as e:
         logger.error(f"Failed to send email for booking {booking.booking_id}: {str(e)}", exc_info=True)
