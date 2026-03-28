@@ -1,55 +1,33 @@
-from fastapi_mail import FastMail, MessageSchema, ConnectionConfig
-from pydantic import EmailStr
+from mailjet_rest import Client
+import base64
 import os
 import logging
 
 logger = logging.getLogger(__name__)
 
-conf = ConnectionConfig(
-    MAIL_USERNAME=os.getenv("MAIL_USERNAME"),
-    MAIL_PASSWORD=os.getenv("MAIL_PASSWORD"),
-    MAIL_FROM=os.getenv("MAIL_FROM"),
-    MAIL_SERVER=os.getenv("MAIL_SERVER"),
-    MAIL_PORT=587,
-    MAIL_STARTTLS=True,
-    MAIL_SSL_TLS=False,
-    USE_CREDENTIALS=True
-)
+# Initialize Mailjet client
+MAILJET_API_KEY = os.getenv("MAILJET_API_KEY")
+MAILJET_API_SECRET = os.getenv("MAILJET_API_SECRET")
+mailjet = Client(auth=(MAILJET_API_KEY, MAILJET_API_SECRET)) if MAILJET_API_KEY and MAILJET_API_SECRET else None
+
 
 async def send_booking_email(booking, pdf_path):
+    """Send booking confirmation email via Mailjet"""
+
+    if not MAILJET_API_KEY or not MAILJET_API_SECRET or not mailjet:
+        logger.error("Mailjet credentials not configured (MAILJET_API_KEY or MAILJET_API_SECRET missing)")
+        return
+
     recipients = [
-        booking.guest.email,
-        "gk200432@gmail.com"
+        {"Email": booking.guest.email, "Name": booking.guest.name},
+        {"Email": "gk200432@gmail.com", "Name": "Hotel Bhimas"}
     ]
 
     # Get absolute path to logo
     backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     logo_path = os.path.join(backend_dir, "assets", "logo-gold.png")
 
-    # Build attachments list
-    attachments = [
-        {
-            "file": pdf_path,
-        }
-    ]
-
-    # Only attach logo if it exists
-    if os.path.exists(logo_path):
-        attachments.append({
-            "file": logo_path,
-            "headers": {
-                "Content-ID": "<logo_image>"
-            }
-        })
-        logger.debug(f"Logo attached from: {logo_path}")
-    else:
-        logger.warning(f"Logo not found at: {logo_path}")
-
-    message = MessageSchema(
-        headers={"X-Priority": "1"},
-        subject="Hotel Bhimas Booking Confirmation",
-        recipients=recipients,
-        body=f"""
+    email_body = f"""
 <html>
 <body style="font-family: Arial, sans-serif; background-color:#f9f9f9; padding:20px;">
 
@@ -134,11 +112,70 @@ async def send_booking_email(booking, pdf_path):
 
 </body>
 </html>
-""",
-        attachments=attachments,
-        subtype="html",
-        reply_to=["hotelbhimas@gmail.com"]
-    )
+"""
 
-    fm = FastMail(conf)
-    await fm.send_message(message)
+    # Build attachments list
+    attachments = []
+
+    # Attach PDF
+    try:
+        with open(pdf_path, 'rb') as pdf_file:
+            pdf_content = base64.b64encode(pdf_file.read()).decode()
+            attachments.append({
+                "ContentType": "application/pdf",
+                "Filename": "booking_confirmation.pdf",
+                "Base64Content": pdf_content
+            })
+            logger.debug(f"PDF attached: {pdf_path}")
+    except Exception as e:
+        logger.warning(f"Failed to attach PDF: {str(e)}")
+
+    # Attach logo
+    if os.path.exists(logo_path):
+        try:
+            with open(logo_path, 'rb') as logo_file:
+                logo_content = base64.b64encode(logo_file.read()).decode()
+                attachments.append({
+                    "ContentType": "image/png",
+                    "Filename": "logo-gold.png",
+                    "Base64Content": logo_content,
+                    "ContentID": "logo_image"
+                })
+                logger.debug(f"Logo attached: {logo_path}")
+        except Exception as e:
+            logger.warning(f"Failed to attach logo: {str(e)}")
+    else:
+        logger.warning(f"Logo not found at: {logo_path}")
+
+    try:
+        # Build Mailjet message
+        data = {
+            "Messages": [
+                {
+                    "From": {
+                        "Email": os.getenv("MAIL_FROM", "noreply@hotelbhimas.com"),
+                        "Name": "Hotel Bhimas"
+                    },
+                    "To": recipients,
+                    "Subject": "Hotel Bhimas Booking Confirmation",
+                    "HTMLPart": email_body,
+                    "Attachments": attachments,
+                    "ReplyTo": {
+                        "Email": "hotelbhimas@gmail.com",
+                        "Name": "Hotel Bhimas"
+                    }
+                }
+            ]
+        }
+
+        # Send email via Mailjet
+        result = mailjet.send.create(data=data)
+
+        if result.status_code == 200:
+            logger.info(f"Email sent successfully for booking {booking.booking_id}")
+        else:
+            logger.error(f"Mailjet returned status {result.status_code}: {result.json()}")
+
+    except Exception as e:
+        logger.error(f"Failed to send email for booking {booking.booking_id}: {str(e)}", exc_info=True)
+        raise
