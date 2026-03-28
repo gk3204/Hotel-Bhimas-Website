@@ -175,26 +175,36 @@ async def send_booking_email(booking, pdf_path):
         }
 
         # Send email via Mailjet
-        logger.debug(f"Sending email to {len(recipients)} recipients via Mailjet")
-        logger.debug(f"Message recipients: {recipients}")
-        logger.debug(f"From email: {from_email}")
-        logger.debug(f"Attachments count: {len(attachments)}")
+        logger.info(f"Sending email to {len(recipients)} recipients via Mailjet")
+        logger.info(f"Message recipients: {recipients}")
+        logger.info(f"From email: {from_email}")
+        logger.info(f"Attachments count: {len(attachments)}")
 
         result = mailjet.send.create(data=data)
+
+        logger.info(f"Mailjet response status: {result.status_code}")
 
         if result.status_code == 200:
             logger.info(f"Email sent successfully for booking {booking.booking_id}")
         else:
-            # Get full response for debugging
-            response_text = result.text if hasattr(result, 'text') else str(result)
-            try:
-                error_msg = result.json()
-            except:
-                error_msg = response_text or f"HTTP {result.status_code}"
-
+            # Get full response for debugging - Mailjet response object
             logger.error(f"Mailjet API Error {result.status_code}")
-            logger.error(f"Response: {error_msg}")
-            raise Exception(f"Mailjet failed with status {result.status_code}: {error_msg}")
+
+            # Try different ways to get the error message
+            if hasattr(result, 'json') and callable(result.json):
+                try:
+                    error_data = result.json()
+                    logger.error(f"Error JSON: {error_data}")
+                except Exception as e:
+                    logger.error(f"Could not parse JSON response: {str(e)}")
+
+            if hasattr(result, 'text'):
+                logger.error(f"Error Text: {result.text}")
+
+            if hasattr(result, 'content'):
+                logger.error(f"Error Content: {result.content}")
+
+            raise Exception(f"Mailjet failed with status {result.status_code}")
 
     except Exception as e:
         logger.error(f"Failed to send email for booking {booking.booking_id}: {str(e)}", exc_info=True)
