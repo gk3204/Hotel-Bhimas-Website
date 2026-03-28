@@ -180,7 +180,20 @@ async def send_booking_email(booking, pdf_path):
         logger.info(f"From email: {from_email}")
         logger.info(f"Attachments count: {len(attachments)}")
 
-        result = mailjet.send.create(data=data)
+        # Test simple message first
+        simple_data = {
+            "Messages": [
+                {
+                    "From": {"Email": from_email},
+                    "To": recipients,
+                    "Subject": "Hotel Bhimas Booking Confirmation",
+                    "HTMLPart": email_body
+                }
+            ]
+        }
+
+        logger.info(f"Mailjet request data: {simple_data}")
+        result = mailjet.send.create(data=simple_data)
 
         logger.info(f"Mailjet response status: {result.status_code}")
 
