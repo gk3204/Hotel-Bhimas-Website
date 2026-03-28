@@ -4,8 +4,8 @@ import logging
 
 logger = logging.getLogger(__name__)
 
-MAILJET_API_KEY = os.getenv("MAILJET_API_KEY")
-MAILJET_API_SECRET = os.getenv("MAILJET_API_SECRET")
+MAILJET_API_KEY = os.getenv("MJ_APIKEY_PUBLIC")
+MAILJET_API_SECRET = os.getenv("MJ_APIKEY_PRIVATE")
 
 mailjet = Client(auth=(MAILJET_API_KEY, MAILJET_API_SECRET)) \
     if MAILJET_API_KEY and MAILJET_API_SECRET else None
@@ -37,7 +37,24 @@ async def send_booking_email(booking, pdf_path):
         ]
     }
 
-    result = mailjet.send.create(data=data)
+    result = mailjet.send.create(data={
+    "Messages": [
+        {
+            "From": {
+                "Email": "pilot@mailjet.com",
+                "Name": "Test"
+            },
+            "To": [
+                {
+                    "Email": "bhimasamogh@gmail.com",
+                    "Name": "Test"
+                }
+            ],
+            "Subject": "Test Email",
+            "TextPart": "Hello from Mailjet"
+        }
+    ]
+})
 
     if result.status_code == 200:
         logger.info(f"✅ Email sent for booking {booking.booking_id}")
