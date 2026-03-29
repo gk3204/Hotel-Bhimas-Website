@@ -28,8 +28,8 @@ async def lifespan(app: FastAPI):
 
     # Optional shutdown logic
     logger.info("🔻 App shutting down")
-    
-app = FastAPI()
+
+app = FastAPI(lifespan=lifespan)
 
 # -------------------------
 # CORS Configuration (from environment)
@@ -118,6 +118,6 @@ app.include_router(payments.router)
 # -------------------------
 # Health Check
 # -------------------------
-@app.get("/")
-def root():
-    return {"status": "Hotel Bhimas API running"}
+@app.get("/health")
+def health():
+    return {"status": "ok"}
