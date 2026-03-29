@@ -17,6 +17,9 @@ load_dotenv()
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
 
+# Import restore helper (defined after logging is configured)
+from restore_db import restore_from_backup
+
 app = FastAPI()
 
 # -------------------------
@@ -34,6 +37,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -------------------------
+# Restore DB from backup (idempotent — skips if data already present)
+# -------------------------
+restore_from_backup()
 
 # -------------------------
 # Create Tables
