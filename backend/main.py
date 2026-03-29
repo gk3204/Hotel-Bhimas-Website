@@ -118,6 +118,6 @@ app.include_router(payments.router)
 # -------------------------
 # Health Check
 # -------------------------
-@app.get("/")
-def root():
-    return {"status": "Hotel Bhimas API running"}
+@app.get("/health")
+def health():
+    return {"status": "ok"}
