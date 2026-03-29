@@ -4,7 +4,7 @@ from database import Base, engine
 from dotenv import load_dotenv
 import os
 import logging
-
+from contextlib import asynccontextmanager
 from routers import room_types, admin, users, adminsecurity, payments   
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
@@ -16,8 +16,20 @@ load_dotenv()
 # Setup logging
 logging.basicConfig(level=os.getenv("LOG_LEVEL", "INFO"))
 logger = logging.getLogger(__name__)
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    try:
+        Base.metadata.create_all(bind=engine)
+        logger.info("✅ Database connected and tables created")
+    except Exception as e:
+        logger.error(f"❌ Database connection failed: {e}")
+    
+    yield  # app runs here
 
-app = FastAPI()
+    # Optional shutdown logic
+    logger.info("🔻 App shutting down")
+
+app = FastAPI(lifespan=lifespan)
 
 # -------------------------
 # CORS Configuration (from environment)
@@ -38,7 +50,7 @@ app.add_middleware(
 # -------------------------
 # Create Tables
 # -------------------------
-Base.metadata.create_all(bind=engine)
+# Base.metadata.create_all(bind=engine)
 
 # -------------------------
 # Admin IP Restriction Middleware (Production-Safe)
