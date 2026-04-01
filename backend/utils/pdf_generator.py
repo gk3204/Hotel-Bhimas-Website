@@ -36,11 +36,18 @@ room_extra_details = {
     },
 }
 
-def generate_booking_pdf(booking, payment):
+def generate_booking_pdf(booking_data, payment_data):
+    """
+    Generate booking confirmation PDF
+    
+    Args:
+        booking_data: Dict with booking details (booking_id, guest_*, check_in/out, amounts, booking_items list)
+        payment_data: Dict with payment details {'payment_id_gateway', 'order_id', 'gateway', 'status'}
+    """
     import tempfile
     # Use temp directory that works on Railway
     temp_dir = tempfile.gettempdir()
-    file_path = os.path.join(temp_dir, f"booking_{booking.booking_id}.pdf")
+    file_path = os.path.join(temp_dir, f"booking_{booking_data['booking_id']}.pdf")
 
     doc = SimpleDocTemplate(
         file_path,
@@ -50,10 +57,12 @@ def generate_booking_pdf(booking, payment):
         topMargin=25,
         bottomMargin=25
     )
-    room_details = room_extra_details.get(
-        booking.room_type.room_type_id,
-        {}
-    )
+    
+    # Get details from first room type (for display)
+    room_details = {}
+    if booking_data['booking_items']:
+        first_room_type_id = booking_data['booking_items'][0]['room_type_id']
+        room_details = room_extra_details.get(first_room_type_id, {})
 
     styles = getSampleStyleSheet()
 
@@ -112,16 +121,19 @@ def generate_booking_pdf(booking, payment):
     elements.append(Paragraph("<b>Booking Information</b>", styles["Heading2"]))
     elements.append(Spacer(1, 0.2 * inch))
 
-    booking_data = [
-        ["Booking ID", booking.booking_id],
-        ["Booking Date", booking.created_at.strftime("%d-%m-%Y %H:%M")],
-        ["Room Type", booking.room_type.name],
-        ["Check-in", booking.check_in.strftime("%d-%m-%Y")],
-        ["Check-out", booking.check_out.strftime("%d-%m-%Y")],
-        ["Status", booking.status.upper()],
+    # Build room types string from all booking items
+    room_types_list = [item['room_type_name'] for item in booking_data['booking_items']]
+    room_types_str = ", ".join(room_types_list) if room_types_list else "N/A"
+
+    booking_table_data = [
+        ["Booking ID", str(booking_data['booking_id'])],
+        ["Room Type(s)", room_types_str],
+        ["Check-in", booking_data['check_in'].strftime("%d-%m-%Y")],
+        ["Check-out", booking_data['check_out'].strftime("%d-%m-%Y")],
+        ["Status", booking_data['status'].upper()],
     ]
 
-    booking_table = Table(booking_data, colWidths=[150, 330])
+    booking_table = Table(booking_table_data, colWidths=[150, 330])
     booking_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
@@ -138,13 +150,13 @@ def generate_booking_pdf(booking, payment):
     elements.append(Paragraph("<b>Guest Information</b>", styles["Heading2"]))
     elements.append(Spacer(1, 0.2 * inch))
 
-    guest_data = [
-        ["Name", booking.guest.name],
-        ["Phone", booking.guest.phone],
-        ["Email", booking.guest.email or "N/A"],
+    guest_table_data = [
+        ["Name", booking_data['guest_name']],
+        ["Phone", booking_data['guest_phone']],
+        ["Email", booking_data['guest_email'] or "N/A"],
     ]
 
-    guest_table = Table(guest_data, colWidths=[150, 330])
+    guest_table = Table(guest_table_data, colWidths=[150, 330])
     guest_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
@@ -155,30 +167,37 @@ def generate_booking_pdf(booking, payment):
     elements.append(Spacer(1, 0.15 * inch))
 
     # =====================================================
-    # ROOM DETAILS
+    # ROOM ITEMS DETAILS (All booked rooms)
     # =====================================================
 
-    elements.append(Paragraph("<b>Room Details</b>", styles["Heading2"]))
+    elements.append(Paragraph("<b>Room Items</b>", styles["Heading2"]))
     elements.append(Spacer(1, 0.2 * inch))
 
-    features_text = ", ".join(room_details.get("features", []))
+    room_items_data = [["Room Type", "Quantity", "Price/Night", "Total"]]
+    
+    for item in booking_data['booking_items']:
+        room_items_data.append([
+            item['room_type_name'],
+            str(item['quantity']),
+            f"Rs. {float(item['price_per_night']):,.2f}",
+            f"Rs. {float(item['total_amount']):,.2f}"
+        ])
 
-    room_data = [
-        ["Room Size", room_details.get("size", "N/A")],
-        ["Capacity", room_details.get("capacity", "N/A")],
-        ["Description", room_details.get("desc", "N/A")],
-        ["Features", features_text or "N/A"],
-    ]
-
-    room_table = Table(room_data, colWidths=[150, 330])
-    room_table.setStyle(TableStyle([
-        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-        ('TOPPADDING', (0, 0), (-1, -1), 2)
+    room_items_table = Table(room_items_data, colWidths=[150, 80, 100, 100])
+    room_items_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, 0), 10),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 12),
+        ('BACKGROUND', (0, 1), (-1, -1), colors.beige),
+        ('GRID', (0, 0), (-1, -1), 1, colors.black),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")])
     ]))
 
-    elements.append(room_table)
-    elements.append(Spacer(1, 0.4 * inch))
+    elements.append(room_items_table)
+    elements.append(Spacer(1, 0.3 * inch))
 
     # =====================================================
     # PAYMENT SUMMARY (Invoice Style)
@@ -187,26 +206,25 @@ def generate_booking_pdf(booking, payment):
     elements.append(Paragraph("<b>Payment Summary</b>", styles["Heading2"]))
     elements.append(Spacer(1, 0.3 * inch))
 
-    nights = (booking.check_out - booking.check_in).days
+    nights = (booking_data['check_out'] - booking_data['check_in']).days
     nights = nights if nights > 0 else 1
 
-    base_amount = float(booking.base_amount)
-    price_per_night = base_amount / nights
-
-    gst_amount = float(booking.gst_amount or 0)
-    convenience_fee = float(booking.convenience_fee or 0)
-    convenience_gst = float(booking.convenience_gst or 0)
-    grand_total = float(booking.grand_total)
+    base_amount = booking_data['base_amount']
+    gst_amount = booking_data['gst_amount']
+    convenience_fee = booking_data['convenience_fee']
+    convenience_gst = booking_data['convenience_gst']
+    grand_total = booking_data['grand_total']
     total_convnience_fee = convenience_fee + convenience_gst
-    payment_data = [
-        [f"{nights} Night(s) × Rs. {price_per_night:.2f}", f"Rs. {base_amount:.2f}"],
-        ["GST", f"Rs. {gst_amount:.2f}"],
-        ["Convenience Fee", f"Rs. {total_convnience_fee:.2f}"],
-        ["GRAND TOTAL", f"Rs. {grand_total:.2f}"],
+    
+    payment_summary_data = [
+        [f"{nights} Night(s)", f"Rs. {base_amount:,.2f}"],
+        ["GST", f"Rs. {gst_amount:,.2f}"],
+        ["Convenience Fee", f"Rs. {total_convnience_fee:,.2f}"],
+        ["GRAND TOTAL", f"Rs. {grand_total:,.2f}"],
     ]
-
-    payment_table = Table(payment_data, colWidths=[300, 150])
-    payment_table.setStyle(TableStyle([
+    
+    payment_summary_table = Table(payment_summary_data, colWidths=[300, 150])
+    payment_summary_table.setStyle(TableStyle([
         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
         ('LINEABOVE', (0, -1), (-1, -1), 1, colors.black),
         ('TEXTCOLOR', (0, -1), (-1, -1), colors.HexColor("#B8860B")),
@@ -215,7 +233,7 @@ def generate_booking_pdf(booking, payment):
         ('TOPPADDING', (0, 0), (-1, -1), 2)
     ]))
 
-    elements.append(payment_table)
+    elements.append(payment_summary_table)
     elements.append(Spacer(1, 0.15 * inch))
 
     # =====================================================
@@ -226,10 +244,10 @@ def generate_booking_pdf(booking, payment):
     elements.append(Spacer(1, 0.2 * inch))
 
     reference_data = [
-        ["Payment ID", payment.payment_id_gateway or "N/A"],
-        ["Order ID", payment.order_id or "N/A"],
-        ["Gateway", payment.gateway.upper()],
-        ["Payment Status", payment.status.upper()],
+        ["Payment ID", payment_data.get("payment_id_gateway") or "N/A"],
+        ["Order ID", payment_data.get("order_id") or "N/A"],
+        ["Gateway", (payment_data.get("gateway") or "N/A").upper()],
+        ["Payment Status", (payment_data.get("status") or "N/A").upper()],
     ]
 
     ref_table = Table(reference_data, colWidths=[150, 330])

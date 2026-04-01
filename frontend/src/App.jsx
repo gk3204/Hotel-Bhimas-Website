@@ -43,7 +43,7 @@ function App() {
       <Route element={<PublicLayout />}>
         <Route path="/" element={<Home />} />
         <Route path="/rooms" element={<Rooms />} />
-        <Route path="/booking/:roomTypeId" element={<Booking />} />
+        <Route path="/booking" element={<Booking />} />
         <Route path="/facilities" element={<Facilities />} />
         <Route path="/about-us" element={<AboutUs />} />
         <Route path="/contact-us" element={<ContactUs />} />

@@ -1,18 +1,25 @@
 # backend/routers/payment.py
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 from decimal import Decimal
-import razorpay
 import os
 import logging
 from datetime import datetime
 import hmac
 import hashlib
 from database import SessionLocal
-from models import Booking, Payment
+from models import Booking, Payment, BookingItem
 from utils.pdf_generator import generate_booking_pdf
 from utils.email_service import send_booking_email
 from utils.auth_utils import require_reception_or_admin
+
+# Try to import razorpay, but allow app to run without it
+try:
+    import razorpay
+    RAZORPAY_AVAILABLE = True
+except ImportError:
+    RAZORPAY_AVAILABLE = False
+    logging.warning("⚠️ Razorpay not available - payment features may be limited")
 
 logger = logging.getLogger(__name__)
 
@@ -30,10 +37,15 @@ def get_db():
         db.close()
 
 
-# Initialize Razorpay client
-razorpay_client = razorpay.Client(
-    auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET"))
-)
+# Initialize Razorpay client only if available
+razorpay_client = None
+if RAZORPAY_AVAILABLE:
+    try:
+        razorpay_client = razorpay.Client(
+            auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET"))
+        )
+    except Exception as e:
+        logger.warning(f"⚠️ Failed to initialize Razorpay: {e}")
 
 
 # 📊 GET all payments (admin only)
@@ -65,6 +77,10 @@ def get_payment(payment_id: int, db: Session = Depends(get_db)):
 @router.post("/create-order/{booking_id}")
 def create_payment_order(booking_id: int, db: Session = Depends(get_db)):
     """Create payment order"""
+    if not RAZORPAY_AVAILABLE or not razorpay_client:
+        logger.error("Razorpay is not available")
+        raise HTTPException(status_code=503, detail="Payment service is temporarily unavailable. Please try again later.")
+    
     try:
         booking = db.query(Booking).filter(
             Booking.booking_id == booking_id,
@@ -135,7 +151,10 @@ async def verify_payment(
     if not payment:
         raise HTTPException(status_code=404, detail="Payment record not found")
 
-    booking = db.query(Booking).filter(
+    booking = db.query(Booking).options(
+        joinedload(Booking.guest),
+        joinedload(Booking.booking_items).joinedload(BookingItem.room_type)
+    ).filter(
         Booking.booking_id == payment.booking_id
     ).first()
 
@@ -166,38 +185,81 @@ async def verify_payment(
 
     db.commit()
 
-    async def process_confirmation(booking, payment):
+    logger.info(f"✅ Payment verified for booking {booking.booking_id}. Starting background confirmation task...")
+
+    # Extract booking data BEFORE session closes (prevent detached instance issues)
+    booking_data = {
+        "booking_id": booking.booking_id,
+        "guest_name": booking.guest.name,
+        "guest_email": booking.guest.email,
+        "guest_phone": booking.guest.phone,
+        "check_in": booking.check_in,
+        "check_out": booking.check_out,
+        "status": booking.status,
+        "base_amount": float(booking.base_amount),
+        "gst_amount": float(booking.gst_amount),
+        "total_amount": float(booking.total_amount),
+        "convenience_fee": float(booking.convenience_fee),
+        "convenience_gst": float(booking.convenience_gst),
+        "grand_total": float(booking.grand_total),
+        "booking_items": [
+            {
+                "room_type_name": item.room_type.name,
+                "room_type_id": item.room_type.room_type_id,
+                "quantity": item.quantity,
+                "base_amount": float(item.base_amount),
+                "gst_amount": float(item.gst_amount),
+                "total_amount": float(item.total_amount),
+                "price_per_night": float(item.room_type.price_per_night)
+            }
+            for item in booking.booking_items
+        ]
+    }
+
+    # Extract payment data BEFORE session closes (detached instance error prevention)
+    payment_data = {
+        "payment_id_gateway": payment.payment_id_gateway,
+        "order_id": payment.order_id,
+        "gateway": payment.gateway,
+        "status": payment.status
+    }
+
+    def process_confirmation(booking_data, payment_data):
+        """Synchronous confirmation task - PDF generation and email sending"""
         try:
-            logger.info(f"Starting confirmation process for booking {booking.booking_id}")
+            logger.info(f"🔄 Background task started for booking {booking_data['booking_id']}")
+            logger.info(f"Starting confirmation process for booking {booking_data['booking_id']}")
 
             # Generate PDF
             try:
-                pdf_path = generate_booking_pdf(booking, payment)
+                pdf_path = generate_booking_pdf(booking_data, payment_data)
                 logger.info(f"PDF generated successfully: {pdf_path}")
             except Exception as e:
-                logger.error(f"PDF generation failed for booking {booking.booking_id}: {str(e)}", exc_info=True)
+                logger.error(f"PDF generation failed for booking {booking_data['booking_id']}: {str(e)}", exc_info=True)
                 return
 
-            # Send email
+            # Send email (now synchronous)
             try:
-                await send_booking_email(booking, pdf_path)
-                logger.info(f"Email sent successfully for booking {booking.booking_id}")
+                send_booking_email(booking_data, pdf_path)
+                logger.info(f"Email sent successfully for booking {booking_data['booking_id']}")
             except Exception as e:
-                logger.error(f"Email sending failed for booking {booking.booking_id}: {str(e)}", exc_info=True)
+                logger.error(f"Email sending failed for booking {booking_data['booking_id']}: {str(e)}", exc_info=True)
                 return
 
             # Cleanup PDF
             try:
                 if os.path.exists(pdf_path):
                     os.remove(pdf_path)
-                    logger.debug(f"PDF cleaned up: {pdf_path}")
+                    logger.info(f"PDF cleaned up: {pdf_path}")
             except Exception as e:
                 logger.warning(f"Failed to cleanup PDF {pdf_path}: {str(e)}")
 
         except Exception as e:
-            logger.error(f"Unexpected error in confirmation process for booking {booking.booking_id}: {str(e)}", exc_info=True)
+            logger.error(f"Unexpected error in confirmation process for booking {booking_data['booking_id']}: {str(e)}", exc_info=True)
 
-    background_tasks.add_task(process_confirmation, booking, payment)
+    logger.info(f"📋 Registering background task for booking {booking.booking_id}")
+    background_tasks.add_task(process_confirmation, booking_data, payment_data)
+    logger.info(f"✨ Background task added to queue for booking {booking.booking_id}")
 
     return {"message": "Payment successful"}
 

@@ -1,5 +1,6 @@
 import React from "react";
 import { Link } from "react-router-dom";
+import ImageWithSpinner from "../../components/ImageWithSpinner";
 import heroImg from "./hero.png";
 import doubleDeluxe from "./images/rooms/double-deluxe.png";
 import threeBedAc from "./images/rooms/3 bed ac.png";
@@ -17,6 +18,7 @@ const Home = () => {
 const [foodIndex, setFoodIndex] = React.useState(0);
 
 React.useEffect(() => {
+  window.scrollTo(0, 0);
   const interval = setInterval(() => {
     setFoodIndex((prev) => (prev + 1) % foodImages.length);
   }, 2000);
@@ -44,19 +46,19 @@ React.useEffect(() => {
   {/* Sliding Images */}
   <div className="absolute inset-0">
     {heroImages.map((img, index) => (
-      <div
-        key={index}
-        className={`absolute inset-0 transition-opacity duration-700 ${
-          index === heroIndex ? "opacity-100" : "opacity-0"
-        }`}
-        style={{
-          backgroundImage: `linear-gradient(rgba(15,23,42,0.45), rgba(15,23,42,0.45)), url(${img})`,
-          backgroundSize: "cover",
-          backgroundPosition: "center",
-          backgroundRepeat: "no-repeat",
-        }}
-      />
-    ))}
+  <div
+    key={index}
+    className={`absolute inset-0 transition-opacity duration-700 ${
+      index === heroIndex ? "opacity-100" : "opacity-0"
+    }`}
+  >
+    <ImageWithSpinner
+      src={img}
+      alt="Hotel Bhimas"
+      style={{ filter: "brightness(0.55)" }}
+    />
+  </div>
+))}
   </div>
 
   {/* Content */}
@@ -73,7 +75,7 @@ React.useEffect(() => {
 
     <div className="flex justify-center gap-6">
       <Link
-        to="/rooms"
+        to="/booking"
         className="bg-[#0F172A]/90 text-[#E5C07B] px-8 py-3 rounded-full font-semibold hover:text-[#FCD34D] transition"
       >
         Book Now
@@ -163,10 +165,14 @@ React.useEffect(() => {
               className="bg-white rounded-2xl shadow-lg overflow-hidden group hover:shadow-2xl transition transform hover:-translate-y-2"
             >
               {/* Room Image */}
-              <div
-                className="h-48 bg-cover bg-center transition-transform duration-500 group-hover:scale-110"
-                style={{ backgroundImage: `url(${room.img})` }}
-              ></div>
+              <div className="h-48 overflow-hidden">
+                <ImageWithSpinner
+                  src={room.img}
+                  alt={room.name}
+                  className="group-hover:scale-110 transition-transform duration-500"
+                  style={{ height: "192px" }}
+                />
+              </div>
 
               {/* Content */}
               <div className="p-5 text-center">
@@ -181,7 +187,7 @@ React.useEffect(() => {
                 </p>
 
                 <Link
-                  to="/rooms"
+                  to="/booking"
                   className="inline-block bg-[#E5C07B] text-[#0F172A] px-6 py-2 rounded-full text-sm font-semibold hover:bg-[#FCD34D] transition"
                 >
                   Book Now →
@@ -223,31 +229,31 @@ React.useEffect(() => {
               </Link>
             </div>
 
-            {/* Right Food Slideshow */}
-      <div className="hidden md:flex items-center justify-center h-full relative p-10">
-        
-        {/* Glow Background */}
-        <div className="absolute w-80 h-80 bg-[#E5C07B]/20 rounded-full blur-3xl"></div>
+          {/* Right Food Slideshow */}
+          <div className="hidden md:flex items-center justify-center h-full relative p-10">
+            
+            {/* Glow Background */}
+            <div className="absolute w-80 h-80 bg-[#E5C07B]/20 rounded-full blur-3xl"></div>
 
-        {/* Slideshow Card */}
-        <div className="relative w-80 h-80 rounded-2xl overflow-hidden shadow-2xl border border-white/10">
-          
-          {foodImages.map((img, index) => (
-            <img
-              key={index}
-              src={img}
-              alt="Bhimas Food"
-              className={`absolute w-full h-full object-cover transition-opacity duration-700 ${
-                index === foodIndex ? "opacity-100" : "opacity-0"
-              }`}
-            />
-          ))}
+            {/* Slideshow Card */}
+            <div className="relative w-80 h-80 rounded-2xl overflow-hidden shadow-2xl border border-white/10">
 
-          {/* Dark Overlay */}
-          <div className="absolute inset-0 bg-black/20"></div>
+              {foodImages.map((img, index) => (
+                <div
+                  key={index}
+                  className={`absolute inset-0 transition-opacity duration-700 ${
+                    index === foodIndex ? "opacity-100" : "opacity-0"
+                  }`}
+                >
+                  <ImageWithSpinner src={img} alt="Bhimas Food" />
+                </div>
+              ))}
 
-        </div>
-      </div>
+              {/* Dark Overlay */}
+              <div className="absolute inset-0 bg-black/20 pointer-events-none z-10"></div>
+
+            </div>
+          </div>
 
 
           </div>

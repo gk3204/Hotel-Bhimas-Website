@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from "react";
 import { getRoomTypes } from "../../api/roomTypes";
+import ImageWithSpinner from "../../components/ImageWithSpinner";
 
 import doubleOrdinary from "./images/rooms/double-ordinary.png";
 import doubleDeluxe from "./images/rooms/double-deluxe.png";
@@ -26,6 +27,12 @@ const Rooms = () => {
   const [showModal, setShowModal] = useState(false);
   const [activeRoom, setActiveRoom] = useState(null);
   const [activeImage, setActiveImage] = useState(0);
+
+  /* ================= SCROLL TO TOP ON MOUNT ================= */
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
 
   /* ================= FRONTEND EXTRA DETAILS ================= */
 
@@ -113,7 +120,7 @@ const Rooms = () => {
   }, []);
 
   const handleBookNow = (roomId) => {
-    navigate(`/booking/${roomId}`);
+    navigate(`/booking`);
   };
 
   return (
@@ -136,11 +143,11 @@ const Rooms = () => {
             key={room.room_type_id}
             className="bg-white rounded-3xl shadow-lg overflow-hidden hover:shadow-2xl hover:scale-105 transition-all duration-300 group"
           >
-            <div className="relative overflow-hidden">
-              <img
+            <div className="relative overflow-hidden h-72">
+              <ImageWithSpinner
                 src={room.images?.[0]}
                 alt={room.name}
-                className="w-full h-72 object-cover group-hover:scale-110 transition-transform duration-500"
+                className="group-hover:scale-110 transition-transform duration-500"
               />
               <div className="absolute top-4 right-4 flex gap-2">
                 {room.name?.includes("AC") && (
@@ -222,25 +229,31 @@ const Rooms = () => {
             </button>
 
             <div className="flex-shrink-0">
-              <img
-                src={activeRoom.images?.[activeImage]}
-                alt={activeRoom.name}
-                className="w-full h-auto max-h-96 object-contain bg-gray-50"
-              />
+              <div className="max-h-96 bg-gray-50">
+                <ImageWithSpinner
+                  src={activeRoom.images?.[activeImage]}
+                  alt={activeRoom.name}
+                  className="max-h-96"
+                />
+              </div>
 
               <div className="flex gap-2 p-4 justify-center bg-gray-50">
                 {activeRoom.images?.map((img, index) => (
-                  <img
+                  <div
                     key={index}
-                    src={img}
-                    alt="thumbnail"
                     onClick={() => setActiveImage(index)}
-                    className={`h-16 w-20 object-cover rounded-lg cursor-pointer border-2 transition-all ${
+                    className={`h-16 w-20 rounded-lg cursor-pointer border-2 transition-all overflow-hidden ${
                       activeImage === index
                         ? "border-[#E5C07B] scale-110"
                         : "border-gray-300 hover:border-gray-400"
                     }`}
-                  />
+                  >
+                    <ImageWithSpinner
+                      src={img}
+                      alt="thumbnail"
+                      className="h-16 w-20"
+                    />
+                  </div>
                 ))}
               </div>
             </div>

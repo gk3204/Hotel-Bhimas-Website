@@ -1,21 +1,30 @@
-import React from "react";
+import React, { useEffect } from "react";
+import ImageWithSpinner from "../../components/ImageWithSpinner";
 import heroImg from "./hero.png";
 import founderImg from "./images/founder.png"; // Late Sri K. R. Gopal Iyer
 
 const AboutUs = () => {
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
+
   return (
     <div className="min-h-screen bg-[#F8FAFC]">
 
       {/* ================= HERO SECTION ================= */}
       <section
-        className="w-full h-[420px] flex items-center justify-center text-center relative"
-        style={{
-          backgroundImage: `linear-gradient(rgba(15,23,42,0.6), rgba(15,23,42,0.6)), url(${heroImg})`,
-          backgroundSize: "cover",
-          backgroundPosition: "center",
-        }}
+        className="w-full h-[420px] flex items-center justify-center text-center relative overflow-hidden"
       >
-        <div className="px-6">
+        <ImageWithSpinner
+          src={heroImg}
+          alt="Hotel Bhimas"
+          className="absolute inset-0"
+          style={{
+            position: "absolute",
+            filter: "brightness(0.4)"
+          }}
+        />
+        <div className="relative z-10 px-6">
           <h1 className="text-4xl md:text-5xl font-bold text-white mb-4">
             About <span className="text-[#E5C07B]">Hotel Bhimas</span>
           </h1>
@@ -45,11 +54,12 @@ const AboutUs = () => {
           <div className="grid md:grid-cols-2 gap-12 items-center">
 
             {/* Founder Image */}
-            <div className="flex justify-center">
-              <img
+            <div className="flex justify-center h-80">
+              <ImageWithSpinner
                 src={founderImg}
                 alt="Late Sri K. R. Gopal Iyer"
-                className="w-64 h-80 object-cover rounded-2xl shadow-lg"
+                className="rounded-2xl"
+                style={{ height: "320px" }}
               />
             </div>
 

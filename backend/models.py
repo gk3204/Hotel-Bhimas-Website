@@ -40,8 +40,6 @@ class Guest(Base):
 class Booking(Base):
     __tablename__ = "bookings"
     booking_id = Column(Integer, primary_key=True, index=True)
-    room_id = Column(Integer, ForeignKey("rooms.room_id"), index=True)
-    room_type_id = Column(Integer, ForeignKey("room_types.room_type_id"), nullable=False, index=True)
     guest_id = Column(Integer, ForeignKey("guests.guest_id"), index=True)
     check_in = Column(Date, nullable=False, index=True)
     check_out = Column(Date, nullable=False, index=True)
@@ -58,14 +56,30 @@ class Booking(Base):
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
 
     guest = relationship("Guest")
-    room_type = relationship("RoomType")
-    room = relationship("Room")
+    booking_items = relationship("BookingItem", cascade="all, delete-orphan", back_populates="booking")
 
     # Composite index for date range queries
     __table_args__ = (
         Index('idx_booking_date_range', 'check_in', 'check_out'),
         Index('idx_booking_status_date', 'status', 'check_in'),
     )
+
+
+class BookingItem(Base):
+    __tablename__ = "booking_items"
+    booking_item_id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=False, index=True)
+    room_type_id = Column(Integer, ForeignKey("room_types.room_type_id"), nullable=False, index=True)
+    room_id = Column(Integer, ForeignKey("rooms.room_id"), nullable=True, index=True)
+    quantity = Column(Integer, default=1, nullable=False)
+    base_amount = Column(Numeric(10, 2))
+    gst_amount = Column(Numeric(10, 2))
+    total_amount = Column(Numeric(10, 2), nullable=False)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+
+    room_type = relationship("RoomType")
+    room = relationship("Room")
+    booking = relationship("Booking", back_populates="booking_items")
 
 class Payment(Base):
     __tablename__ = "payments"

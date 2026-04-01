@@ -1,12 +1,13 @@
 import React, { useEffect, useState } from "react";
-import { useParams, useNavigate } from "react-router-dom";
+import { useNavigate } from "react-router-dom";
 import { apiRequest } from "../../api/api";
+import { FaPlus, FaMinus, FaUsers, FaBed, FaCoffee } from "react-icons/fa";
 
 const Booking = () => {
-  const { roomTypeId } = useParams();
   const navigate = useNavigate();
 
-  const [room, setRoom] = useState(null);
+  const [roomTypes, setRoomTypes] = useState([]);
+  const [selectedRooms, setSelectedRooms] = useState({});
   const [priceBreakdown, setPriceBreakdown] = useState(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -19,18 +20,35 @@ const Booking = () => {
     check_out: "",
   });
 
-  /* ================= FETCH ROOM ================= */
+  /* ================= SCROLL TO TOP ON MOUNT ================= */
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
+
+  /* ================= FETCH ROOM TYPES ================= */
 
   useEffect(() => {
     apiRequest("/room-types/")
       .then((data) => {
-        const selected = data.find(
-          (r) => r.room_type_id === parseInt(roomTypeId)
-        );
-        setRoom(selected);
+        setRoomTypes(data);
+        // Initialize selected rooms object
+        const initial = {};
+        data.forEach(room => {
+          initial[room.room_type_id] = 0;
+        });
+        setSelectedRooms(initial);
       })
-      .catch((err) => console.error(err));
-  }, [roomTypeId]);
+      .catch((err) => console.error("Error fetching room types:", err));
+  }, []);
+
+  /* ================= SCROLL TO TOP ON ERROR ================= */
+
+  useEffect(() => {
+    if (error) {
+      window.scrollTo(0, 0);
+    }
+  }, [error]);
 
   /* ================= HANDLE INPUT ================= */
 
@@ -39,6 +57,16 @@ const Booking = () => {
       ...formData,
       [e.target.name]: e.target.value,
     });
+  };
+
+  const handleRoomQuantityChange = (roomTypeId, quantity) => {
+    const q = parseInt(quantity) || 0;
+    if (q < 0 || q > 5) return; // Limit to 0-5
+
+    setSelectedRooms(prev => ({
+      ...prev,
+      [roomTypeId]: q
+    }));
   };
 
   const calculateNights = () => {
@@ -53,26 +81,87 @@ const Booking = () => {
     return diffDays > 0 ? diffDays : 0;
   };
 
-  const nights = calculateNights();
-  const pricePerNight = room?.price_per_night || 0;
+  /* ================= CALCULATE TOTAL PRICE ================= */
 
-  const roomBaseTotal = nights * pricePerNight;
-  const roomGST = roomBaseTotal * 0.05; // assuming 12% GST
-  const roomTotalWithGST = roomBaseTotal + roomGST;
+  const calculateTotal = () => {
+    const nights = calculateNights();
+    if (nights <= 0) return null;
+
+    let totalBase = 0;
+    let totalGST = 0;
+
+    Object.entries(selectedRooms).forEach(([roomTypeId, quantity]) => {
+      if (quantity > 0) {
+        const roomType = roomTypes.find(r => r.room_type_id === parseInt(roomTypeId));
+        if (roomType) {
+          const baseAmount = nights * roomType.price_per_night * quantity;
+          const gstAmount = baseAmount * (roomType.gst_percent / 100);
+          totalBase += baseAmount;
+          totalGST += gstAmount;
+        }
+      }
+    });
+
+    if (totalBase === 0) return null;
+
+    const roomTotal = totalBase + totalGST;
+    const convenienceBase = roomTotal * 0.02;
+    const convenienceGST = convenienceBase * 0.18;
+    const grandTotal = roomTotal + convenienceBase + convenienceGST;
+
+    return {
+      nights,
+      baseAmount: totalBase.toFixed(2),
+      gstAmount: totalGST.toFixed(2),
+      roomTotal: roomTotal.toFixed(2),
+      convenienceBase: convenienceBase.toFixed(2),
+      convenienceGST: convenienceGST.toFixed(2),
+      grandTotal: grandTotal.toFixed(2),
+    };
+  };
+
+  /* ================= VALIDATE BOOKING ================= */
+
+  const getSelectedRoomsList = () => {
+    return Object.entries(selectedRooms)
+      .filter(([_, qty]) => qty > 0)
+      .map(([roomTypeId, quantity]) => ({
+        room_type_id: parseInt(roomTypeId),
+        quantity: quantity
+      }));
+  };
+
   /* ================= HANDLE BOOKING ================= */
 
   const handleBooking = async (e) => {
     e.preventDefault();
 
+    const selectedRoomsList = getSelectedRoomsList();
+
+    if (selectedRoomsList.length === 0) {
+      setError("Please select at least one room");
+      return;
+    }
+
+    if (!formData.check_in || !formData.check_out) {
+      setError("Please select check-in and check-out dates");
+      return;
+    }
+
     try {
       setLoading(true);
+      setError(null);
 
-      // 1️⃣ Create booking
+      // 1️⃣ Create multi-room booking
       const bookingData = await apiRequest("/bookings/", {
         method: "POST",
         body: JSON.stringify({
-          ...formData,
-          room_type_id: parseInt(roomTypeId),
+          guest_name: formData.guest_name,
+          phone: formData.phone,
+          email: formData.email,
+          check_in: formData.check_in,
+          check_out: formData.check_out,
+          rooms: selectedRoomsList,
           booking_source: "website",
         }),
       });
@@ -90,10 +179,10 @@ const Booking = () => {
       openRazorpay(orderData, bookingData.booking_id);
 
     } catch (error) {
-      const errorMessage = 
+      const errorMessage =
         typeof error === 'string' ? error :
-        error?.response?.data?.detail ? error.response.data.detail :
-        error?.message || "An unexpected error occurred";
+          error?.response?.data?.detail ? error.response.data.detail :
+            error?.message || "An unexpected error occurred";
       setError(errorMessage);
     } finally {
       setLoading(false);
@@ -145,7 +234,7 @@ const Booking = () => {
             await apiRequest("/payments/verify", {
               method: "POST",
               body: JSON.stringify({
-                razorpay_order_id: orderData.order_id, // ✅ FIXED
+                razorpay_order_id: orderData.order_id,
                 status: "failed",
               }),
             });
@@ -164,118 +253,299 @@ const Booking = () => {
     rzp.open();
   };
 
-  if (!room) return <div className="p-20">Loading...</div>;
+  const priceInfo = calculateTotal();
+  const selectedRoomCount = Object.values(selectedRooms).reduce((a, b) => a + b, 0);
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] px-6 py-20">
-      <div className="max-w-4xl mx-auto bg-white p-12 rounded-3xl shadow-xl">
-        <h2 className="text-3xl font-bold text-center mb-10">
-          Book {room.name}
-        </h2>
-
-        {error && (
-        <div className="bg-red-100 text-red-700 p-3 rounded-lg mb-6 text-center">
-          {error}
+    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100 px-4 md:px-6 py-12 md:py-20">
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="text-center mb-12">
+          <h1 className="text-5xl md:text-6xl font-bold text-gray-900 mb-3">
+            Reserve Your Perfect Stay
+          </h1>
+          <p className="text-gray-600 text-lg">Choose your rooms and complete your booking in seconds</p>
         </div>
-      )}
 
-        <form onSubmit={handleBooking} className="grid md:grid-cols-2 gap-6">
+        {/* Error Alert */}
+        {error && (
+          <div className="mb-8 bg-red-50 border-l-4 border-red-500 p-4 rounded-lg animate-pulse">
+            <p className="text-red-700 font-medium">⚠️ {error}</p>
+          </div>
+        )}
 
-          <input
-            type="text"
-            name="guest_name"
-            placeholder="Full Name"
-            required
-            onChange={handleChange}
-            className="border p-3 rounded-lg"
-          />
+        <div className="grid lg:grid-cols-3 gap-8">
+          {/* LEFT SIDE - ROOM SELECTION & FORM */}
+          <div className="lg:col-span-2 space-y-8">
+            {/* ROOM SELECTION */}
+            <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
+              <div className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] p-8">
+                <h2 className="text-2xl font-bold text-white flex items-center gap-2">
+                  <FaBed size={28} />
+                  Select Your Rooms
+                </h2>
+              </div>
 
-          <input
-            type="tel"
-            name="phone"
-            placeholder="Phone"
-            required
-            onChange={handleChange}
-            className="border p-3 rounded-lg"
-          />
+              <div className="p-8">
+                {roomTypes.length === 0 ? (
+                  <div className="flex justify-center items-center h-48">
+                    <div className="text-center">
+                      <div className="animate-spin mb-4 mx-auto">
+                        <div className="h-12 w-12 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full"></div>
+                      </div>
+                      <p className="text-gray-500 font-medium">Loading available rooms...</p>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-5">
+                    {roomTypes.map((roomType) => (
+                      <div
+                        key={roomType.room_type_id}
+                        className="border-2 border-gray-100 p-6 rounded-2xl hover:border-[#E5C07B] hover:shadow-lg transition-all duration-300 bg-gradient-to-br from-white to-blue-50"
+                      >
+                        <div className="flex justify-between items-start mb-4">
+                          <div className="flex-1">
+                            <h3 className="text-xl font-bold text-gray-900 mb-2">
+                              {roomType.name}
+                            </h3>
+                            <div className="flex gap-4 flex-wrap">
+                              <div className="flex items-center gap-1 text-gray-600">
+                                <FaUsers size={16} />
+                                <span className="text-sm">Up to {roomType.max_occupancy} guests</span>
+                              </div>
+                              <div className="flex items-center gap-1 text-gray-600">
+                                <FaCoffee size={16} />
+                                <span className="text-sm">Complimentary amenities</span>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="text-right">
+                            <p className="text-3xl font-bold text-[#E5C07B] mb-1">
+                              ₹{roomType.price_per_night}
+                            </p>
+                            <p className="text-xs text-gray-500 font-medium">
+                              per night (+ {roomType.gst_percent}% GST)
+                            </p>
+                          </div>
+                        </div>
 
-          <input
-            type="email"
-            name="email"
-            placeholder="Email"
-            required
-            onChange={handleChange}
-            className="border p-3 rounded-lg md:col-span-2"
-          />
+                        {/* Interactive Quantity Selector */}
+                        <div className="flex items-center justify-between pt-4 border-t-2 border-gray-100">
+                          <label className="text-sm font-semibold text-gray-700">
+                            Number of Rooms:
+                          </label>
+                          <div className="flex items-center gap-3 bg-gray-100 rounded-full p-1">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleRoomQuantityChange(
+                                  roomType.room_type_id,
+                                  (selectedRooms[roomType.room_type_id] || 0) - 1
+                                )
+                              }
+                              className="p-2 hover:bg-white rounded-full transition text-gray-600 hover:text-[#E5C07B]"
+                            >
+                              <FaMinus size={18} />
+                            </button>
+                            <span className="w-12 text-center font-bold text-lg text-gray-900">
+                              {selectedRooms[roomType.room_type_id] || 0}
+                            </span>
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleRoomQuantityChange(
+                                  roomType.room_type_id,
+                                  (selectedRooms[roomType.room_type_id] || 0) + 1
+                                )
+                              }
+                              className="p-2 hover:bg-white rounded-full transition text-gray-600 hover:text-[#E5C07B]"
+                            >
+                              <FaPlus size={18} />
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
 
-          <input
-            type="date"
-            name="check_in"
-            required
-            onChange={handleChange}
-            className="border p-3 rounded-lg"
-          />
+            {/* GUEST & DATE DETAILS */}
+            <div className="bg-white rounded-2xl shadow-xl overflow-hidden">
+              <div className="bg-gradient-to-r from-blue-600 to-blue-700 p-8">
+                <h2 className="text-2xl font-bold text-white">Guest Information</h2>
+              </div>
 
-          <input
-            type="date"
-            name="check_out"
-            required
-            onChange={handleChange}
-            className="border p-3 rounded-lg"
-          />
+              <form onSubmit={handleBooking} className="p-8 space-y-6">
+                {/* Name and Phone */}
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Full Name *</label>
+                    <input
+                      type="text"
+                      name="guest_name"
+                      placeholder="e.g., John Doe"
+                      required
+                      value={formData.guest_name}
+                      onChange={handleChange}
+                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+                    />
+                  </div>
 
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Phone Number *</label>
+                    <input
+                      type="tel"
+                      name="phone"
+                      placeholder="e.g., +91 98765 43210"
+                      required
+                      value={formData.phone}
+                      onChange={handleChange}
+                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+                    />
+                  </div>
+                </div>
 
-          <button
-            type="submit"
-            disabled={loading}
-            className="md:col-span-2 bg-[#E5C07B] py-4 rounded-full font-semibold hover:bg-[#FCD34D]"
-          >
-            {loading ? "Processing..." : "Proceed to Payment"}
-          </button>
-        </form>
+                {/* Email */}
+                <div>
+                  <label className="block text-sm font-semibold text-gray-700 mb-2">Email Address *</label>
+                  <input
+                    type="email"
+                    name="email"
+                    placeholder="e.g., john@example.com"
+                    required
+                    value={formData.email}
+                    onChange={handleChange}
+                    className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+                  />
+                </div>
 
-        <div className="mt-10 bg-gray-50 p-6 rounded-xl">
-           <h3 className="text-xl font-bold mb-4">Price Breakdown</h3>
+                {/* Date Selection */}
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Check-In Date *</label>
+                    <input
+                      type="date"
+                      name="check_in"
+                      required
+                      value={formData.check_in}
+                      onChange={handleChange}
+                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+                    />
+                  </div>
 
-    
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Check-Out Date *</label>
+                    <input
+                      type="date"
+                      name="check_out"
+                      required
+                      value={formData.check_out}
+                      onChange={handleChange}
+                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+                    />
+                  </div>
+                </div>
 
-   {nights > 0 && (
-  <div className="md:col-span-2 mt-10 bg-gray-50 p-6 rounded-xl">
-    <h3 className="text-xl font-bold mb-4">Payment Summary</h3>
+                {/* Submit Button */}
+                {selectedRoomCount > 0 && (
+                  <button
+                    type="submit"
+                    disabled={loading || !priceInfo}
+                    className="w-full bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-white py-4 rounded-lg font-bold text-lg hover:shadow-xl hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 transition-all duration-300 mt-8"
+                  >
+                    {loading ? "🔄 Processing Payment..." : "💳 Proceed to Payment"}
+                  </button>
+                )}
 
-    {/* Room Calculation */}
-    <p>
-      {nights} Night{nights > 1 ? "s" : ""} × ₹ {pricePerNight} = ₹ {roomBaseTotal}
-    </p>
-    <p>Room GST (12%) = ₹ {roomGST.toFixed(2)}</p>
+                {selectedRoomCount === 0 && (
+                  <div className="bg-blue-50 border-l-4 border-blue-500 p-4 rounded-lg">
+                    <p className="text-blue-700 font-medium text-sm">👆 Please select at least one room above to continue</p>
+                  </div>
+                )}
+              </form>
+            </div>
+          </div>
 
-    <hr className="my-2" />
+          {/* RIGHT SIDE - PRICE SUMMARY */}
+          <div className="lg:col-span-1">
+            <div className="bg-white rounded-2xl shadow-xl overflow-hidden sticky top-24 h-fit">
+              <div className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] p-6">
+                <h2 className="text-2xl font-bold text-white">Booking Summary</h2>
+              </div>
 
-    <p className="font-semibold">
-      Room Total (Incl. GST) = ₹{" "}
-      {priceBreakdown
-        ? priceBreakdown.room_total
-        : roomTotalWithGST.toFixed(2)}
-    </p>
+              <div className="p-8">
+                {selectedRoomCount > 0 && priceInfo ? (
+                  <div className="space-y-6">
+                    {/* Selected Rooms */}
+                    <div className="pb-5 border-b-2 border-gray-100">
+                      <h3 className="text-sm font-bold text-gray-700 mb-3 uppercase tracking-wide">Selected Rooms</h3>
+                      {Object.entries(selectedRooms).map(([roomTypeId, qty]) => {
+                        if (qty === 0) return null;
+                        const room = roomTypes.find(r => r.room_type_id === parseInt(roomTypeId));
+                        return (
+                          <div key={roomTypeId} className="flex justify-between text-sm mb-2">
+                            <span className="text-gray-700">{room?.name}</span>
+                            <span className="font-bold text-gray-900">×{qty}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
 
-    {/* Show convenience fee only after backend response */}
-    {priceBreakdown && (
-      <>
-        <p>
-          Convenience Fee (Incl. GST) = ₹{" "}
-          {priceBreakdown.convenience_fee}
-        </p>
+                    {/* Stay Duration */}
+                    <div className="pb-5 border-b-2 border-gray-100">
+                      <p className="text-sm text-gray-600">
+                        <span className="font-bold text-gray-900 text-2xl">{Math.ceil(priceInfo.nights)}</span> Night{Math.ceil(priceInfo.nights) > 1 ? "s" : ""}
+                      </p>
+                    </div>
 
-        <hr className="my-3" />
+                    {/* Price Breakdown */}
+                    <div className="space-y-3 pb-5 border-b-2 border-gray-100">
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Room Charges</span>
+                        <span className="font-semibold text-gray-900">₹{priceInfo.baseAmount}</span>
+                      </div>
 
-        <p className="text-xl font-bold">
-          Total Payable = ₹ {priceBreakdown.payable_amount}
-        </p>
-      </>
-    )}
-  </div>
-)}
-  </div>
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">GST (18%)</span>
+                        <span className="font-semibold text-gray-900">₹{priceInfo.gstAmount}</span>
+                      </div>
+
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Convenience Fee</span>
+                        <span className="font-semibold text-gray-900">₹{priceInfo.convenienceBase}</span>
+                      </div>
+
+                      <div className="flex justify-between text-sm">
+                        <span className="text-gray-600">Fee GST</span>
+                        <span className="font-semibold text-gray-900">₹{priceInfo.convenienceGST}</span>
+                      </div>
+                    </div>
+
+                    {/* Total */}
+                    <div className="bg-gradient-to-r from-[#E5C07B]/10 to-[#D4AF37]/10 p-4 rounded-xl border-2 border-[#E5C07B]">
+                      <div className="flex justify-between items-center">
+                        <span className="text-sm font-bold text-gray-700 uppercase">Total Payable</span>
+                        <span className="text-3xl font-bold bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] bg-clip-text text-transparent">
+                          ₹{priceInfo.grandTotal}
+                        </span>
+                      </div>
+                    </div>
+
+                    <p className="text-xs text-gray-500 text-center mt-4">✓ Secure payment with Razorpay</p>
+                  </div>
+                ) : (
+                  <div className="text-center py-12">
+                    <div className="text-5xl mb-4">📋</div>
+                    <p className="font-semibold text-gray-900 mb-2">Select Rooms & Dates</p>
+                    <p className="text-sm text-gray-500">Your pricing will appear here</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );

@@ -2,9 +2,12 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import ContactEnquiry
-from services.email_service import send_enquiry_email
+from utils.email_service import send_enquiry_email
 from schemas import Enquiry
 from utils.auth_utils import require_reception_or_admin
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/enquiry", tags=["Enquiry"])
 
@@ -31,7 +34,7 @@ def send_enquiry(data: Enquiry, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(enquiry)
 
-    # Send email
+    # Send email via Mailjet (Railway-compatible)
     try:
         send_enquiry_email(
             name=data.name,
@@ -39,9 +42,10 @@ def send_enquiry(data: Enquiry, db: Session = Depends(get_db)):
             phone=data.phone,
             message=data.message
         )
+        logger.info(f"Enquiry email sent for {data.email}")
     except Exception as e:
         # Log but don't fail if email fails
-        print(f"Email sending failed: {str(e)}")
+        logger.error(f"Email sending failed for enquiry: {str(e)}", exc_info=True)
 
     return {
         "status": "Enquiry sent successfully",

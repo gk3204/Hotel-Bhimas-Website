@@ -1,4 +1,5 @@
-import React from "react";
+import React, { useEffect } from "react";
+import ImageWithSpinner from "../../components/ImageWithSpinner";
 import restaurantImg from "./images/ac-restaurant.png";
 import food1 from "./images/idly.png";
 import food2 from "./images/dosa.jpg";
@@ -14,6 +15,12 @@ import sweet5 from "./images/kaju.png";
 import sweet6 from "./images/mixture.png";
 
 const Restaurant = () => {
+  /* ================= SCROLL TO TOP ON MOUNT ================= */
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
+
   return (
     <div className="min-h-screen bg-[#F8FAFC]">
 
@@ -97,13 +104,13 @@ hover:-translate-y-2 hover:shadow-2xl transition-all duration-300"
           {[food1, food2, food3, food4, food5, food6].map((img, index) => (
             <div
               key={index}
-              className="w-full h-64 object-cover group-hover:scale-110 transition duration-500"
-
+              className="w-full h-64 overflow-hidden rounded-lg group"
             >
-              <img
+              <ImageWithSpinner
                 src={img}
                 alt="Food"
-                className="w-full h-64 object-cover"
+                className="group-hover:scale-110 transition duration-500"
+                style={{ height: "256px" }}
               />
             </div>
           ))}
@@ -141,12 +148,13 @@ hover:-translate-y-2 hover:shadow-2xl transition-all duration-300"
           {[sweet1, sweet2, sweet3, sweet4, sweet5, sweet6].map((img, index) => (
             <div
               key={index}
-              className="rounded-2xl overflow-hidden shadow-lg hover:shadow-2xl transition duration-300"
+              className="rounded-2xl overflow-hidden shadow-lg hover:shadow-2xl transition duration-300 h-64"
             >
-              <img
+              <ImageWithSpinner
                 src={img}
                 alt="Sweets"
-                className="w-full h-64 object-cover"
+                className=""
+                style={{ height: "256px" }}
               />
             </div>
           ))}

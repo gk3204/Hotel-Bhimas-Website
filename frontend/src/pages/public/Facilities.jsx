@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import ImageWithSpinner from "../../components/ImageWithSpinner";
 
 // HERO SLIDESHOW IMAGES
 import hero1 from "./images/rooms/double-deluxe.png";
@@ -10,8 +11,9 @@ const heroImages = [hero1, hero2, hero3];
 const Facilities = () => {
   const [current, setCurrent] = useState(0);
 
-  // Auto slideshow
+  // Auto slideshow and scroll to top
   useEffect(() => {
+    window.scrollTo(0, 0);
     const interval = setInterval(() => {
       setCurrent((prev) => (prev + 1) % heroImages.length);
     }, 2000);
@@ -29,12 +31,17 @@ const Facilities = () => {
             className={`absolute inset-0 transition-opacity duration-700 ${
               index === current ? "opacity-100" : "opacity-0"
             }`}
-            style={{
-              backgroundImage: `linear-gradient(rgba(15,23,42,0.55), rgba(15,23,42,0.55)), url(${img})`,
-              backgroundSize: "cover",
-              backgroundPosition: "center",
-            }}
-          />
+          >
+            <ImageWithSpinner
+              src={img}
+              alt="Facilities"
+              className="absolute inset-0"
+              style={{
+                position: "absolute",
+                filter: "brightness(0.45)"
+              }}
+            />
+          </div>
         ))}
 
         <div className="relative z-10 flex items-center justify-center h-full text-center px-6">

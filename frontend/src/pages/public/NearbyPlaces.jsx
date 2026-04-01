@@ -1,5 +1,6 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { Link } from "react-router-dom";
+import ImageWithSpinner from "../../components/ImageWithSpinner";
 import heroTemple from "./images/temples/balaji-padmavati.png";
 
 /* ================= DATA ================= */
@@ -111,20 +112,25 @@ const transport = [
 /* ================= COMPONENT ================= */
 
 const NearbyPlaces = () => {
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
+
   return (
     <div className="min-h-screen bg-[#F8FAFC]">
 
       {/* HERO */}
       <section
-        className="w-full h-[420px] flex items-center justify-center text-center relative"
-        style={{
-          backgroundImage: `linear-gradient(rgba(15,23,42,0.6), rgba(15,23,42,0.6)), url(${heroTemple})`,
-          backgroundSize: "cover",
-          backgroundPosition: "center",
-          minHeight: "480px"
-          }}
+        className="w-full h-[420px] flex items-center justify-center text-center relative overflow-hidden"
       >
-        <div className="px-6">
+        <ImageWithSpinner
+          src={heroTemple}
+          alt="Temples Near Tirupati"
+          className="absolute inset-0"
+          style={{ position: "absolute" }}
+        />
+        <div className="absolute inset-0 bg-black/50"></div>
+        <div className="relative z-10 px-6">
           <h1 className="text-4xl md:text-5xl font-bold text-white mb-4">
             Nearby Places Around{" "}
             <span className="text-[#E5C07B]">Hotel Bhimas</span>

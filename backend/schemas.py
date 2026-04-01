@@ -60,9 +60,13 @@ class RoomTypeUpdateDetails(BaseModel):
         return v
 
 
-class BookingCreate(BaseModel):
-    room_id: Optional[int] = None
+class BookingItemCreate(BaseModel):
     room_type_id: int = Field(..., gt=0)
+    quantity: int = Field(default=1, ge=1, le=5)
+
+
+class BookingCreate(BaseModel):
+    rooms: list[BookingItemCreate] = Field(..., min_items=1, max_items=10)
     guest_name: str = Field(..., min_length=2, max_length=100)
     phone: str = Field(..., min_length=10, max_length=15)
     email: Optional[EmailStr] = None

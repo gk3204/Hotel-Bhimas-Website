@@ -1,5 +1,6 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { sendEnquiry } from "../../api/enquiry";
+import ImageWithSpinner from "../../components/ImageWithSpinner";
 import receptionImg from "./images/reception.png";
 
 const ContactUs = () => {
@@ -12,6 +13,10 @@ const ContactUs = () => {
   });
 
   const [status, setStatus] = useState("");
+
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, []);
 
   const handleChange = (e) => {
     setFormData({ ...formData, [e.target.name]: e.target.value });

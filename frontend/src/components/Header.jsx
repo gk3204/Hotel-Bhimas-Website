@@ -23,6 +23,7 @@ const Header = () => {
           <nav className="hidden md:flex space-x-8 font-medium text-[#E5C07B]">
             <Link to="/" className="hover:text-[#FCD34D] transition">Home</Link>
             <Link to="/rooms" className="hover:text-[#FCD34D] transition">Rooms</Link>
+            <Link to="/booking" className="hover:text-[#FCD34D] transition">Booking</Link>
             <Link to="/facilities" className="hover:text-[#FCD34D] transition">Facilities</Link>
             <Link to="/restaurant" className="hover:text-[#FCD34D] transition">Restaurant</Link>
             <Link to="/about-us" className="hover:text-[#FCD34D] transition">About Us</Link>
@@ -70,6 +71,9 @@ const Header = () => {
           </Link>
           <Link to="/rooms" onClick={() => setMenuOpen(false)} className="hover:text-[#FCD34D]">
             Rooms
+          </Link>
+          <Link to="/booking" onClick={() => setMenuOpen(false)} className="hover:text-[#FCD34D]">
+            Booking
           </Link>
           <Link to="/facilities" onClick={() => setMenuOpen(false)} className="hover:text-[#FCD34D]">
             Facilities

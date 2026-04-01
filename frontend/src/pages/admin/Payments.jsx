@@ -1,10 +1,13 @@
 import React, { useEffect, useState } from "react";
 import { getAllPayments } from "../../api/payments";
+import { FaSync } from "react-icons/fa";
 
 const Payments = () => {
   const [payments, setPayments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [sortField, setSortField] = useState("created_at");
+  const [sortOrder, setSortOrder] = useState("desc");
 
   useEffect(() => {
     fetchPayments();
@@ -14,7 +17,15 @@ const Payments = () => {
     try {
       setLoading(true);
       const data = await getAllPayments();
-      setPayments(data);
+      
+      // Sort by created_at descending by default
+      const sorted = [...data].sort((a, b) => {
+        const dateA = new Date(a.created_at);
+        const dateB = new Date(b.created_at);
+        return dateB - dateA;
+      });
+      
+      setPayments(sorted);
       setError(null);
     } catch (err) {
       setError(err.message || "Failed to load payments");
@@ -24,103 +35,147 @@ const Payments = () => {
     }
   };
 
+  const getStatusColor = (status) => {
+    switch (status) {
+      case "paid":
+        return "bg-green-500/20 text-green-300 border-green-500/30";
+      case "failed":
+        return "bg-red-500/20 text-red-300 border-red-500/30";
+      case "pending":
+        return "bg-yellow-500/20 text-yellow-300 border-yellow-500/30";
+      default:
+        return "bg-blue-500/20 text-blue-300 border-blue-500/30";
+    }
+  };
+
+  const totalAmount = payments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+  const paidAmount = payments
+    .filter(p => p.status === "paid")
+    .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
+
   return (
-    <div className="space-y-6">
-      <div className="flex justify-between items-center">
-        <h1 className="text-3xl font-bold text-gray-800">Payments</h1>
-        <button
-          onClick={fetchPayments}
-          className="bg-blue-600 text-white px-4 py-2 rounded-lg hover:bg-blue-700"
-        >
-          Refresh
-        </button>
-      </div>
-
-      {error && (
-        <div className="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded">
-          {error}
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
+      <div className="max-w-7xl mx-auto">
+        {/* Header */}
+        <div className="mb-8">
+          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
+            💰 Payments Management
+          </h1>
+          <p className="text-slate-400">Track all payment transactions</p>
         </div>
-      )}
 
-      {loading ? (
-        <div className="text-center py-12">
-          <div className="inline-block animate-spin">
-            <div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full"></div>
+        {/* Stats Cards */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
+          <div className="bg-gradient-to-br from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl">
+            <p className="text-slate-400 text-sm font-medium mb-2">Total Transactions</p>
+            <p className="text-3xl font-bold text-white">{payments.length}</p>
           </div>
-          <p className="mt-4 text-gray-600">Loading payments...</p>
+          <div className="bg-gradient-to-br from-green-500/10 to-green-600/10 border border-green-500/30 p-6 rounded-2xl">
+            <p className="text-green-400 text-sm font-medium mb-2">Successfully Paid</p>
+            <p className="text-3xl font-bold text-green-300">₹{paidAmount.toFixed(2)}</p>
+          </div>
+          <div className="bg-gradient-to-br from-blue-500/10 to-blue-600/10 border border-blue-500/30 p-6 rounded-2xl">
+            <p className="text-blue-400 text-sm font-medium mb-2">Total Amount</p>
+            <p className="text-3xl font-bold text-blue-300">₹{totalAmount.toFixed(2)}</p>
+          </div>
         </div>
-      ) : payments.length === 0 ? (
-        <div className="bg-gray-100 rounded-lg p-8 text-center">
-          <p className="text-gray-600 text-lg">No payments found</p>
-        </div>
-      ) : (
-        <div className="bg-white rounded-lg shadow-lg overflow-hidden">
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead className="bg-gray-100 border-b">
-                <tr>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">
-                    Payment ID
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">
-                    Booking ID
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">
-                    Amount
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">
-                    Status
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">
-                    Gateway
-                  </th>
-                  <th className="px-6 py-3 text-left text-sm font-semibold text-gray-700">
-                    Date
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {payments.map((payment) => (
-                  <tr key={payment.payment_id} className="hover:bg-gray-50">
-                    <td className="px-6 py-4 text-sm text-gray-900">
-                      {payment.payment_id}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-900">
-                      {payment.booking_id}
-                    </td>
-                    <td className="px-6 py-4 text-sm font-medium text-gray-900">
-                      ₹{parseFloat(payment.amount).toFixed(2)}
-                    </td>
-                    <td className="px-6 py-4 text-sm">
-                      <span
-                        className={`px-3 py-1 rounded-full text-xs font-semibold ${
-                          payment.status === "paid"
-                            ? "bg-green-100 text-green-800"
-                            : payment.status === "failed"
-                            ? "bg-red-100 text-red-800"
-                            : "bg-yellow-100 text-yellow-800"
-                        }`}
-                      >
-                        {payment.status?.toUpperCase()}
-                      </span>
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-900">
-                      {payment.gateway || "N/A"}
-                    </td>
-                    <td className="px-6 py-4 text-sm text-gray-600">
-                      {new Date(payment.created_at).toLocaleDateString()}{" "}
-                      {new Date(payment.created_at).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
-                    </td>
+
+        {/* Error State */}
+        {error && (
+          <div className="bg-red-500/20 border border-red-500/50 text-red-300 px-6 py-4 rounded-xl mb-8 flex items-center justify-between">
+            <span>❌ {error}</span>
+            <button
+              onClick={fetchPayments}
+              className="bg-red-600 hover:bg-red-700 px-4 py-2 rounded-lg transition font-medium text-sm"
+            >
+              Retry
+            </button>
+          </div>
+        )}
+
+        {/* Loading State */}
+        {loading ? (
+          <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl p-12 flex items-center justify-center backdrop-blur">
+            <div className="text-center">
+              <div className="animate-spin mb-4 mx-auto inline-block">
+                <div className="h-12 w-12 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full"></div>
+              </div>
+              <p className="text-slate-400 font-medium">Loading payments...</p>
+            </div>
+          </div>
+        ) : payments.length === 0 ? (
+          <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl p-12 text-center backdrop-blur">
+            <div className="text-5xl mb-4">📭</div>
+            <p className="text-slate-300 text-lg font-medium">No payments found</p>
+            <p className="text-slate-500 text-sm mt-2">No payment records yet</p>
+          </div>
+        ) : (
+          <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl shadow-xl overflow-hidden backdrop-blur">
+            {/* Header with Refresh */}
+            <div className="p-6 border-b border-slate-700 flex items-center justify-between">
+              <h2 className="text-xl font-semibold">📊 Payment Transactions</h2>
+              <button
+                onClick={fetchPayments}
+                className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-white font-medium transition flex items-center gap-2"
+              >
+                <FaSync size={14} /> Refresh
+              </button>
+            </div>
+
+            {/* Table */}
+            <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
+              <table className="w-full text-left">
+                <thead className="bg-slate-900/80 sticky top-0 border-b border-slate-700">
+                  <tr>
+                    <th className="px-6 py-4 font-semibold text-sm">Payment ID</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Booking ID</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Amount</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Status</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Gateway</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Date & Time</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y divide-slate-700">
+                  {payments.map((payment) => (
+                    <tr key={payment.payment_id} className="hover:bg-slate-700/30 transition">
+                      <td className="px-6 py-4 text-sm font-mono text-[#FCD34D]">
+                        {payment.payment_id}
+                      </td>
+                      <td className="px-6 py-4 text-sm font-semibold text-slate-300">
+                        #{payment.booking_id}
+                      </td>
+                      <td className="px-6 py-4 text-sm font-bold text-[#E5C07B]">
+                        ₹{parseFloat(payment.amount).toFixed(2)}
+                      </td>
+                      <td className="px-6 py-4 text-sm">
+                        <span
+                          className={`px-3 py-1 rounded-full text-xs font-semibold border ${getStatusColor(payment.status)}`}
+                        >
+                          {payment.status?.toUpperCase() || "PENDING"}
+                        </span>
+                      </td>
+                      <td className="px-6 py-4 text-sm text-slate-300">
+                        {payment.gateway || "—"}
+                      </td>
+                      <td className="px-6 py-4 text-sm text-slate-400">
+                        <div>
+                          {new Date(payment.created_at).toLocaleDateString()}
+                        </div>
+                        <div className="text-xs">
+                          {new Date(payment.created_at).toLocaleTimeString([], {
+                            hour: "2-digit",
+                            minute: "2-digit",
+                          })}
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 };
