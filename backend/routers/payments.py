@@ -37,15 +37,22 @@ def get_db():
         db.close()
 
 
-# Initialize Razorpay client only if available
-razorpay_client = None
-if RAZORPAY_AVAILABLE:
+def get_razorpay_client():
+    if not RAZORPAY_AVAILABLE:
+        return None
+
+    key = os.getenv("RAZORPAY_KEY_ID")
+    secret = os.getenv("RAZORPAY_KEY_SECRET")
+
+    if not key or not secret:
+        logger.error("❌ Razorpay keys missing")
+        return None
+
     try:
-        razorpay_client = razorpay.Client(
-            auth=(os.getenv("RAZORPAY_KEY_ID"), os.getenv("RAZORPAY_KEY_SECRET"))
-        )
+        return razorpay.Client(auth=(key, secret))
     except Exception as e:
-        logger.warning(f"⚠️ Failed to initialize Razorpay: {e}")
+        logger.error(f"❌ Razorpay init failed: {e}")
+        return None
 
 
 # 📊 GET all payments (admin only)
@@ -76,11 +83,11 @@ def get_payment(payment_id: int, db: Session = Depends(get_db)):
 
 @router.post("/create-order/{booking_id}")
 def create_payment_order(booking_id: int, db: Session = Depends(get_db)):
-    """Create payment order"""
-    if not RAZORPAY_AVAILABLE or not razorpay_client:
+    razorpay_client = get_razorpay_client()
+
+    if not razorpay_client:
         logger.error("Razorpay is not available")
-        raise HTTPException(status_code=503, detail="Payment service is temporarily unavailable. Please try again later.")
-    
+        raise HTTPException(status_code=503, detail="Payment service unavailable")
     try:
         booking = db.query(Booking).filter(
             Booking.booking_id == booking_id,

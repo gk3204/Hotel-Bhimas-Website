@@ -54,7 +54,7 @@ def send_booking_email(booking_data, pdf_path):
     # ✅ PUBLIC LOGO URL (NO CID)
     logo_url = os.getenv(
         "LOGO_URL",
-        "https://hotel-bhimas-website.vercel.app/logo-gold.png"
+        "https://res.cloudinary.com/dgjqjcowj/image/upload/v1775060597/logo-gold_fue1rl.png"
     )
 
     # 🔥 HTML (UNCHANGED except logo)
