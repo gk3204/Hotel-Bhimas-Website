@@ -19,5 +19,25 @@ export async function getRoomTypes() {
   }
 }
 
+export async function checkRoomAvailability(roomTypeId, checkIn, checkOut) {
+  try {
+    const response = await fetch(
+      `${BASE_URL}/room-type-availability/check-availability/${roomTypeId}?check_in=${checkIn}&check_out=${checkOut}`,
+      {
+        method: "GET",
+      }
+    );
+
+    if (!response.ok) {
+      throw new Error("Failed to check availability");
+    }
+
+    return await response.json();
+  } catch (err) {
+    console.error("Error checking availability:", err);
+    throw err;
+  }
+}
+
 
 

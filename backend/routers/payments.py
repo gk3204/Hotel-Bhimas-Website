@@ -286,6 +286,7 @@ def mark_failed(booking_id: int, db: Session = Depends(get_db)):
 
 @router.post("/retry/{booking_id}")
 def retry_payment(booking_id: int, db: Session = Depends(get_db)):
+    razorpay_client = get_razorpay_client()
     booking = db.query(Booking).filter(
         Booking.booking_id == booking_id
     ).first()

@@ -88,10 +88,36 @@ def create_booking(
                             f"Reason: {blocked.reason or 'Rooms fully booked'}"
                 )
             
+            # 4️⃣ Check room count availability - ensure enough rooms exist
+            booked_rooms = db.query(func.sum(BookingItem.quantity)).filter(
+                BookingItem.room_type_id == room_item.room_type_id,
+                BookingItem.booking_id.in_(
+                    db.query(Booking.booking_id).filter(
+                        Booking.status.in_(["confirmed", "pending_payment"]),
+                        Booking.check_in < data.check_out,
+                        Booking.check_out > data.check_in
+                    )
+                )
+            ).scalar() or 0
+
+            available_rooms = room_type.total_rooms - booked_rooms
+            requested_rooms = room_item.quantity
+
+            if requested_rooms > available_rooms:
+                logger.warning(
+                    f"Insufficient rooms: Room type {room_item.room_type_id} has {available_rooms} available "
+                    f"but {requested_rooms} requested (Total: {room_type.total_rooms}, Booked: {booked_rooms})"
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Not enough {room_type.name}s available. "
+                            f"Available: {available_rooms}/{room_type.total_rooms}, Requested: {requested_rooms}"
+                )
+            
             room_types_map[room_item.room_type_id] = room_type
             logger.debug(
                 f"Room type {room_item.room_type_id} availability check passed "
-                f"for {data.check_in}-{data.check_out}"
+                f"for {data.check_in}-{data.check_out} ({requested_rooms} rooms selected, {available_rooms} available)"
             )
 
         # 4️⃣ Create guest

@@ -8,9 +8,17 @@ export async function getRoomTypes() {
 
 export async function createRoomType(data) {
   const res = await fetch(
-    `${BASE_URL}/room-types/?name=${data.name}&price_per_night=${data.price}&gst_percent=${data.gst}&max_occupancy=${data.occupancy}`,
+    `${BASE_URL}/room-types/`,
     {
       method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: data.name,
+        price_per_night: parseFloat(data.price),
+        gst_percent: parseFloat(data.gst),
+        max_occupancy: parseInt(data.occupancy),
+        total_rooms: parseInt(data.total_rooms) || 1,
+      }),
     }
   );
 

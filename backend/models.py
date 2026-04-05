@@ -19,6 +19,7 @@ class RoomType(Base):
     price_per_night = Column(Numeric(10, 2), nullable=False)
     gst_percent = Column(Float, nullable=False)
     max_occupancy = Column(Integer, nullable=False)
+    total_rooms = Column(Integer, nullable=False, default=1)  # Total count of rooms available
     is_active = Column(Boolean, default=True, index=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
 

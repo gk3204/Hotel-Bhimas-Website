@@ -18,6 +18,7 @@ const RoomTypes = () => {
     price: "",
     gst: "",
     occupancy: "",
+    total_rooms: "",
   });
 
   useEffect(() => {
@@ -49,7 +50,7 @@ const RoomTypes = () => {
 
     try {
       await createRoomType(formData);
-      setFormData({ name: "", price: "", gst: "", occupancy: "" });
+      setFormData({ name: "", price: "", gst: "", occupancy: "", total_rooms: "" });
       loadRoomTypes();
       showToast("Room type created successfully");
     } catch (err) {
@@ -64,6 +65,7 @@ const RoomTypes = () => {
         price_per_night: editingRoom.price_per_night,
         gst_percent: editingRoom.gst_percent,
         max_occupancy: editingRoom.max_occupancy,
+        total_rooms: editingRoom.total_rooms,
       });
 
       setEditingRoom(null);
@@ -91,7 +93,7 @@ const RoomTypes = () => {
             <FaPlus size={20} /> Add New Room Type
           </h2>
 
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
             <InputField
               label="Room Name"
               name="name"
@@ -124,6 +126,15 @@ const RoomTypes = () => {
               type="number"
               placeholder="e.g., 4"
               value={formData.occupancy}
+              onChange={handleChange}
+            />
+
+            <InputField
+              label="Total Rooms"
+              name="total_rooms"
+              type="number"
+              placeholder="e.g., 10"
+              value={formData.total_rooms}
               onChange={handleChange}
             />
           </div>
@@ -166,6 +177,7 @@ const RoomTypes = () => {
                     <th className="px-6 py-4 font-semibold text-sm">Price/Night</th>
                     <th className="px-6 py-4 font-semibold text-sm">GST</th>
                     <th className="px-6 py-4 font-semibold text-sm">Occupancy</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Total Rooms</th>
                     <th className="px-6 py-4 font-semibold text-sm">Status</th>
                     <th className="px-6 py-4 font-semibold text-sm">Actions</th>
                   </tr>
@@ -182,6 +194,7 @@ const RoomTypes = () => {
                       <td className="px-6 py-4 text-[#E5C07B] font-bold">₹{room.price_per_night}</td>
                       <td className="px-6 py-4 text-slate-300">{room.gst_percent}%</td>
                       <td className="px-6 py-4 text-slate-300">{room.max_occupancy} guests</td>
+                      <td className="px-6 py-4 text-slate-300 font-semibold">{room.total_rooms}</td>
                       <td className="px-6 py-4">
                         <span
                           className={`px-3 py-1 rounded-full text-xs font-bold border ${
@@ -278,6 +291,18 @@ const RoomTypes = () => {
                     setEditingRoom({
                       ...editingRoom,
                       max_occupancy: e.target.value,
+                    })
+                  }
+                />
+
+                <InputField
+                  label="Total Rooms"
+                  type="number"
+                  value={editingRoom.total_rooms}
+                  onChange={(e) =>
+                    setEditingRoom({
+                      ...editingRoom,
+                      total_rooms: e.target.value,
                     })
                   }
                 />

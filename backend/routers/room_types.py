@@ -26,17 +26,15 @@ def get_room_types(db: Session = Depends(get_db)):
 # CREATE room type
 @router.post("/")
 def create_room_type(
-    name: str,
-    price_per_night: float,
-    gst_percent: float,
-    max_occupancy: int,
+    data: RoomTypeCreate,
     db: Session = Depends(get_db)
 ):
     room_type = RoomType(
-        name=name,
-        price_per_night=price_per_night,
-        gst_percent=gst_percent,
-        max_occupancy=max_occupancy,
+        name=data.name,
+        price_per_night=data.price_per_night,
+        gst_percent=data.gst_percent,
+        max_occupancy=data.max_occupancy,
+        total_rooms=data.total_rooms,
         is_active=True
     )
 

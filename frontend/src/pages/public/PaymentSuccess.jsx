@@ -27,7 +27,11 @@ const PaymentSuccess = () => {
 
         {/* ✅ Email Notification Message */}
         <div className="bg-green-100 text-green-700 p-4 rounded-xl mb-6 text-sm">
-          You will receive an email confirmation shortly with your booking details.
+          <p className="font-semibold mb-2">📧 Confirmation Email Sent</p>
+          <p>You will receive an email confirmation shortly with your booking details.</p>
+          <p className="text-xs mt-2 pt-2 border-t border-green-200">
+            💡 <span className="font-semibold">Tip:</span> If you don't see it in inbox folder, please check your spam folder.
+          </p>
         </div>
 
         <button

@@ -86,6 +86,14 @@ const PaymentFailed = () => {
           Your booking is still reserved. Please retry payment to confirm it.
         </p>
 
+        {/* 💳 Refund Information */}
+        <div className="bg-blue-50 border border-blue-200 rounded-xl p-4 mb-6 text-sm">
+          <p className="text-blue-700 font-semibold mb-2">💳 Refund Information</p>
+          <p className="text-blue-600 text-xs">
+            If any amount has been deducted from your account, it will be automatically returned to your original payment method within <span className="font-semibold">5-7 working days</span>.
+          </p>
+        </div>
+
         <div className="flex flex-col gap-4 mt-6">
           <button
             onClick={handleRetry}
