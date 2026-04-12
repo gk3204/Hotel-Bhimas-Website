@@ -46,7 +46,7 @@ def send_booking_email(booking_data, pdf_path):
     # Go to your Cloudinary console and get the direct /image/upload/ URL without the version
     logo_url = os.getenv(
         "LOGO_URL",
-        "https://res.cloudinary.com/dgjqjcowj/image/upload/logo-gold_fue1rl.png"
+        "https://hotelbhimas.in/logo-final.png"
     )
 
     check_in_str = booking_data['check_in'].strftime("%d %B %Y")
@@ -100,12 +100,9 @@ Email: hotelbhimas@gmail.com
 
             <!-- ✅ FIX: explicit width/height, alt text, border=0, display:block -->
             <img src="{logo_url}"
-                 alt="Hotel Bhimas Logo"
-                 width="100"
-                 height="100"
-                 border="0"
-                 style="display:block; margin:0 auto 12px auto; outline:none; text-decoration:none;" />
-
+              alt="Hotel Bhimas"
+              width="150"
+              style="display:block; margin:0 auto; border:0; outline:none; text-decoration:none;">
             <h1 style="color:#D4AF37; font-family:Arial,sans-serif; font-size:26px;
                         letter-spacing:3px; margin:0 0 6px 0; padding:0;">
               HOTEL BHIMAS
