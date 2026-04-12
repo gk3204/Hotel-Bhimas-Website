@@ -154,13 +154,15 @@ const UserManagement = () => {
               <>
                 <button
                   onClick={handleUpdate}
-                  className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] hover:shadow-lg text-slate-900 font-bold px-8 py-3 rounded-lg transition-all duration-300 hover:scale-105 flex items-center gap-2"
+                  disabled={loading}
+                  className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] hover:shadow-lg text-slate-900 font-bold px-8 py-3 rounded-lg transition-all duration-300 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center gap-2"
                 >
-                  Save Changes
+                  {loading ? "⏳ Updating..." : "Save Changes"}
                 </button>
                 <button
                   onClick={resetForm}
-                  className="bg-slate-700 hover:bg-slate-600 px-8 py-3 rounded-lg font-medium transition"
+                  disabled={loading}
+                  className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-8 py-3 rounded-lg font-medium transition"
                 >
                   Cancel
                 </button>
@@ -168,9 +170,10 @@ const UserManagement = () => {
             ) : (
               <button
                 onClick={handleCreate}
-                className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] hover:shadow-lg text-slate-900 font-bold px-8 py-3 rounded-lg transition-all duration-300 hover:scale-105 flex items-center gap-2"
+                disabled={loading}
+                className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] hover:shadow-lg text-slate-900 font-bold px-8 py-3 rounded-lg transition-all duration-300 hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 flex items-center gap-2"
               >
-                <FaPlus size={16} /> Create User
+                <FaPlus size={16} /> {loading ? "Creating..." : "Create User"}
               </button>
             )}
           </div>

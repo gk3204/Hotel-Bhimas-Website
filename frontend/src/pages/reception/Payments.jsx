@@ -120,9 +120,10 @@ const Payments = () => {
               <h2 className="text-xl font-semibold">📊 Payment Transactions</h2>
               <button
                 onClick={fetchPayments}
-                className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-white font-medium transition flex items-center gap-2"
+                disabled={loading}
+                className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2 rounded-lg text-white font-medium transition flex items-center gap-2"
               >
-                <FaSync size={14} /> Refresh
+                <FaSync size={14} className={loading ? "animate-spin" : ""} /> {loading ? "Loading..." : "Refresh"}
               </button>
             </div>
 

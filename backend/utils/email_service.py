@@ -202,7 +202,7 @@ Email: hotelbhimas@gmail.com
                     "TextPart": text_body,
                     "HTMLPart": email_body,
                     "Attachments": pdf_attachments,
-                   # "ReplyTo": {"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"},
+                    "ReplyTo": {"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"},
                     "Headers": {
                         # ✅ FIX: Proper headers to improve deliverability
                         "X-Entity-Ref-ID": str(booking_data['booking_id']),

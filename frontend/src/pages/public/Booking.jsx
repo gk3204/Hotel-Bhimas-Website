@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { apiRequest } from "../../api/api";
 import { checkRoomAvailability } from "../../api/roomtype";
 import { FaPlus, FaMinus, FaUsers, FaBed, FaCoffee } from "react-icons/fa";
+import LoadingSpinner from "../../components/LoadingSpinner";
 
 const Booking = () => {
   const navigate = useNavigate();
@@ -12,6 +13,7 @@ const Booking = () => {
   const [availability, setAvailability] = useState({});
   const [priceBreakdown, setPriceBreakdown] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [paymentLoading, setPaymentLoading] = useState(false);
   const [error, setError] = useState(null);
 
   const [formData, setFormData] = useState({
@@ -235,6 +237,7 @@ const Booking = () => {
 
       handler: async function (response) {
         try {
+          setPaymentLoading(true);
           await apiRequest("/payments/verify", {
             method: "POST",
             body: JSON.stringify({
@@ -248,12 +251,15 @@ const Booking = () => {
           navigate(`/payment-success/${bookingId}`);
         } catch {
           navigate(`/payment-failed/${bookingId}`);
+        } finally {
+          setPaymentLoading(false);
         }
       },
 
       modal: {
         ondismiss: async function () {
           try {
+            setPaymentLoading(true);
             await apiRequest("/payments/verify", {
               method: "POST",
               body: JSON.stringify({
@@ -263,9 +269,10 @@ const Booking = () => {
             });
           } catch (err) {
             console.error("Failed to mark payment as failed");
+          } finally {
+            setPaymentLoading(false);
+            navigate(`/payment-failed/${bookingId}`);
           }
-
-          navigate(`/payment-failed/${bookingId}`);
         },
       },
 
@@ -280,8 +287,12 @@ const Booking = () => {
   const selectedRoomCount = Object.values(selectedRooms).reduce((a, b) => a + b, 0);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100 px-4 md:px-6 py-12 md:py-20">
-      <div className="max-w-7xl mx-auto">
+    <>
+      {/* Loading Spinner for Payment Processing */}
+      {paymentLoading && <LoadingSpinner message="Processing your payment..." />}
+      
+      <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100 px-4 md:px-6 py-12 md:py-20">
+        <div className="max-w-7xl mx-auto">
         {/* Header */}
         <div className="text-center mb-12">
           <h1 className="text-5xl md:text-6xl font-bold text-gray-900 mb-3">
@@ -520,10 +531,10 @@ const Booking = () => {
                 {selectedRoomCount > 0 && (
                   <button
                     type="submit"
-                    disabled={loading || !priceInfo}
+                    disabled={loading || paymentLoading || !priceInfo}
                     className="w-full bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-white py-4 rounded-lg font-bold text-lg hover:shadow-xl hover:scale-105 disabled:opacity-50 disabled:cursor-not-allowed disabled:hover:scale-100 transition-all duration-300 mt-8"
                   >
-                    {loading ? "🔄 Processing Payment..." : "💳 Proceed to Payment"}
+                    {loading || paymentLoading ? "🔄 Processing..." : "💳 Proceed to Payment"}
                   </button>
                 )}
 
@@ -612,6 +623,7 @@ const Booking = () => {
         </div>
       </div>
     </div>
+    </>
   );
 };
 

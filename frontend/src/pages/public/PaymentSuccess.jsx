@@ -1,9 +1,25 @@
 import React from "react";
 import { useNavigate, useParams } from "react-router-dom";
+import { useEffect, useState } from "react";
+import LoadingSpinner from "../../components/LoadingSpinner";
 
 const PaymentSuccess = () => {
   const navigate = useNavigate();
   const { bookingId } = useParams();
+  const [isLoading, setIsLoading] = useState(true);
+
+  useEffect(() => {
+    // Show loading screen briefly for confirmation experience
+    const timer = setTimeout(() => {
+      setIsLoading(false);
+    }, 1500);
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  if (isLoading) {
+    return <LoadingSpinner message="Confirming your payment..." />;
+  }
 
   return (
     <div className="min-h-screen flex items-center justify-center bg-green-50 px-6">

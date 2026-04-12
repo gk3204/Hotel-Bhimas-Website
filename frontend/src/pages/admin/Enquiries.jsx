@@ -70,9 +70,10 @@ const Enquiries = () => {
           </div>
           <button
             onClick={fetchEnquiries}
-            className="bg-slate-700 hover:bg-slate-600 px-6 py-3 rounded-lg font-semibold transition flex items-center gap-2"
+            disabled={loading}
+            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-semibold transition flex items-center gap-2"
           >
-            <FaSync size={16} /> Refresh
+            <FaSync size={16} className={loading ? "animate-spin" : ""} /> {loading ? "Loading..." : "Refresh"}
           </button>
         </div>
 
