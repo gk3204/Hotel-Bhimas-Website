@@ -31,11 +31,7 @@ def create_booking(
     data: BookingCreate,
     db: Session = Depends(get_db)
 ):
-    """Create multi-room booking with proper validation and error handling
-    
-    Uses SELECT ... FOR UPDATE to prevent race conditions when multiple users 
-    book concurrently, ensuring no overbooking occurs.
-    """
+    """Create multi-room booking with proper validation and error handling"""
     try:
         # Cancel expired bookings first
         expired = expire_pending_bookings(db)
@@ -93,7 +89,6 @@ def create_booking(
                 )
             
             # 4️⃣ Check room count availability - ensure enough rooms exist
-            # Use SELECT ... FOR UPDATE to lock rows and prevent race conditions
             booked_rooms = db.query(func.sum(BookingItem.quantity)).filter(
                 BookingItem.room_type_id == room_item.room_type_id,
                 BookingItem.booking_id.in_(
@@ -101,9 +96,8 @@ def create_booking(
                         Booking.status.in_(["confirmed", "pending_payment"]),
                         Booking.check_in < data.check_out,
                         Booking.check_out > data.check_in
-                    ).with_for_update()  # 🔒 Lock booking rows to prevent concurrent overbooking
+                    )
                 )
-            ).scalar() or 0
             ).scalar() or 0
 
             available_rooms = room_type.total_rooms - booked_rooms
