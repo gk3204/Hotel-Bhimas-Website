@@ -198,7 +198,7 @@ Email: hotelbhimas@gmail.com
                     "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas"},
                     "To": guest_recipients,
                     # ✅ FIX: Subject without special currency symbols
-                    "Subject": f"Your Booking is Confirmed - Hotel Bhimas (ID: {booking_data['booking_id']})",
+                    "Subject": "Booking Confirmation - Hotel Bhimas",
                     "TextPart": text_body,
                     "HTMLPart": email_body,
                     "Attachments": pdf_attachments,
