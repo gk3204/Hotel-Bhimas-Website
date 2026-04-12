@@ -109,6 +109,19 @@ def create_payment_order(booking_id: int, db: Session = Depends(get_db)):
             "payment_capture": 1  # auto capture
         })
 
+        # 🔒 Check if payment order already exists (prevent duplicate orders)
+        existing_payment = db.query(Payment).filter(
+            Payment.booking_id == booking.booking_id,
+            Payment.status.in_(["created", "paid"])
+        ).first()
+        
+        if existing_payment:
+            logger.warning(f"Duplicate payment order attempt for booking {booking_id}")
+            raise HTTPException(
+                status_code=409, 
+                detail="Payment already in progress for this booking. Please complete or cancel it first."
+            )
+        
         # Save payment record
         payment = Payment(
             booking_id=booking.booking_id,
@@ -154,17 +167,25 @@ async def verify_payment(
 
     payment = db.query(Payment).filter(
         Payment.order_id == razorpay_order_id
-    ).first()
+    ).with_for_update().first()  # 🔒 Lock to prevent double-verify
 
     if not payment:
         raise HTTPException(status_code=404, detail="Payment record not found")
+    
+    # 🔒 Prevent double verification
+    if payment.status in ["paid", "failed"]:
+        logger.warning(f"Attempt to re-verify already processed payment: {razorpay_order_id}")
+        raise HTTPException(
+            status_code=400,
+            detail="Payment has already been processed"
+        )
 
     booking = db.query(Booking).options(
         joinedload(Booking.guest),
         joinedload(Booking.booking_items).joinedload(BookingItem.room_type)
     ).filter(
         Booking.booking_id == payment.booking_id
-    ).first()
+    ).with_for_update().first()  # 🔒 Lock booking to prevent concurrent modification
 
     # ❌ If payment failed
     if payment_status != "success":
@@ -184,13 +205,26 @@ async def verify_payment(
 
     if not hmac.compare_digest(generated_signature, razorpay_signature):
         payment.status = "failed"
-        booking.status = "payment_failed"   # ✅ FIXED
+        booking.status = "cancelled"   # 🔒 Cancel to free rooms
+        booking.cancelled_at = datetime.utcnow()
+        booking.cancel_reason = "Invalid payment signature"
         db.commit()
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     # ✅ Payment success
     payment.payment_id_gateway = razorpay_payment_id
     payment.status = "paid"
+    
+    # 🔒 Check booking hasn't expired before confirming
+    if booking.status == "cancelled":
+        logger.warning(f"Cannot confirm expired booking {booking.booking_id}")
+        payment.status = "failed"
+        db.commit()
+        raise HTTPException(
+            status_code=400,
+            detail="Booking has expired. Please create a new booking."
+        )
+    
     booking.status = "confirmed"
 
     db.commit()
