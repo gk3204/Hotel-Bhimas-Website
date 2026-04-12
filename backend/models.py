@@ -55,6 +55,7 @@ class Booking(Base):
     cancelled_at = Column(DateTime)
     cancel_reason = Column(String(100))
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
 
     guest = relationship("Guest")
     booking_items = relationship("BookingItem", cascade="all, delete-orphan", back_populates="booking")

@@ -143,12 +143,12 @@ def check_room_availability(
             "block_reason": blocked_date.reason or "Rooms not available for selected dates"
         }
     
-    # Count booked rooms for overlapping dates (only confirmed & pending_payment bookings)
+    # Count booked rooms for overlapping dates (only confirmed & pending_payment & payment_pending bookings)
     booked_rooms = db.query(func.sum(BookingItem.quantity)).filter(
         BookingItem.room_type_id == room_type_id,
         BookingItem.booking_id.in_(
             db.query(Booking.booking_id).filter(
-                Booking.status.in_(["confirmed", "pending_payment"]),
+                Booking.status.in_(["confirmed", "pending_payment", "payment_pending"]),
                 Booking.check_in < check_out_date,
                 Booking.check_out > check_in_date
             )

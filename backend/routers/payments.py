@@ -190,9 +190,7 @@ async def verify_payment(
     # ❌ If payment failed
     if payment_status != "success":
         payment.status = "failed"
-        booking.status = "cancelled"   # 🔒 Cancel booking to free up rooms for other users
-        booking.cancel_reason = "Payment failed - user can retry with new booking"
-        booking.cancelled_at = datetime.utcnow()
+        booking.status = "payment_pending"   # 🔒 Keep booking reserved for retry, don't free rooms
         db.commit()
         return {"message": "Payment failed"}
 
@@ -316,10 +314,10 @@ def mark_failed(booking_id: int, db: Session = Depends(get_db)):
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    booking.status = "payment_failed"
+    booking.status = "payment_pending"
     db.commit()
 
-    return {"message": "Booking marked as failed"}
+    return {"message": "Booking marked as payment pending"}
 
 @router.post("/retry/{booking_id}")
 def retry_payment(booking_id: int, db: Session = Depends(get_db)):
@@ -333,8 +331,8 @@ def retry_payment(booking_id: int, db: Session = Depends(get_db)):
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    # Allow retry for cancelled, payment_failed, or pending_payment bookings
-    if booking.status not in ["payment_failed", "pending_payment", "cancelled"]:
+    # Allow retry for payment_pending or pending_payment bookings
+    if booking.status not in ["payment_pending", "pending_payment"]:
         raise HTTPException(status_code=400, detail="Retry not allowed for this booking status")
 
     # 🔒 Re-validate availability before allowing retry (prevent overbooking)
@@ -383,8 +381,6 @@ def retry_payment(booking_id: int, db: Session = Depends(get_db)):
 
     # Reactivate the booking for retry
     booking.status = "pending_payment"
-    booking.cancelled_at = None  # Clear cancellation if it was cancelled
-    booking.cancel_reason = None
 
     db.add(payment)
     db.commit()
