@@ -12,7 +12,7 @@ const PaymentSuccess = () => {
     // Show loading screen briefly for confirmation experience
     const timer = setTimeout(() => {
       setIsLoading(false);
-    }, 1500);
+    }, 2000);
 
     return () => clearTimeout(timer);
   }, []);

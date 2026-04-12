@@ -4,6 +4,7 @@ import { apiRequest } from "../../api/api";
 import { checkRoomAvailability } from "../../api/roomtype";
 import { FaPlus, FaMinus, FaUsers, FaBed, FaCoffee } from "react-icons/fa";
 import LoadingSpinner from "../../components/LoadingSpinner";
+import { withMinimumDelay } from "../../utils/loadingDelay";
 
 const Booking = () => {
   const navigate = useNavigate();
@@ -187,27 +188,31 @@ const Booking = () => {
       setError(null);
 
       // 1️⃣ Create multi-room booking
-      const bookingData = await apiRequest("/bookings/", {
-        method: "POST",
-        body: JSON.stringify({
-          guest_name: formData.guest_name,
-          phone: formData.phone,
-          email: formData.email,
-          check_in: formData.check_in,
-          check_out: formData.check_out,
-          rooms: selectedRoomsList,
-          booking_source: "website",
-        }),
-      });
+      const bookingData = await withMinimumDelay(
+        apiRequest("/bookings/", {
+          method: "POST",
+          body: JSON.stringify({
+            guest_name: formData.guest_name,
+            phone: formData.phone,
+            email: formData.email,
+            check_in: formData.check_in,
+            check_out: formData.check_out,
+            rooms: selectedRoomsList,
+            booking_source: "website",
+          }),
+        })
+      );
 
       setPriceBreakdown(bookingData);
 
       // 2️⃣ Create Razorpay order
-      const orderData = await apiRequest(
-        `/payments/create-order/${bookingData.booking_id}`,
-        {
-          method: "POST",
-        }
+      const orderData = await withMinimumDelay(
+        apiRequest(
+          `/payments/create-order/${bookingData.booking_id}`,
+          {
+            method: "POST",
+          }
+        )
       );
 
       openRazorpay(orderData, bookingData.booking_id);
@@ -238,15 +243,17 @@ const Booking = () => {
       handler: async function (response) {
         try {
           setPaymentLoading(true);
-          await apiRequest("/payments/verify", {
-            method: "POST",
-            body: JSON.stringify({
-              razorpay_order_id: response.razorpay_order_id,
-              razorpay_payment_id: response.razorpay_payment_id,
-              razorpay_signature: response.razorpay_signature,
-              status: "success",
-            }),
-          });
+          await withMinimumDelay(
+            apiRequest("/payments/verify", {
+              method: "POST",
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+                status: "success",
+              }),
+            })
+          );
 
           navigate(`/payment-success/${bookingId}`);
         } catch {
@@ -260,13 +267,15 @@ const Booking = () => {
         ondismiss: async function () {
           try {
             setPaymentLoading(true);
-            await apiRequest("/payments/verify", {
-              method: "POST",
-              body: JSON.stringify({
-                razorpay_order_id: orderData.order_id,
-                status: "failed",
-              }),
-            });
+            await withMinimumDelay(
+              apiRequest("/payments/verify", {
+                method: "POST",
+                body: JSON.stringify({
+                  razorpay_order_id: orderData.order_id,
+                  status: "failed",
+                }),
+              })
+            );
           } catch (err) {
             console.error("Failed to mark payment as failed");
           } finally {

@@ -3,6 +3,7 @@ import { useNavigate, useParams } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { apiRequest } from "../../api/api";
 import LoadingSpinner from "../../components/LoadingSpinner";
+import { withMinimumDelay } from "../../utils/loadingDelay";
 
 const PaymentFailed = () => {
   const navigate = useNavigate();
@@ -14,7 +15,7 @@ const PaymentFailed = () => {
     // Show loading screen briefly
     const timer = setTimeout(() => {
       setIsLoading(false);
-    }, 1000);
+    }, 1500);
 
     return () => clearTimeout(timer);
   }, []);
@@ -23,9 +24,11 @@ const PaymentFailed = () => {
     try {
       setRetryLoading(true);
       // 🔹 Retry endpoint
-      const data = await apiRequest(`/payments/retry/${bookingId}`, {
-        method: "POST",
-      });
+      const data = await withMinimumDelay(
+        apiRequest(`/payments/retry/${bookingId}`, {
+          method: "POST",
+        })
+      );
 
       const options = {
         key: data.key,
@@ -40,15 +43,17 @@ const PaymentFailed = () => {
         handler: async function (response) {
           try {
             setRetryLoading(true);
-            await apiRequest("/payments/verify", {
-              method: "POST",
-              body: JSON.stringify({
-                razorpay_order_id: response.razorpay_order_id,
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_signature: response.razorpay_signature,
-                status: "success",
-              }),
-            });
+            await withMinimumDelay(
+              apiRequest("/payments/verify", {
+                method: "POST",
+                body: JSON.stringify({
+                  razorpay_order_id: response.razorpay_order_id,
+                  razorpay_payment_id: response.razorpay_payment_id,
+                  razorpay_signature: response.razorpay_signature,
+                  status: "success",
+                }),
+              })
+            );
 
             navigate(`/payment-success/${bookingId}`);
           } catch (error) {
@@ -62,13 +67,15 @@ const PaymentFailed = () => {
           ondismiss: async function () {
             try {
               setRetryLoading(true);
-              await apiRequest("/payments/verify", {
-                method: "POST",
-                body: JSON.stringify({
-                  razorpay_order_id: data.order_id,
-                  status: "failed",
-                }),
-              });
+              await withMinimumDelay(
+                apiRequest("/payments/verify", {
+                  method: "POST",
+                  body: JSON.stringify({
+                    razorpay_order_id: data.order_id,
+                    status: "failed",
+                  }),
+                })
+              );
             } catch (err) {
               console.error("Dismiss verify failed:", err);
             } finally {
