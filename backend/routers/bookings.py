@@ -89,6 +89,7 @@ def create_booking(
                 )
             
             # 4️⃣ Check room count availability - ensure enough rooms exist
+            # Only count confirmed & pending_payment (cancelled/failed don't block rooms)
             booked_rooms = db.query(func.sum(BookingItem.quantity)).filter(
                 BookingItem.room_type_id == room_item.room_type_id,
                 BookingItem.booking_id.in_(
@@ -96,7 +97,7 @@ def create_booking(
                         Booking.status.in_(["confirmed", "pending_payment"]),
                         Booking.check_in < data.check_out,
                         Booking.check_out > data.check_in
-                    )
+                    ).with_for_update()  # 🔒 Lock rows to prevent concurrent overbooking
                 )
             ).scalar() or 0
 

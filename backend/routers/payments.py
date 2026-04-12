@@ -1,6 +1,7 @@
 # backend/routers/payment.py
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from sqlalchemy.orm import Session, joinedload
+from sqlalchemy import func
 from decimal import Decimal
 import os
 import logging
@@ -8,7 +9,7 @@ from datetime import datetime
 import hmac
 import hashlib
 from database import SessionLocal
-from models import Booking, Payment, BookingItem
+from models import Booking, Payment, BookingItem, RoomType
 from utils.pdf_generator import generate_booking_pdf
 from utils.email_service import send_booking_email
 from utils.auth_utils import require_reception_or_admin
@@ -168,7 +169,9 @@ async def verify_payment(
     # ❌ If payment failed
     if payment_status != "success":
         payment.status = "failed"
-        booking.status = "payment_failed"   # ✅ FIXED
+        booking.status = "cancelled"   # 🔒 Cancel booking to free up rooms for other users
+        booking.cancel_reason = "Payment failed - user can retry with new booking"
+        booking.cancelled_at = datetime.utcnow()
         db.commit()
         return {"message": "Payment failed"}
 
@@ -287,15 +290,44 @@ def mark_failed(booking_id: int, db: Session = Depends(get_db)):
 @router.post("/retry/{booking_id}")
 def retry_payment(booking_id: int, db: Session = Depends(get_db)):
     razorpay_client = get_razorpay_client()
-    booking = db.query(Booking).filter(
+    booking = db.query(Booking).options(
+        joinedload(Booking.booking_items)
+    ).filter(
         Booking.booking_id == booking_id
     ).first()
 
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
 
-    if booking.status not in ["payment_failed", "pending_payment"]:
-        raise HTTPException(status_code=400, detail="Retry not allowed")
+    # Allow retry for cancelled, payment_failed, or pending_payment bookings
+    if booking.status not in ["payment_failed", "pending_payment", "cancelled"]:
+        raise HTTPException(status_code=400, detail="Retry not allowed for this booking status")
+
+    # 🔒 Re-validate availability before allowing retry (prevent overbooking)
+    for item in booking.booking_items:
+        # Check if this room type is still available for the dates
+        booked = db.query(func.sum(BookingItem.quantity)).filter(
+            BookingItem.room_type_id == item.room_type_id,
+            BookingItem.booking_id.in_(
+                db.query(Booking.booking_id).filter(
+                    Booking.status.in_(["confirmed", "pending_payment"]),
+                    Booking.booking_id != booking_id,  # Exclude current booking
+                    Booking.check_in < booking.check_out,
+                    Booking.check_out > booking.check_in
+                )
+            )
+        ).scalar() or 0
+        
+        # Check room type availability  
+        room_type = db.query(RoomType).filter(
+            RoomType.room_type_id == item.room_type_id
+        ).first()
+        
+        if booked + item.quantity > room_type.total_rooms:
+            raise HTTPException(
+                status_code=409, 
+                detail=f"Rooms no longer available for selected dates. Please create a new booking."
+            )
 
     amount_paise = int(Decimal(booking.grand_total) * 100)
 
@@ -315,11 +347,16 @@ def retry_payment(booking_id: int, db: Session = Depends(get_db)):
         created_at=datetime.utcnow()
     )
 
+    # Reactivate the booking for retry
     booking.status = "pending_payment"
+    booking.cancelled_at = None  # Clear cancellation if it was cancelled
+    booking.cancel_reason = None
 
     db.add(payment)
     db.commit()
     db.refresh(payment)
+
+    logger.info(f"Payment retry initiated for booking {booking_id} with new order {order['id']}")
 
     return {
         "order_id": order["id"],
