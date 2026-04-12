@@ -172,10 +172,8 @@ Email: hotelbhimas@gmail.com
             <p style="color:#aaaaaa; font-size:12px; margin:0 0 6px 0; line-height:1.8;">
               Hotel Bhimas &nbsp;|&nbsp; 42, G Car Street, Tirupati - 517501<br>
               Landline: +91-877-2225744 &nbsp;|&nbsp; Mobile: +91-9347172758<br>
-              <!--
               <a href="mailto:hotelbhimas@gmail.com"
                  style="color:#D4AF37; text-decoration:none;">hotelbhimas@gmail.com</a>
-              -->
             </p>
             <p style="color:#666666; font-size:11px; margin:10px 0 0 0;">
               This is an automated booking confirmation. Please do not reply to this email.
