@@ -223,7 +223,6 @@ const Booking = () => {
           error?.response?.data?.detail ? error.response.data.detail :
             error?.message || "An unexpected error occurred";
       setError(errorMessage);
-    } finally {
       setLoading(false);
     }
   };
@@ -243,6 +242,7 @@ const Booking = () => {
       handler: async function (response) {
         try {
           setPaymentLoading(true);
+          setLoading(false);
           await withMinimumDelay(
             apiRequest("/payments/verify", {
               method: "POST",
@@ -267,6 +267,7 @@ const Booking = () => {
         ondismiss: async function () {
           try {
             setPaymentLoading(true);
+            setLoading(false);
             await withMinimumDelay(
               apiRequest("/payments/verify", {
                 method: "POST",
@@ -298,7 +299,11 @@ const Booking = () => {
   return (
     <>
       {/* Loading Spinner for Payment Processing */}
-      {paymentLoading && <LoadingSpinner message="Processing your payment..." />}
+      {(loading || paymentLoading) && (
+        <LoadingSpinner 
+          message={loading ? "Setting up your booking..." : "Processing your payment..."} 
+        />
+      )}
       
       <div className="min-h-screen bg-gradient-to-br from-slate-50 via-blue-50 to-slate-100 px-4 md:px-6 py-12 md:py-20">
         <div className="max-w-7xl mx-auto">
