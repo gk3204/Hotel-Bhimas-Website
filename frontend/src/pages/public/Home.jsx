@@ -152,13 +152,14 @@ React.useEffect(() => {
               desc: "Perfect choice for families and small groups.",
               img: fourBed,
               price: 1750,
-            },
-            {
-              name: "5 Bed Room",
-              desc: "Large room suitable for bigger families and group stays.",
-              img: fiveBed,
-              price: 1950,
-            },
+            }
+            // ,
+            // {
+            //   name: "5 Bed Room",
+            //   desc: "Large room suitable for bigger families and group stays.",
+            //   img: fiveBed,
+            //   price: 1950,
+            // },
           ].map((room) => (
             <div
               key={room.name}
