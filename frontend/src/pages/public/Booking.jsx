@@ -600,8 +600,8 @@ const Booking = () => {
 
                     <div className="border-t pt-3 space-y-2">
                       <div className="flex justify-between text-gray-700">
-                        <span>Room Total:</span>
-                        <span className="font-semibold">₹{priceInfo.roomTotal}</span>
+                        <span>Base Amount:</span>
+                        <span className="font-semibold">₹{priceInfo.baseAmount}</span>
                       </div>
                       <div className="flex justify-between text-gray-700">
                         <span>GST:</span>
