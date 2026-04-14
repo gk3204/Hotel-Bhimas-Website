@@ -312,10 +312,10 @@ const Booking = () => {
 
   return (
     <>
-      {/* Loading Spinner for Payment Processing */}
-      {(loading || paymentLoading) && (
+      {/* Loading Spinner for Payment Processing & Availability Checking */}
+      {(loading || paymentLoading || availabilityLoading) && (
         <LoadingSpinner 
-          message={loading ? "Setting up your booking..." : "Processing your payment..."} 
+          message={loading ? "Setting up your booking..." : paymentLoading ? "Processing your payment..." : "Checking availability..."} 
         />
       )}
       
@@ -408,15 +408,6 @@ const Booking = () => {
                         <div className="h-12 w-12 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full"></div>
                       </div>
                       <p className="text-gray-500 font-medium">Loading available rooms...</p>
-                    </div>
-                  </div>
-                ) : availabilityLoading ? (
-                  <div className="flex justify-center items-center h-48">
-                    <div className="text-center">
-                      <div className="animate-spin mb-4 mx-auto">
-                        <div className="h-12 w-12 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full"></div>
-                      </div>
-                      <p className="text-gray-500 font-medium">⏳ Checking availability...</p>
                     </div>
                   </div>
                 ) : (
