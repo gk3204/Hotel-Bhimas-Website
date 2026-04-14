@@ -31,6 +31,7 @@ class UserResponse(BaseModel):
 class RoomTypeCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
     price_per_night: float = Field(..., gt=0, le=1000000)
+    gst_percent: float = Field(default=18, ge=0, le=100)
     max_occupancy: int = Field(..., ge=1, le=20)
     total_rooms: int = Field(default=1, ge=1, le=100)
 
