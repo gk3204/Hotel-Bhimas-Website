@@ -28,7 +28,7 @@ def send_booking_email(booking_data, pdf_path):
     # ✅ FIX: Send two SEPARATE messages instead of one with 2 recipients
     # This avoids the "bulk mail" signal
     guest_recipients = [{"Email": booking_data['guest_email'], "Name": booking_data['guest_name']}]
-    hotel_recipients = [{"Email": "gk200432@gmail.com", "Name": "Hotel Bhimas"}]
+    hotel_recipients = [{"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"}]
 
     pdf_attachments = []
     if pdf_path and os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
@@ -247,7 +247,7 @@ def send_enquiry_email(name: str, email: str, phone: str, message: str):
             "Messages": [
                 {
                     "From": {"Email": ENQUIRY_MAIL_FROM, "Name": "Hotel Bhimas Website"},
-                    "To": [{"Email": "gk200432@gmail.com", "Name": "Hotel Bhimas"}],
+                    "To": [{"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"}],
                     "ReplyTo": {"Email": email, "Name": name},
                     "Subject": f"Website Enquiry from {name}",
                     "TextPart": f"Name: {name}\nEmail: {email}\nPhone: {phone}\n\nMessage:\n{message}",
