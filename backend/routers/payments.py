@@ -180,12 +180,10 @@ async def verify_payment(
             detail="Payment has already been processed"
         )
 
-    booking = db.query(Booking).options(
-        joinedload(Booking.guest),
-        joinedload(Booking.booking_items).joinedload(BookingItem.room_type)
-    ).filter(
+    # 🔒 Lock booking WITHOUT joinedload (PostgreSQL limitation with FOR UPDATE + outer joins)
+    booking = db.query(Booking).filter(
         Booking.booking_id == payment.booking_id
-    ).with_for_update().first()  # 🔒 Lock booking to prevent concurrent modification
+    ).with_for_update().first()  # 🔒 Lock to prevent concurrent modification
 
     # ❌ If payment failed
     if payment_status != "success":
