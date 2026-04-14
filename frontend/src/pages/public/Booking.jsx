@@ -410,6 +410,19 @@ const Booking = () => {
                       <p className="text-gray-500 font-medium">Loading available rooms...</p>
                     </div>
                   </div>
+                ) : availabilityLoading ? (
+                  <div className="opacity-50">
+                    <div className="space-y-5">
+                      {roomTypes.map((roomType) => (
+                        <div
+                          key={roomType.room_type_id}
+                          className="border-2 border-gray-100 p-6 rounded-2xl bg-gradient-to-br from-white to-blue-50 opacity-60"
+                        >
+                          <div className="h-24 bg-gradient-to-r from-gray-200 to-gray-100 rounded animate-pulse"></div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 ) : (
                   <div className="space-y-5">
                     {roomTypes.map((roomType) => (
