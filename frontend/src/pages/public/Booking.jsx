@@ -142,15 +142,15 @@ const Booking = () => {
     const roomTotal = totalBase + totalGST;
     const convenienceBase = roomTotal * 0.02;
     const convenienceGST = convenienceBase * 0.18;
-    const grandTotal = roomTotal + convenienceBase + convenienceGST;
+    const convenienceFeeTotal = convenienceBase + convenienceGST;
+    const grandTotal = roomTotal + convenienceFeeTotal;
 
     return {
       nights,
       baseAmount: totalBase.toFixed(2),
       gstAmount: totalGST.toFixed(2),
       roomTotal: roomTotal.toFixed(2),
-      convenienceBase: convenienceBase.toFixed(2),
-      convenienceGST: convenienceGST.toFixed(2),
+      convenienceFeeTotal: convenienceFeeTotal.toFixed(2),
       grandTotal: grandTotal.toFixed(2),
     };
   };
@@ -604,16 +604,12 @@ const Booking = () => {
                         <span className="font-semibold">₹{priceInfo.roomTotal}</span>
                       </div>
                       <div className="flex justify-between text-gray-700">
-                        <span>GST (18%):</span>
+                        <span>GST:</span>
                         <span className="font-semibold">₹{priceInfo.gstAmount}</span>
                       </div>
                       <div className="flex justify-between text-gray-700">
-                        <span>Convenience Fee:</span>
-                        <span className="font-semibold">₹{priceInfo.convenienceBase}</span>
-                      </div>
-                      <div className="flex justify-between text-gray-700">
-                        <span>Fee GST (18%):</span>
-                        <span className="font-semibold">₹{priceInfo.convenienceGST}</span>
+                        <span>Convenience Fee (incl. GST):</span>
+                        <span className="font-semibold">₹{priceInfo.convenienceFeeTotal}</span>
                       </div>
                     </div>
 
