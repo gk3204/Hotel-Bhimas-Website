@@ -12,6 +12,7 @@ const Booking = () => {
   const [roomTypes, setRoomTypes] = useState([]);
   const [selectedRooms, setSelectedRooms] = useState({});
   const [availability, setAvailability] = useState({});
+  const [availabilityLoading, setAvailabilityLoading] = useState(false);
   const [priceBreakdown, setPriceBreakdown] = useState(null);
   const [loading, setLoading] = useState(false);
   const [paymentLoading, setPaymentLoading] = useState(false);
@@ -57,6 +58,7 @@ const Booking = () => {
 
     const checkAvailability = async () => {
       try {
+        setAvailabilityLoading(true);
         // 🚀 Parallelize all availability checks instead of sequential
         const availabilityPromises = roomTypes.map(roomType =>
           checkRoomAvailability(
@@ -79,6 +81,8 @@ const Booking = () => {
         setAvailability(newAvailability);
       } catch (err) {
         console.error("Error checking availability:", err);
+      } finally {
+        setAvailabilityLoading(false);
       }
     };
 
@@ -404,6 +408,15 @@ const Booking = () => {
                         <div className="h-12 w-12 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full"></div>
                       </div>
                       <p className="text-gray-500 font-medium">Loading available rooms...</p>
+                    </div>
+                  </div>
+                ) : availabilityLoading ? (
+                  <div className="flex justify-center items-center h-48">
+                    <div className="text-center">
+                      <div className="animate-spin mb-4 mx-auto">
+                        <div className="h-12 w-12 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full"></div>
+                      </div>
+                      <p className="text-gray-500 font-medium">⏳ Checking availability...</p>
                     </div>
                   </div>
                 ) : (
