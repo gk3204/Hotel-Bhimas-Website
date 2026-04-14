@@ -255,6 +255,9 @@ def read_all_bookings(
     limit: int = 15,
     db: Session = Depends(get_db)
 ):
+    # 🔒 Clean up expired bookings before fetching
+    expire_pending_bookings(db)
+    
     query = db.query(Booking).join(Guest, Booking.guest_id == Guest.guest_id)
 
     # ✅ Filter by from_date only
@@ -399,6 +402,9 @@ def bookings_by_date(
     to_date: date,
     db: Session = Depends(get_db)
 ):
+    # 🔒 Clean up expired bookings before fetching
+    expire_pending_bookings(db)
+    
     bookings = db.query(Booking).filter(
         Booking.check_in < to_date,
         Booking.check_out > from_date
@@ -408,6 +414,9 @@ def bookings_by_date(
 
 @router.get("/filter/by-status/{status}")
 def bookings_by_status(status: str, db: Session = Depends(get_db)):
+    # 🔒 Clean up expired bookings before fetching
+    expire_pending_bookings(db)
+    
     bookings = db.query(Booking).filter(
         Booking.status == status
     ).all()

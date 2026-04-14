@@ -5,6 +5,7 @@ from database import SessionLocal
 from models import RoomTypeAvailability, RoomType, Booking, BookingItem
 from schemas import AvailabilityBlockCreate
 from utils.auth_utils import require_reception_or_admin
+from utils.booking_cleanup import expire_pending_bookings
 from datetime import datetime, date
 
 router = APIRouter(
@@ -106,6 +107,9 @@ def check_room_availability(
     Get available rooms for a specific room type and date range.
     Returns total_rooms, booked_rooms, and available_rooms.
     """
+    # 🔒 Clean up expired bookings so users see accurate availability
+    expire_pending_bookings(db)
+    
     try:
         check_in_date = datetime.strptime(check_in, "%Y-%m-%d").date()
         check_out_date = datetime.strptime(check_out, "%Y-%m-%d").date()
