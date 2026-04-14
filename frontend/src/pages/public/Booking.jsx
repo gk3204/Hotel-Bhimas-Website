@@ -57,15 +57,25 @@ const Booking = () => {
 
     const checkAvailability = async () => {
       try {
-        const newAvailability = {};
-        for (const roomType of roomTypes) {
-          const availData = await checkRoomAvailability(
+        // 🚀 Parallelize all availability checks instead of sequential
+        const availabilityPromises = roomTypes.map(roomType =>
+          checkRoomAvailability(
             roomType.room_type_id,
             formData.check_in,
             formData.check_out
-          );
-          newAvailability[roomType.room_type_id] = availData;
-        }
+          ).then(availData => ({
+            roomTypeId: roomType.room_type_id,
+            data: availData
+          }))
+        );
+
+        const results = await Promise.all(availabilityPromises);
+        
+        const newAvailability = {};
+        results.forEach(result => {
+          newAvailability[result.roomTypeId] = result.data;
+        });
+        
         setAvailability(newAvailability);
       } catch (err) {
         console.error("Error checking availability:", err);
