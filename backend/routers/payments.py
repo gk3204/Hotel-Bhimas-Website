@@ -9,7 +9,7 @@ from datetime import datetime
 import hmac
 import hashlib
 from database import SessionLocal
-from models import Booking, Payment, BookingItem, RoomType
+from models import Booking, Payment, BookingItem, RoomType, WebhookEvent
 from utils.pdf_generator import generate_booking_pdf
 from utils.email_service import send_booking_email
 from utils.auth_utils import require_reception_or_admin
@@ -392,3 +392,142 @@ def retry_payment(booking_id: int, db: Session = Depends(get_db)):
         "currency": "INR",
         "key": os.getenv("RAZORPAY_KEY_ID")
     }
+
+# 🔒 WEBHOOK ENDPOINT FOR RAZORPAY PAYMENT UPDATES
+@router.post("/webhook")
+async def payment_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Razorpay webhook endpoint for payment status updates
+    Handles: payment.authorized, payment.failed
+    Implements idempotency to prevent duplicate processing
+    """
+    
+    try:
+        # Get raw body for signature verification
+        body = await request.body()
+        data = await request.json()
+        
+        # 🔒 Verify webhook signature (CRITICAL for security)
+        razorpay_signature = request.headers.get("X-Razorpay-Signature")
+        webhook_secret = os.getenv("RAZORPAY_WEBHOOK_SECRET")
+        
+        if not webhook_secret:
+            logger.error("❌ RAZORPAY_WEBHOOK_SECRET not configured")
+            raise HTTPException(status_code=500, detail="Webhook secret not configured")
+        
+        # Recreate signature to verify it's from Razorpay
+        generated_signature = hmac.new(
+            key=webhook_secret.encode(),
+            msg=body,
+            digestmod=hashlib.sha256
+        ).hexdigest()
+        
+        if not hmac.compare_digest(generated_signature, razorpay_signature):
+            logger.warning(f"🚫 Invalid webhook signature from {request.client.host}")
+            raise HTTPException(status_code=400, detail="Invalid signature")
+        
+        # Extract event details
+        event = data.get("event")
+        event_id = data.get("id")  # Unique webhook event ID from Razorpay
+        created = data.get("created_at")
+        
+        logger.info(f"📥 Webhook received: {event} (ID: {event_id})")
+        
+        # 🔒 Idempotency check - prevent duplicate processing
+        existing_event = db.query(WebhookEvent).filter(
+            WebhookEvent.event_id == event_id
+        ).first()
+        
+        if existing_event:
+            logger.info(f"⚠️ Webhook {event_id} already processed - skipping")
+            return {"status": "already_processed", "event_id": event_id}
+        
+        # Get payment data from webhook
+        payment_data = data.get("payload", {}).get("payment", {})
+        razorpay_order_id = payment_data.get("order_id")
+        razorpay_payment_id = payment_data.get("id")
+        
+        if not razorpay_order_id:
+            logger.warning(f"⚠️ Webhook missing order_id: {event_id}")
+            return {"status": "ignored", "reason": "no_order_id"}
+        
+        # Find payment record
+        payment = db.query(Payment).filter(
+            Payment.order_id == razorpay_order_id
+        ).first()
+        
+        if not payment:
+            logger.warning(f"⚠️ Payment order not found: {razorpay_order_id}")
+            # Store event anyway to prevent re-processing
+            webhook_event = WebhookEvent(
+                event_id=event_id,
+                event_type=event,
+                payment_id=razorpay_payment_id,
+                status="payment_not_found",
+                raw_data=str(data)
+            )
+            db.add(webhook_event)
+            db.commit()
+            return {"status": "payment_not_found"}
+        
+        booking = db.query(Booking).filter(
+            Booking.booking_id == payment.booking_id
+        ).first()
+        
+        # 🎯 Handle payment.authorized event
+        if event == "payment.authorized":
+            logger.info(f"✅ Payment authorized: {razorpay_payment_id} for booking {booking.booking_id}")
+            
+            payment.payment_id_gateway = razorpay_payment_id
+            payment.status = "paid"
+            
+            # Check booking hasn't expired
+            if booking.status == "cancelled":
+                logger.warning(f"❌ Cannot confirm expired booking {booking.booking_id}")
+                payment.status = "failed"
+                webhook_event_status = "booking_expired"
+            else:
+                booking.status = "confirmed"
+                webhook_event_status = "processed"
+            
+            db.commit()
+        
+        # 🎯 Handle payment.failed event
+        elif event == "payment.failed":
+            logger.warning(f"❌ Payment failed: {razorpay_payment_id} for booking {booking.booking_id}")
+            
+            payment.status = "failed"
+            booking.status = "payment_pending"  # Keep reservation for retry
+            
+            db.commit()
+            webhook_event_status = "processed"
+        
+        else:
+            # Ignore other events
+            logger.info(f"⏭️ Ignoring event type: {event}")
+            webhook_event_status = "ignored"
+        
+        # 🔒 Store webhook event to prevent duplicate processing
+        webhook_event = WebhookEvent(
+            event_id=event_id,
+            event_type=event,
+            booking_id=booking.booking_id if booking else None,
+            payment_id=razorpay_payment_id,
+            status=webhook_event_status,
+            raw_data=str(data)
+        )
+        db.add(webhook_event)
+        db.commit()
+        
+        logger.info(f"✅ Webhook {event_id} processed successfully")
+        
+        return {
+            "status": "received",
+            "event_id": event_id,
+            "event": event,
+            "booking_id": booking.booking_id if booking else None
+        }
+    
+    except Exception as e:
+        logger.error(f"❌ Webhook processing error: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Webhook processing failed")

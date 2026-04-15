@@ -128,3 +128,15 @@ class ContactEnquiry(Base):
     message = Column(String(1000), nullable=False)
     status = Column(String(20), default="pending", index=True)  # pending, replied, spam
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+
+
+class WebhookEvent(Base):
+    __tablename__ = "webhook_events"
+    webhook_event_id = Column(Integer, primary_key=True, index=True)
+    event_id = Column(String(100), nullable=False, unique=True, index=True)  # Unique ID from Razorpay
+    event_type = Column(String(50), nullable=False, index=True)  # payment.authorized, payment.failed, etc
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=True, index=True)
+    payment_id = Column(String(100), nullable=True, index=True)  # Razorpay payment ID
+    status = Column(String(20), default="processed", index=True)  # processed, failed, pending
+    raw_data = Column(String, nullable=True)  # Store raw webhook payload for debugging
+    created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
