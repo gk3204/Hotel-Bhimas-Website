@@ -12,6 +12,10 @@ import NearbyPlaces from "./pages/public/NearbyPlaces";
 import AboutUs from "./pages/public/AboutUs";
 import ContactUs from "./pages/public/ContactUs";
 import Policies from "./pages/public/Policies";
+import TermsAndConditions from "./pages/public/TermsAndConditions";
+import PrivacyPolicy from "./pages/public/PrivacyPolicy";
+import RefundPolicy from "./pages/public/RefundPolicy";
+import CancellationPolicy from "./pages/public/CancellationPolicy";
 import Restaurant from "./pages/public/Restaurant";
 import Rooms from "./pages/public/Rooms";
 import Booking from "./pages/public/Booking";
@@ -49,6 +53,10 @@ function App() {
         <Route path="/contact-us" element={<ContactUs />} />
         <Route path="/nearby-places" element={<NearbyPlaces />} />
         <Route path="/policies" element={<Policies />} />
+        <Route path="/terms-and-conditions" element={<TermsAndConditions />} />
+        <Route path="/privacy-policy" element={<PrivacyPolicy />} />
+        <Route path="/refund-policy" element={<RefundPolicy />} />
+        <Route path="/cancellation-policy" element={<CancellationPolicy />} />
         <Route path="/restaurant" element={<Restaurant />} />
         <Route path="/payment-success/:bookingId" element={<PaymentSuccess />} />
         <Route path="/payment-failed/:bookingId" element={<PaymentFailed />} />

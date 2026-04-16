@@ -1,135 +1,123 @@
 import React from "react";
+import { Link } from "react-router-dom";
 
 const Policies = () => {
+  const policies = [
+    {
+      title: "Terms and Conditions",
+      description: "Important rules and regulations for booking and staying at Hotel Bhimas",
+      icon: "📋",
+      link: "/terms-and-conditions",
+      color: "from-[#E5C07B] to-[#D4AF37]",
+      textColor: "text-[#0F172A]"
+    },
+    {
+      title: "Privacy Policy",
+      description: "How we collect, use, and protect your personal information",
+      icon: "🔒",
+      link: "/privacy-policy",
+      color: "from-blue-500 to-blue-600",
+      textColor: "text-white"
+    },
+    {
+      title: "Refund Policy",
+      description: "Clear information about refunds, eligibility, and the refund process",
+      icon: "💰",
+      link: "/refund-policy",
+      color: "from-green-500 to-green-600",
+      textColor: "text-white"
+    },
+    {
+      title: "Cancellation Policy",
+      description: "Guidelines for cancelling bookings and no-show policies",
+      icon: "❌",
+      link: "/cancellation-policy",
+      color: "from-red-500 to-red-600",
+      textColor: "text-white"
+    }
+  ];
+
   return (
     <div className="min-h-screen bg-[#F8FAFC] px-6 py-20">
-      <div className="max-w-4xl mx-auto bg-white rounded-3xl shadow-xl p-8 md:p-14">
+      <div className="max-w-5xl mx-auto">
+        <div className="text-center mb-12">
+          <h1 className="text-4xl md:text-5xl font-bold text-[#0F172A] mb-4">
+            Hotel Bhimas Policies
+          </h1>
+          <p className="text-gray-600 text-lg">
+            Please read our policies carefully before booking with us
+          </p>
+        </div>
 
-        <h1 className="text-3xl md:text-4xl font-bold text-[#0F172A] mb-10 text-center">
-          Hotel Policies
-        </h1>
+        {/* Policy Cards Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+          {policies.map((policy) => (
+            <Link
+              key={policy.title}
+              to={policy.link}
+              className="group"
+            >
+              <div className={`bg-gradient-to-br ${policy.color} rounded-2xl shadow-lg p-8 h-full transform transition hover:shadow-xl hover:-translate-y-1`}>
+                <div className="text-5xl mb-4">{policy.icon}</div>
+                <h2 className={`text-2xl font-bold mb-3 ${policy.textColor}`}>
+                  {policy.title}
+                </h2>
+                <p className={`${policy.textColor === "text-white" ? "text-gray-100" : "text-gray-700"} mb-4`}>
+                  {policy.description}
+                </p>
+                <div className="inline-block px-4 py-2 rounded-lg font-semibold transition bg-white text-[#0F172A] group-hover:bg-gray-100">
+                  Read Full Policy →
+                </div>
+              </div>
+            </Link>
+          ))}
+        </div>
 
-        {/* ================= CHECK-IN / CHECK-OUT ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Check-In & Check-Out</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>
-              <strong>24-hour</strong> check-in and check-out is available. Stay duration is calculated from
-              the time of check-in.
-            </li>
-            <li>Early check-in or late check-out is subject to availability and additional charges.</li>
-          </ul>
-        </section>
-
-        {/* ================= PAYMENT POLICY ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Payment Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Payment may be required to confirm the booking.</li>
-            <li>Accepted payment modes: UPI, Debit/Credit Cards, Net Banking, and Cash.</li>
-            <li>Room tariffs are subject to applicable government taxes.</li>
-          </ul>
-        </section>
-
-        {/* ================= CANCELLATION & REFUND ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Cancellation & Refund Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Free cancellation up to <strong>24 hours</strong> before check-in.</li>
-            <li>Cancellations within 24 hours of check-in are non-refundable.</li>
-            <li>No-show bookings will be charged for one night.</li>
-            <li>Refunds (if applicable) will be processed within <strong>5–7 working days</strong>.</li>
-          </ul>
-        </section>
-
-        {/* ================= ID & AGE POLICY ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">ID Proof & Age Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Valid government-issued photo ID is mandatory for all guests.</li>
-            <li>Accepted IDs: Aadhaar Card, Passport, Driving License, Voter ID.</li>
-            <li>Foreign guests must present Passport and valid Visa.</li>
-            <li>Guests below <strong>18 years</strong> are not allowed to check in alone.</li>
-            <li>Local ID bookings are accepted at management discretion.</li>
-          </ul>
-        </section>
-
-        {/* ================= ROOM OCCUPANCY ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Room Occupancy Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Maximum occupancy per room must be strictly followed.</li>
-            <li>Extra guests beyond room capacity will be charged.</li>
-          </ul>
-        </section>
-
-        {/* ================= GUEST & VISITOR POLICY ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Guest & Visitor Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Only registered guests are allowed inside rooms.</li>
-            <li>Visitors are permitted only in lobby and reception areas.</li>
-            <li>Visitors must leave the premises by <strong>9:00 PM</strong>.</li>
-          </ul>
-        </section>
-
-        {/* ================= PARKING POLICY ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Parking Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Free parking is available for hotel guests.</li>
-            <li>Parking is subject to availability on a first-come basis.</li>
-            <li>Parking space is available for cars and two-wheelers.</li>
-            <li>The hotel is not responsible for valuables left inside vehicles.</li>
-          </ul>
-        </section>
-
-        {/* ================= FOOD POLICY ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Food & Restaurant Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Hotel Bhimas has an in-house <strong>pure vegetarian restaurant</strong>.</li>
-            <li>Both South Indian and North Indian dishes are served.</li>
-            <li>Outside food is not permitted inside the hotel premises.</li>
-            <li>Room service is available during restaurant operating hours.</li>
-          </ul>
-        </section>
-
-        {/* ================= HOUSEKEEPING ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Housekeeping Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Housekeeping services are provided between <strong>9:00 AM – 4:00 PM</strong>.</li>
-            <li>Linen and towels are changed once every two days or on request.</li>
-            <li>Guests are advised to secure valuables properly.</li>
-          </ul>
-        </section>
-
-        {/* ================= DAMAGE & LOSS ================= */}
-        <section className="mb-10">
-          <h2 className="text-2xl font-semibold mb-3">Damage & Loss Policy</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Any damage to hotel property will be charged to the guest.</li>
-            <li>The hotel is not responsible for loss of personal belongings.</li>
-            <li>Please contact reception immediately for assistance.</li>
-          </ul>
-        </section>
-
-        {/* ================= BEHAVIOUR & SAFETY ================= */}
-        <section>
-          <h2 className="text-2xl font-semibold mb-3">Behaviour, Safety & Hygiene</h2>
-          <ul className="list-disc list-inside space-y-2 text-gray-700">
-            <li>Smoking and alcohol consumption are strictly prohibited.</li>
-            <li>Loud music and disturbances are not allowed.</li>
-            <li>Quiet hours: <strong>10:00 PM – 6:00 AM</strong>.</li>
-            <li>Cooking inside rooms is not permitted.</li>
-            <li>Pets are not allowed.</li>
-          </ul>
-        </section>
-
+        {/* Information Section */}
+        <div className="bg-white rounded-2xl shadow-lg p-8 md:p-12 mt-12">
+          <h2 className="text-3xl font-bold text-[#0F172A] mb-6 text-center">
+            Questions About Our Policies?
+          </h2>
+          <p className="text-gray-700 text-center mb-6 text-lg">
+            If you have any questions or concerns about our policies, please don't hesitate to reach out to us.
+          </p>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-center">
+            <div>
+              <p className="text-2xl mb-2">📧</p>
+              <p className="font-semibold text-[#0F172A] mb-2">Email</p>
+              <a
+                href="mailto:hotelbhimas@gmail.com"
+                className="text-[#E5C07B] hover:text-[#D4AF37] font-semibold transition"
+              >
+                hotelbhimas@gmail.com
+              </a>
+            </div>
+            <div>
+              <p className="text-2xl mb-2">📞</p>
+              <p className="font-semibold text-[#0F172A] mb-2">Phone</p>
+              <a
+                href="tel:+919347172758"
+                className="text-[#E5C07B] hover:text-[#D4AF37] font-semibold transition"
+              >
+                +919347172758
+              </a>
+            </div>
+            <div>
+              <p className="text-2xl mb-2">💬</p>
+              <p className="font-semibold text-[#0F172A] mb-2">Contact Form</p>
+              <Link
+                to="/contact-us"
+                className="text-[#E5C07B] hover:text-[#D4AF37] font-semibold transition"
+              >
+                Get in Touch
+              </Link>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
 };
 
 export default Policies;
+
