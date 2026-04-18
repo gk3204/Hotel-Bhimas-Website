@@ -48,6 +48,19 @@ const Payments = () => {
     }
   };
 
+  const getRefundStatusColor = (status) => {
+    switch (status) {
+      case "completed":
+        return "bg-green-500/20 text-green-300 border-green-500/30";
+      case "failed":
+        return "bg-red-500/20 text-red-300 border-red-500/30";
+      case "pending":
+        return "bg-yellow-500/20 text-yellow-300 border-yellow-500/30";
+      default:
+        return "bg-slate-500/20 text-slate-300 border-slate-500/30";
+    }
+  };
+
   const totalAmount = payments.reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
   const paidAmount = payments
     .filter(p => p.status === "paid")
@@ -132,6 +145,9 @@ const Payments = () => {
                     <th className="px-6 py-4 font-semibold text-sm">Booking ID</th>
                     <th className="px-6 py-4 font-semibold text-sm">Amount</th>
                     <th className="px-6 py-4 font-semibold text-sm">Status</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Refund ID</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Refund Amount</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Refund Status</th>
                     <th className="px-6 py-4 font-semibold text-sm">Gateway</th>
                     <th className="px-6 py-4 font-semibold text-sm">Date & Time</th>
                   </tr>
@@ -154,6 +170,31 @@ const Payments = () => {
                         >
                           {payment.status?.toUpperCase() || "PENDING"}
                         </span>
+                      </td>
+                      <td className="px-6 py-4 text-sm font-mono text-slate-400">
+                        {payment.refund_id ? (
+                          <span className="text-[#FCD34D]">{payment.refund_id}</span>
+                        ) : (
+                          <span className="text-slate-500">—</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 text-sm">
+                        {payment.refund_amount ? (
+                          <span className="text-green-400">₹{parseFloat(payment.refund_amount).toFixed(2)}</span>
+                        ) : (
+                          <span className="text-slate-500">—</span>
+                        )}
+                      </td>
+                      <td className="px-6 py-4 text-sm">
+                        {payment.refund_status ? (
+                          <span
+                            className={`px-3 py-1 rounded-full text-xs font-semibold border ${getRefundStatusColor(payment.refund_status)}`}
+                          >
+                            {payment.refund_status?.toUpperCase()}
+                          </span>
+                        ) : (
+                          <span className="text-slate-500 text-xs">No Refund</span>
+                        )}
                       </td>
                       <td className="px-6 py-4 text-sm text-slate-300">
                         {payment.gateway || "—"}

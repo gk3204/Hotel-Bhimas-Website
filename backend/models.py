@@ -54,8 +54,13 @@ class Booking(Base):
     grand_total = Column(Numeric(10, 2))
     cancelled_at = Column(DateTime)
     cancel_reason = Column(String(100))
+    admin_cancelled = Column(Boolean, default=False, index=True)  # Flag for admin-initiated cancellation
+    admin_cancelled_reason = Column(String(100))  # "Double booking error", "Guest request", "Technical issue", "Other"
+    admin_notes = Column(String(500))  # Optional admin notes
+    admin_cancelled_by = Column(String(50))  # Admin username/ID
+    admin_cancelled_at = Column(DateTime)  # When admin cancelled
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
-    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now())
+    updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=True)
 
     guest = relationship("Guest")
     booking_items = relationship("BookingItem", cascade="all, delete-orphan", back_populates="booking")
@@ -93,6 +98,10 @@ class Payment(Base):
     amount = Column(Numeric(10, 2))
     currency = Column(String, default="INR")
     status = Column(String, index=True)    # created | paid | failed
+    refund_id = Column(String, nullable=True, index=True)  # Razorpay refund ID
+    refund_amount = Column(Numeric(10, 2), nullable=True)  # Amount refunded
+    refund_status = Column(String(50), nullable=True, index=True)  # "pending" | "completed" | "failed"
+    refund_reason = Column(String(100), nullable=True)  # Admin's reason for refund
     created_at = Column(DateTime, server_default=func.now(), index=True)
 
 

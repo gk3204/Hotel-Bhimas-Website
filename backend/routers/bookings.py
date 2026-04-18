@@ -1,15 +1,24 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func
-from datetime import date
+from datetime import date, datetime
 import logging
 
 from database import SessionLocal
-from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, BookingItem
+from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, BookingItem, Payment
 from schemas import BookingCreate
 from sqlalchemy.orm import joinedload
 from utils.auth_utils import require_reception_or_admin, require_admin
 from scripts.expire_booking_jobs import expire_pending_bookings
+from routers.payments import process_razorpay_refund
+from utils.email_service import send_admin_cancellation_email
+
+# Request model for admin cancellation
+class AdminCancelRequest(BaseModel):
+    reason: str  # "Double booking error", "Guest request", "Technical issue", "Other"
+    refund_amount: float  # Amount to refund
+    admin_notes: str | None = None  # Optional admin notes
 
 router = APIRouter(
     prefix="/bookings",
@@ -422,3 +431,95 @@ def bookings_by_status(status: str, db: Session = Depends(get_db)):
     ).all()
 
     return bookings
+
+@router.post("/{booking_id}/admin-cancel", dependencies=[Depends(require_admin)])
+def admin_cancel_booking(
+    booking_id: int,
+    request: AdminCancelRequest,
+    db: Session = Depends(get_db)
+):
+    """
+    Admin endpoint to cancel a booking and process refund
+    Required fields in request body:
+    - reason: "Double booking error", "Guest request", "Technical issue", "Other"
+    - refund_amount: Amount to refund (e.g., full or full - convenience fee)
+    - admin_notes: Optional notes
+    """
+    try:
+        # 1️⃣ Fetch and lock booking
+        booking = db.query(Booking).with_for_update().filter(
+            Booking.booking_id == booking_id
+        ).first()
+        
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        
+        # 2️⃣ Check if booking can be cancelled (must be confirmed or payment_pending)
+        if booking.status not in ["confirmed", "payment_pending"]:
+            raise HTTPException(
+                status_code=400, 
+                detail=f"Cannot cancel booking with status: {booking.status}"
+            )
+        
+        # 3️⃣ Fetch payment record
+        payment = db.query(Payment).filter(
+            Payment.booking_id == booking_id,
+            Payment.status == "paid"
+        ).first()
+        
+        if not payment:
+            raise HTTPException(status_code=404, detail="Payment record not found")
+        
+        # 4️⃣ Process refund via Razorpay
+        success, refund_id, refund_msg = process_razorpay_refund(
+            db, 
+            payment.payment_id, 
+            request.refund_amount, 
+            request.reason
+        )
+        
+        if not success:
+            raise HTTPException(status_code=400, detail=f"Refund failed: {refund_msg}")
+        
+        # 5️⃣ Update booking status
+        booking.status = "admin_cancelled"
+        booking.admin_cancelled = True
+        booking.admin_cancelled_reason = request.reason
+        booking.admin_notes = request.admin_notes
+        booking.admin_cancelled_by = "admin"  # In production, get from JWT token
+        booking.admin_cancelled_at = datetime.now()
+        booking.cancelled_at = datetime.now()
+        db.commit()
+        
+        # 6️⃣ Send notification email to guest
+        try:
+            send_admin_cancellation_email(
+                guest_email=booking.guest.email,
+                guest_name=booking.guest.name,
+                booking_ref=booking_id,
+                check_in=booking.check_in,
+                check_out=booking.check_out,
+                refund_amount=request.refund_amount,
+                refund_id=refund_id,
+                reason=request.reason,
+                admin_notes=request.admin_notes
+            )
+        except Exception as e:
+            logger.error(f"Failed to send cancellation email: {str(e)}")
+        
+        logger.info(f"✅ Booking {booking_id} cancelled by admin. Refund ID: {refund_id}, Amount: ₹{request.refund_amount}")
+        
+        return {
+            "booking_id": booking_id,
+            "status": "admin_cancelled",
+            "refund_id": refund_id,
+            "refund_amount": request.refund_amount,
+            "refund_status": "completed",
+            "message": "Booking cancelled and refund processed successfully"
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error cancelling booking {booking_id}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Server error: {str(e)}")

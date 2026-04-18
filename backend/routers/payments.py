@@ -56,6 +56,57 @@ def get_razorpay_client():
         return None
 
 
+def process_razorpay_refund(db: Session, payment_id: int, refund_amount: float, reason: str):
+    """
+    Process a refund through Razorpay API
+    Returns: (success: bool, refund_id: str, message: str)
+    """
+    try:
+        # Fetch payment from database
+        payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
+        if not payment:
+            return False, None, "Payment not found"
+        
+        # Check if payment was successful
+        if payment.status != "paid":
+            return False, None, f"Cannot refund payment with status: {payment.status}"
+        
+        # Check if already refunded
+        if payment.refund_status and payment.refund_status != "failed":
+            return False, payment.refund_id, "Payment already refunded"
+        
+        # Get Razorpay client
+        razorpay_client = get_razorpay_client()
+        if not razorpay_client:
+            return False, None, "Razorpay service unavailable"
+        
+        # Call Razorpay refund API
+        refund_response = razorpay_client.refund.create(
+            data={
+                "payment_id": payment.payment_id_gateway,  # Razorpay payment ID
+                "amount": int(refund_amount * 100),  # Razorpay expects amount in paise
+                "notes": {
+                    "reason": reason,
+                    "refund_type": "admin_initiated"
+                }
+            }
+        )
+        
+        # Update payment record with refund details
+        payment.refund_id = refund_response.get("id")
+        payment.refund_amount = Decimal(str(refund_amount))
+        payment.refund_status = "completed"
+        payment.refund_reason = reason
+        db.commit()
+        
+        logger.info(f"✅ Refund processed: Payment {payment_id}, Refund ID: {payment.refund_id}, Amount: ₹{refund_amount}")
+        return True, payment.refund_id, "Refund processed successfully"
+        
+    except Exception as e:
+        logger.error(f"❌ Refund failed for payment {payment_id}: {str(e)}")
+        return False, None, f"Refund failed: {str(e)}"
+
+
 # 📊 GET all payments (admin only)
 @router.get("/", dependencies=[Depends(require_reception_or_admin)])
 def get_all_payments(db: Session = Depends(get_db)):

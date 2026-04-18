@@ -4,6 +4,7 @@ import {
   getBookingById,
   cancelBooking,
 } from "../../api/bookings";
+import { adminCancelBooking } from "../../api/admin";
 import { jwtDecode } from "jwt-decode";
 import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash } from "react-icons/fa";
 
@@ -19,6 +20,13 @@ const Bookings = () => {
   const [toast, setToast] = useState(null);
   const [sortField, setSortField] = useState("booking_id");
   const [sortOrder, setSortOrder] = useState("desc");
+  
+  // Admin cancellation modal states
+  const [adminCancelBookingId, setAdminCancelBookingId] = useState(null);
+  const [adminCancelReason, setAdminCancelReason] = useState("");
+  const [adminCancelRefundType, setAdminCancelRefundType] = useState("full");
+  const [adminCancelNotes, setAdminCancelNotes] = useState("");
+  const [adminCancelLoading, setAdminCancelLoading] = useState(false);
 
   const limit = 15;
   const totalPages = Math.ceil(total / limit);
@@ -86,6 +94,66 @@ const Bookings = () => {
     }
   };
 
+  const handleAdminCancel = async (bookingId) => {
+    try {
+      setAdminCancelLoading(true);
+      // Fetch full booking details including charges for refund calculation
+      const data = await getBookingById(bookingId);
+      setSelectedBooking(data);
+      setAdminCancelBookingId(bookingId);
+    } catch (err) {
+      showToast("Failed to load booking details for cancellation", "error");
+    } finally {
+      setAdminCancelLoading(false);
+    }
+  };
+
+  const processAdminCancellation = async () => {
+    if (!adminCancelReason.trim()) {
+      showToast("Please select a cancellation reason", "error");
+      return;
+    }
+
+    try {
+      setAdminCancelLoading(true);
+      
+      if (!selectedBooking || !selectedBooking.charges) {
+        showToast("Booking details not loaded. Please refresh and try again.", "error");
+        setAdminCancelLoading(false);
+        return;
+      }
+      
+      // Calculate refund amount based on refund type
+      let refundAmount = parseFloat(selectedBooking.charges.payable_amount);
+      if (adminCancelRefundType === "convenience") {
+        // Return room total excluding convenience fee + its GST
+        const convenienceFeeTotal = 
+          parseFloat(selectedBooking.charges?.convenience_fee || 0) + 
+          parseFloat(selectedBooking.charges?.convenience_gst || 0);
+        refundAmount = refundAmount - convenienceFeeTotal;
+        console.log("Refund calculation:", { refundAmount, convenienceFeeTotal, payable: selectedBooking.charges.payable_amount });
+      }
+
+      const response = await adminCancelBooking(
+        adminCancelBookingId,
+        adminCancelReason,
+        refundAmount,
+        adminCancelNotes
+      );
+
+      showToast(`✅ Booking cancelled. Refund ID: ${response.refund_id}`);
+      setAdminCancelBookingId(null);
+      setAdminCancelReason("");
+      setAdminCancelRefundType("full");
+      setAdminCancelNotes("");
+      loadBookings();
+    } catch (err) {
+      showToast(err.message || "Failed to process cancellation", "error");
+    } finally {
+      setAdminCancelLoading(false);
+    }
+  };
+
   const confirmCancel = async () => {
     try {
       await cancelBooking(confirmId);
@@ -116,12 +184,16 @@ const Bookings = () => {
     switch (status) {
       case "cancelled":
         return "bg-red-500/20 text-red-300 border-red-500/30";
+      case "admin_cancelled":
+        return "bg-red-600/30 text-red-200 border-red-600/50";
       case "pending_payment":
         return "bg-yellow-500/20 text-yellow-300 border-yellow-500/30";
       case "payment_failed":
         return "bg-orange-500/20 text-orange-300 border-orange-500/30";
       case "confirmed":
         return "bg-green-500/20 text-green-300 border-green-500/30";
+      case "payment_pending":
+        return "bg-yellow-500/20 text-yellow-300 border-yellow-500/30";
       default:
         return "bg-blue-500/20 text-blue-300 border-blue-500/30";
     }
@@ -285,10 +357,10 @@ const Bookings = () => {
                               <FaEye size={12} /> View
                             </button>
 
-                            {role === "admin" && b.status !== "cancelled" && (
+                            {role === "admin" && (b.status === "confirmed" || b.status === "payment_pending") && (
                               <button
-                                onClick={() => setConfirmId(b.booking_id)}
-                                title="Cancel Booking"
+                                onClick={() => handleAdminCancel(b.booking_id)}
+                                title="Cancel Booking & Refund"
                                 className="bg-red-600 hover:bg-red-700 px-3 py-2 rounded-lg text-white text-sm font-medium transition inline-flex items-center gap-1"
                               >
                                 <FaTrash size={12} /> Cancel
@@ -492,31 +564,125 @@ const Bookings = () => {
           </div>
         )}
 
-        {/* ── CANCEL CONFIRM MODAL ── */}
-        {confirmId && (
+        {/* ── ADMIN CANCELLATION MODAL ── */}
+        {adminCancelBookingId && (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-sm text-white border border-slate-700 shadow-2xl">
+            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
               <div className="text-red-400 text-3xl mb-4">⚠️</div>
-              <h2 className="text-2xl font-bold mb-3 text-[#E5C07B]">
-                Confirm Cancellation
+              <h2 className="text-2xl font-bold mb-6 text-[#E5C07B]">
+                Cancel Booking & Process Refund
               </h2>
-              <p className="text-slate-300 mb-6">
-                Are you sure you want to cancel booking{" "}
-                <span className="font-bold text-[#FCD34D]">#{confirmId}</span>?
-                This action cannot be undone.
-              </p>
-              <div className="flex justify-end gap-4">
+
+              <div className="space-y-5">
+                {/* Reason Dropdown */}
+                <div>
+                  <label className="block text-sm font-semibold text-slate-300 mb-2">
+                    Cancellation Reason*
+                  </label>
+                  <select
+                    value={adminCancelReason}
+                    onChange={(e) => setAdminCancelReason(e.target.value)}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] transition"
+                  >
+                    <option value="">Select a reason...</option>
+                    <option value="Double booking error">Double booking error</option>
+                    <option value="Guest request">Guest request</option>
+                    <option value="Technical issue">Technical issue</option>
+                    <option value="Other">Other</option>
+                  </select>
+                </div>
+
+                {/* Refund Type Radio */}
+                <div>
+                  <label className="block text-sm font-semibold text-slate-300 mb-3">
+                    Refund Amount*
+                  </label>
+                  <div className="space-y-2">
+                    <label className="flex items-center cursor-pointer">
+                      <input
+                        type="radio"
+                        name="refund"
+                        value="full"
+                        checked={adminCancelRefundType === "full"}
+                        onChange={(e) => setAdminCancelRefundType(e.target.value)}
+                        className="mr-3"
+                      />
+                      <span className="text-sm">
+                        Full Refund
+                        {selectedBooking && (
+                          <span className="ml-2 text-[#E5C07B]">
+                            ₹{selectedBooking.charges.payable_amount.toFixed(2)}
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                    <label className="flex items-center cursor-pointer">
+                      <input
+                        type="radio"
+                        name="refund"
+                        value="convenience"
+                        checked={adminCancelRefundType === "convenience"}
+                        onChange={(e) => setAdminCancelRefundType(e.target.value)}
+                        className="mr-3"
+                      />
+                      <span className="text-sm">
+                        Full - Convenience Fee (2%)
+                        {selectedBooking && (
+                          <span className="ml-2 text-[#E5C07B]">
+                            ₹{(selectedBooking.charges.payable_amount - 
+                              (parseFloat(selectedBooking.charges?.convenience_fee || 0) + 
+                               parseFloat(selectedBooking.charges?.convenience_gst || 0))).toFixed(2)}
+                          </span>
+                        )}
+                      </span>
+                    </label>
+                  </div>
+                </div>
+
+                {/* Admin Notes */}
+                <div>
+                  <label className="block text-sm font-semibold text-slate-300 mb-2">
+                    Admin Notes (Optional)
+                  </label>
+                  <textarea
+                    value={adminCancelNotes}
+                    onChange={(e) => setAdminCancelNotes(e.target.value)}
+                    placeholder="Enter any additional notes..."
+                    maxLength={500}
+                    className="w-full px-4 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] transition resize-none h-24"
+                  />
+                  <p className="text-xs text-slate-400 mt-1">
+                    {adminCancelNotes.length}/500
+                  </p>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-4 mt-8">
                 <button
-                  onClick={() => setConfirmId(null)}
-                  className="bg-slate-700 hover:bg-slate-600 px-6 py-2 rounded-lg font-medium transition"
+                  onClick={() => {
+                    setAdminCancelBookingId(null);
+                    setAdminCancelReason("");
+                    setAdminCancelRefundType("full");
+                    setAdminCancelNotes("");
+                  }}
+                  disabled={adminCancelLoading}
+                  className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 px-6 py-2 rounded-lg font-medium transition"
                 >
                   Keep Booking
                 </button>
                 <button
-                  onClick={confirmCancel}
-                  className="bg-red-600 hover:bg-red-700 px-6 py-2 rounded-lg font-semibold transition"
+                  onClick={processAdminCancellation}
+                  disabled={adminCancelLoading || !adminCancelReason}
+                  className="bg-red-600 hover:bg-red-700 disabled:opacity-50 px-6 py-2 rounded-lg font-semibold transition inline-flex items-center gap-2"
                 >
-                  Cancel Booking
+                  {adminCancelLoading ? (
+                    <>
+                      <div className="animate-spin h-4 w-4 border-2 border-white border-t-transparent rounded-full"></div>
+                      Processing...
+                    </>
+                  ) : (
+                    <>Process Refund</>
+                  )}
                 </button>
               </div>
             </div>
