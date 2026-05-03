@@ -56,7 +56,7 @@ const ContactUs = () => {
             Contact <span className="text-[#E5C07B]">Hotel Bhimas</span>
             </h1>
             <p className="text-white/80 max-w-2xl mx-auto text-lg">
-            We’re here to assist you with room bookings, food enquiries,
+            We're here to assist you with room bookings, food enquiries,
             and a comfortable stay in Tirupati.
             </p>
         </div>

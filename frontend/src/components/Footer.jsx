@@ -19,8 +19,11 @@ const Footer = () => {
           <Link to="/cancellation-policy" className="hover:text-[#FCD34D] transition">Cancellation Policy</Link>
         </div>
         
-        <p className="mb-6 text-sm tracking-wide">
+        <p className="mb-2 text-sm tracking-wide">
           &copy; 2026 Hotel Bhimas. All rights reserved.
+        </p>
+        <p className="mb-6 text-xs text-[#9CA3AF] font-semibold">
+          Operated by K R G HOTELS PRIVATE LTD
         </p>
 
         <div className="flex justify-center space-x-8 text-2xl">
