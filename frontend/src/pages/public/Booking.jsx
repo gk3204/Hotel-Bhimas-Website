@@ -440,10 +440,7 @@ const Booking = () => {
                                 <FaUsers size={16} />
                                 <span className="text-sm">Up to {roomType.max_occupancy} guests</span>
                               </div>
-                              <div className="flex items-center gap-1 text-gray-600">
-                                <FaCoffee size={16} />
-                                <span className="text-sm">Complimentary amenities</span>
-                              </div>
+
                             </div>
                           </div>
                           <div className="text-right">

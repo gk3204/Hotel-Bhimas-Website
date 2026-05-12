@@ -8,7 +8,7 @@ import heroTemple from "./images/temples/balaji-padmavati.png";
 const temples = [
   {
     name: "Sri Govindaraja Swamy Temple",
-    distance: "1 km",
+    distance: "550 m",
     info: "One of Tirupati’s oldest temples, walkable from Hotel Bhimas",
   },
   {
@@ -18,18 +18,23 @@ const temples = [
   },
   {
     name: "Kapila Theertham",
-    distance: "3 – 6 km",
+    distance: "4 km",
     info: "Sacred Shiva temple with natural waterfall",
   },
   {
     name: "Tiruchanur Padmavathi Temple",
-    distance: "5 km",
+    distance: "4 km",
     info: "Temple of Goddess Padmavathi, must-visit for pilgrims",
   },
   {
     name: "ISKCON Tirupati",
-    distance: "4 km",
+    distance: "3.6 km",
     info: "Modern Krishna temple with serene ambience",
+  },
+  {
+    name: "Srinivasa Mangapuram Temple",
+    distance: "12 km",
+    info: "Sacred temple with historical significance",
   },
   {
     name: "Tirumala Sri Venkateswara Temple",
@@ -43,7 +48,7 @@ const temples = [
   },
   {
     name: "Kanipakkam Vinayaka Temple",
-    distance: "60 km",
+    distance: "64 km",
     info: "Self-manifested Ganesh idol, popular day trip",
   },
 ];

@@ -320,14 +320,15 @@ React.useEffect(() => {
           <div className="p-8 md:p-14">
             <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-6 text-center">
               {[
-                { name: "Govindaraja Swamy Temple", distance: "1 km" },
+                { name: "Govindaraja Swamy Temple", distance: "550 m" },
                 { name: "Sri Kodandarama Swamy Temple", distance: "1.5 km" },
-                { name: "Tiruchanur Padmavathi Temple", distance: "5 km" },
-                { name: "Kapila Theertham", distance: "6 km" },
-                { name: "ISKCON Tirupati", distance: "4 km" },
+                { name: "Tiruchanur Padmavathi Temple", distance: "4 km" },
+                { name: "Kapila Theertham", distance: "4 km" },
+                { name: "ISKCON Tirupati", distance: "3.6 km" },
+                { name: "Srinivasa Mangapuram Temple", distance: "12 km" },
                 { name: "Tirumala Sri Venkateswara Temple", distance: "22 km" },
                 { name: "Sri Kalahastri Shiva Temple", distance: "35 km" },
-                { name: "Kanipakkam Vinayaka Temple", distance: "50 km" },
+                { name: "Kanipakkam Vinayaka Temple", distance: "64 km" },
               ].map((temple) => (
                 <div
                   key={temple.name}
