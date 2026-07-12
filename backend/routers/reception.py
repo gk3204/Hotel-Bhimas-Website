@@ -3,6 +3,9 @@ Prompt 05: desk booking + availability (reuses the online engine's pricing/promo
 CONFIRMED reservation, no convenience fee; room-type-level).
 Prompt 06: check-in (assign physical rooms + KYC + open folio + card-encode payload),
 check-out (settle folio, invalidate cards, room -> cleaning), desk board, registration slip.
+Prompt 09: room shift (move an in-house guest to another room mid-stay: re-point the
+booking item, folio follows the booking, rate difference posted explicitly, old cards
+superseded, new-room card-encode payload returned).
 Anti-fraud rule enforced here + in routers/cards.py: a key card is only issued against a
 booking WITH a recorded payment (see routers/payments.py total_paid).
 """
@@ -17,14 +20,15 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
 from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, BookingItem, \
-    Folio, CardIssuance
-from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, FolioOpenRequest
+    Folio, FolioCharge, CardIssuance
+from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, FolioOpenRequest, \
+    RoomShiftRequest
 from utils.auth_utils import require_reception_or_admin
-from utils.audit import write_audit
+from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
 from routers.promotions import get_active_promotions, best_promotion_for_item
 from routers.payments import total_paid
-from routers.folio import open_folio
+from routers.folio import open_folio, _recompute, _get_invoice
 from scripts.expire_booking_jobs import expire_pending_bookings
 
 logger = logging.getLogger(__name__)
@@ -580,6 +584,210 @@ def _checkout_response(db: Session, booking: Booking, folio: Folio | None, overr
     }
 
 
+# =====================================================================
+# ROOM SHIFT (prompt 09)
+# =====================================================================
+
+def _shift_waive_requires_admin() -> bool:
+    return os.getenv("SHIFT_WAIVE_REQUIRES_ADMIN", "true").strip().lower() not in ("false", "0", "no")
+
+
+def _incl_rate(rt: RoomType) -> float:
+    """Rack rate per night, GST-inclusive (FolioCharge amounts are GST-inclusive)."""
+    return round(float(rt.price_per_night) * (1 + float(rt.gst_percent or 0) / 100), 2)
+
+
+@router.post("/shift")
+def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
+               user=Depends(require_reception_or_admin)):
+    """Move an in-house guest to a different room mid-stay. The folio is keyed on the
+    booking, so it follows automatically; only the rate DIFFERENCE is posted (one signed
+    GST-inclusive 'misc' line). Suggested difference = remaining CALENDAR nights x rack-rate
+    difference (deliberately simpler than the 24h card window, which stays anchored to the
+    actual check-in moment and is unchanged by a shift). Charging less than the computed
+    difference needs a reason + admin (SHIFT_WAIVE_REQUIRES_ADMIN, default true, read at
+    call time). All active cards on the old room are marked 'superseded'; the response
+    carries the encode payload for the new room's card. dry_run=True prices + validates
+    without mutating (used by the desktop as the target-room preview). Online-only."""
+    try:
+        booking = db.query(Booking).options(
+            joinedload(Booking.guest), joinedload(Booking.booking_items),
+        ).filter(Booking.booking_id == data.booking_id).first()
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        if booking.status != "checked_in":
+            raise HTTPException(status_code=409,
+                                detail=f"Cannot shift a '{booking.status}' booking — guest must be in-house")
+
+        # Which room is the guest leaving? (group bookings hold several rooms)
+        item = next((i for i in booking.booking_items if i.room_id == data.from_room_id), None)
+        if not item:
+            raise HTTPException(status_code=409,
+                                detail="Guest is not in that room — pick the room being vacated")
+        if data.to_room_id == data.from_room_id:
+            raise HTTPException(status_code=400, detail="Guest is already in that room")
+        if any(i.room_id == data.to_room_id for i in booking.booking_items):
+            raise HTTPException(status_code=400,
+                                detail="That room is already part of this booking")
+
+        old_room = db.query(Room).filter(Room.room_id == data.from_room_id).with_for_update().first()
+        old_type = db.query(RoomType).filter(RoomType.room_type_id == item.room_type_id).first()
+        if not old_room or not old_type:
+            raise HTTPException(status_code=404, detail="Current room not found")
+
+        # ---- validate the target room (mirrors the check-in assignment rules) ----
+        new_room = db.query(Room).filter(Room.room_id == data.to_room_id).with_for_update().first()
+        if not new_room:
+            raise HTTPException(status_code=404, detail=f"Room id {data.to_room_id} not found")
+        if not new_room.is_active:
+            raise HTTPException(status_code=409,
+                                detail=f"Room {new_room.room_number} is out of service")
+        if new_room.status != "vacant":
+            raise HTTPException(status_code=409,
+                                detail=f"Room {new_room.room_number} is not vacant (status: {new_room.status})")
+        held = db.query(BookingItem).join(Booking).filter(
+            BookingItem.room_id == new_room.room_id,
+            Booking.status == "checked_in",
+        ).first()
+        if held:
+            raise HTTPException(status_code=409,
+                                detail=f"Room {new_room.room_number} is already held by booking {held.booking_id}")
+        _room_code(new_room)  # fail early on a non-numeric room number
+        new_type = db.query(RoomType).filter(RoomType.room_type_id == new_room.room_type_id).first()
+        if not new_type:
+            raise HTTPException(status_code=404, detail="Target room's type not found")
+
+        today = date.today()
+        cross_type = new_room.room_type_id != item.room_type_id
+
+        # Cross-type shifts consume the new type's capacity for the remaining dates —
+        # don't strand a future confirmed reservation of that type.
+        if cross_type and today < booking.check_out:
+            if _blocked(db, new_type.room_type_id, today, booking.check_out):
+                raise HTTPException(status_code=409,
+                                    detail=f"{new_type.name} is blocked for the remaining dates")
+            booked = int(_booked_qty(db, new_type.room_type_id, today, booking.check_out, lock=True))
+            inactive = int(_inactive_count(db, new_type.room_type_id))
+            if new_type.total_rooms - booked - inactive <= 0:
+                raise HTTPException(status_code=409,
+                                    detail=f"No {new_type.name} capacity left for the remaining dates "
+                                           f"— a future reservation needs it")
+
+        # ---- rate difference (remaining calendar nights x GST-inclusive rack rates) ----
+        remaining_nights = max(0, (booking.check_out - today).days)
+        old_rate, new_rate = _incl_rate(old_type), _incl_rate(new_type)
+        suggested = round((new_rate - old_rate) * remaining_nights, 2)
+        applied = suggested if data.applied_adjustment is None else round(float(data.applied_adjustment), 2)
+
+        lo, hi = min(0.0, suggested), max(0.0, suggested)
+        if not (lo <= applied <= hi):
+            raise HTTPException(status_code=400,
+                                detail=f"Adjustment must be between ₹{lo:,.2f} and ₹{hi:,.2f} "
+                                       f"(the computed difference) — extra charges belong on the folio")
+        if applied != suggested and not data.reason:
+            raise HTTPException(status_code=400,
+                                detail="Changing the computed rate difference needs a reason")
+        if applied < suggested and _shift_waive_requires_admin() and user.get("role") != "admin":
+            raise HTTPException(status_code=403,
+                                detail="Charging less than the computed difference requires an admin login")
+
+        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        if not folio:
+            raise HTTPException(status_code=409, detail="No folio for this booking — open it first")
+        if applied != 0 and (folio.status != "open" or _get_invoice(db, folio.id)):
+            raise HTTPException(status_code=409,
+                                detail="Folio already invoiced — the rate difference cannot be posted; "
+                                       "shift with a zero adjustment or void the invoice first")
+
+        valid_from, valid_to = _card_window(booking)
+        response = {
+            "booking_id": booking.booking_id,
+            "dry_run": data.dry_run,
+            "from_room": {"room_id": old_room.room_id, "room_number": old_room.room_number,
+                          "room_type_name": old_type.name},
+            "to_room": {"room_id": new_room.room_id, "room_number": new_room.room_number,
+                        "room_type_name": new_type.name},
+            "remaining_nights": remaining_nights,
+            "old_rate_per_night": old_rate,
+            "new_rate_per_night": new_rate,
+            "suggested_adjustment": suggested,
+            "applied_adjustment": None if data.dry_run else applied,
+            "requires_reason": applied != suggested,
+            "requires_admin": _shift_waive_requires_admin(),
+            "folio_id": folio.id,
+            "folio_balance": float(folio.balance or 0),
+            "superseded_card_ids": [],
+            "card": _encode_payload(db, item, new_room, valid_from, valid_to),
+        }
+
+        if data.dry_run:
+            db.rollback()  # release the row locks; nothing was mutated
+            return response
+
+        # ---- mutate (single transaction) ----
+        before = {"room_id": old_room.room_id, "room_number": old_room.room_number,
+                  "room_type_id": item.room_type_id, "room_type": old_type.name,
+                  "folio_balance": float(folio.balance or 0)}
+
+        item.room_id = new_room.room_id
+        if cross_type:
+            item.room_type_id = new_room.room_type_id
+        if old_room.status == "occupied":
+            old_room.status = "cleaning"
+        new_room.status = "occupied"
+
+        old_cards = db.query(CardIssuance).filter(
+            CardIssuance.booking_id == booking.booking_id,
+            CardIssuance.room_id == old_room.room_id,
+            CardIssuance.status == "active",
+        ).all()
+        for c in old_cards:
+            c.status = "superseded"
+        superseded_ids = [c.id for c in old_cards]
+
+        if applied != 0:
+            desc = (f"Room shift {old_room.room_number}→{new_room.room_number} "
+                    f"rate difference ({remaining_nights} nights)")
+            if data.reason:
+                desc += f" — {data.reason}"
+            db.add(FolioCharge(
+                folio_id=folio.id,
+                type="misc",
+                description=desc,
+                qty=1,
+                unit_price=applied,
+                amount=applied,
+                gst_percent=float(new_type.gst_percent) if applied > 0 else float(old_type.gst_percent),
+                posted_by=_resolve_user_id(db, user),
+            ))
+            _recompute(db, folio)
+        db.commit()
+
+        write_audit(db, user, "reception.shift", "booking", booking.booking_id,
+                    before=before,
+                    after={"room_id": new_room.room_id, "room_number": new_room.room_number,
+                           "room_type_id": new_room.room_type_id, "room_type": new_type.name,
+                           "remaining_nights": remaining_nights,
+                           "suggested_adjustment": suggested, "applied_adjustment": applied,
+                           "reason": data.reason, "superseded_card_ids": superseded_ids,
+                           "folio_balance": float(folio.balance or 0),
+                           "client_ref": data.client_ref},
+                    client="desktop", commit=True)
+
+        response["superseded_card_ids"] = superseded_ids
+        response["folio_balance"] = float(folio.balance or 0)
+        # active_cards on the new room may have changed after the supersede/commit
+        response["card"] = _encode_payload(db, item, new_room, valid_from, valid_to)
+        return response
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        logger.error(f"shift_room failed: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Room shift failed")
+
+
 # ---- Desk board: arrivals + in-house + vacant rooms (also the desktop's offline cache) ----
 @router.get("/board")
 def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
@@ -662,10 +870,14 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         "room_id": r.room_id,
         "room_number": r.room_number,
         "room_type_id": r.room_type_id,
+        "room_type_name": rt.name if rt else None,          # shift target picker (prompt 09)
+        "price_per_night": float(rt.price_per_night) if rt else None,
         "building": r.building,
         "floor": r.floor,
         "max_cards": r.max_cards,
-    } for r in db.query(Room).filter(
+    } for r, rt in db.query(Room, RoomType).outerjoin(
+        RoomType, Room.room_type_id == RoomType.room_type_id,
+    ).filter(
         Room.is_active == True,  # noqa: E712
         Room.status == "vacant",
     ).order_by(Room.room_number).all()]

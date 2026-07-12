@@ -215,7 +215,7 @@ class CardIssueRequest(BaseModel):
     room_code: str = Field(..., min_length=8, max_length=16)  # BBFFRRAA
     valid_from: datetime
     valid_to: datetime
-    issue_type: str = Field("checkin", pattern="^(checkin|extra|lost_reissue)$")
+    issue_type: str = Field("checkin", pattern="^(checkin|extra|lost_reissue|shift)$")
     lost_card_id: Optional[int] = Field(None, gt=0)           # issuance to mark "lost" on lost_reissue
     station_id: Optional[str] = Field(None, max_length=50)
     encoded: bool = True      # False = pre-check only (nothing recorded on failure)
@@ -228,6 +228,20 @@ class CheckoutRequest(BaseModel):
     booking_id: int = Field(..., gt=0)
     override: bool = False                                    # settle despite non-zero balance
     override_reason: Optional[str] = Field(None, min_length=3, max_length=200)
+    client_ref: Optional[str] = Field(None, max_length=64)
+
+
+class RoomShiftRequest(BaseModel):
+    """Move an in-house guest to a different room mid-stay (prompt 09). from_room_id is
+    required because a group booking holds several rooms. applied_adjustment None = accept
+    the server-computed rate difference; charging less than computed needs reason + admin
+    (SHIFT_WAIVE_REQUIRES_ADMIN). dry_run validates + prices without changing anything."""
+    booking_id: int = Field(..., gt=0)
+    from_room_id: int = Field(..., gt=0)
+    to_room_id: int = Field(..., gt=0)
+    applied_adjustment: Optional[float] = Field(None, ge=-10_000_000, le=10_000_000)
+    reason: Optional[str] = Field(None, min_length=3, max_length=200)
+    dry_run: bool = False
     client_ref: Optional[str] = Field(None, max_length=64)
 
 

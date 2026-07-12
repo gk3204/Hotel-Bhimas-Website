@@ -218,7 +218,7 @@ class CardIssuance(Base):
     station_id = Column(String(50), nullable=True)             # which front-desk PC issued it
     issued_at = Column(TIMESTAMP, server_default=func.now(), index=True)
     status = Column(String(20), nullable=False, default="active", index=True)  # active|checked_out|erased|lost|superseded
-    issue_type = Column(String(20), nullable=False, default="checkin")  # checkin|extra|lost_reissue
+    issue_type = Column(String(20), nullable=False, default="checkin")  # checkin|extra|lost_reissue|shift
     client_ref = Column(String(64), nullable=True, unique=True, index=True)  # desktop-generated uuid (offline outbox dedupe)
 
 
