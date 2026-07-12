@@ -229,8 +229,15 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db)):
 # CHECK-IN / CHECK-OUT (prompt 06)
 # =====================================================================
 
+def _checkout_mode() -> str:
+    """'24h' (default): checkout is N x 24h after the ACTUAL check-in moment (Hotel Bhimas
+    policy — check in 10pm, check out 10pm). 'fixed': checkout at CHECKOUT_HOUR on the
+    checkout date. Read at call time so it can change without restart."""
+    return "fixed" if os.getenv("CHECKOUT_MODE", "24h").strip().lower() == "fixed" else "24h"
+
+
 def _checkout_hour() -> int:
-    """Hotel checkout hour (24h). Read at call time so it can change without restart."""
+    """Fixed-mode checkout hour (used only when CHECKOUT_MODE=fixed)."""
     try:
         return max(0, min(23, int(os.getenv("CHECKOUT_HOUR", "12"))))
     except ValueError:
@@ -250,11 +257,18 @@ def _checkout_override_requires_admin() -> bool:
 
 
 def _card_window(booking: Booking):
-    """Card validity: from now until the stay's checkout hour + grace."""
+    """Card validity window.
+    24h mode (default): expiry = the ACTUAL check-in moment + nights x 24h + grace
+    (guest in at 10pm -> out at 10pm). Before check-in, 'now' stands in for the
+    check-in moment (the wizard checks in and encodes within the same minute).
+    Fixed mode: expiry = checkout date @ CHECKOUT_HOUR + grace."""
     valid_from = datetime.now()
-    valid_to = datetime.combine(booking.check_out, time(hour=_checkout_hour())) + \
-        timedelta(minutes=_grace_minutes())
-    return valid_from, valid_to
+    nights = max(1, (booking.check_out - booking.check_in).days)
+    if _checkout_mode() == "fixed":
+        base = datetime.combine(booking.check_out, time(hour=_checkout_hour()))
+    else:
+        base = (booking.checked_in_at or valid_from) + timedelta(days=nights)
+    return valid_from, base + timedelta(minutes=_grace_minutes())
 
 
 def _room_code(room: Room) -> str:
