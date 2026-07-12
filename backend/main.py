@@ -5,10 +5,15 @@ from dotenv import load_dotenv
 import os
 import logging
 from contextlib import asynccontextmanager
-from routers import room_types, admin, users, adminsecurity, payments   
+from routers import room_types, admin, users, adminsecurity, payments
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
+from routers.promotions import router as promotions_router
+# --- PMS foundation routers (Milestone 0, prompt 01) ---
+from routers import reception, folio, cards, cash_shift, housekeeping, fraud
+# --- PMS Milestone 1 routers ---
+from routers import rooms
 
 # Load environment variables
 load_dotenv()
@@ -114,6 +119,15 @@ app.include_router(admin.router)
 app.include_router(users.router)
 app.include_router(adminsecurity.router)
 app.include_router(payments.router)
+app.include_router(promotions_router)
+# --- PMS foundation routers (Milestone 0, prompt 01) ---
+app.include_router(reception.router)
+app.include_router(folio.router)
+app.include_router(cards.router)
+app.include_router(cash_shift.router)
+app.include_router(housekeeping.router)
+app.include_router(fraud.router)
+app.include_router(rooms.router)
 
 # -------------------------
 # Health Check

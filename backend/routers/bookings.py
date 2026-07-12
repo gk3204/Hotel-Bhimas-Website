@@ -12,6 +12,7 @@ from sqlalchemy.orm import joinedload
 from utils.auth_utils import require_reception_or_admin, require_admin
 from scripts.expire_booking_jobs import expire_pending_bookings
 from routers.payments import process_razorpay_refund
+from routers.promotions import get_active_promotions, best_promotion_for_item
 from utils.email_service import send_admin_cancellation_email
 
 # Request model for admin cancellation
@@ -143,35 +144,51 @@ def create_booking(
         nights = (data.check_out - data.check_in).days
         total_base = 0
         total_gst = 0
+        total_discount = 0
         total_room_amount = 0
-        
+
+        # Load active promotions once; discount is applied per room-type line item
+        # against the booking's check-in date (server-authoritative).
+        active_promotions = get_active_promotions(db)
+
         booking_items_data = []
 
         for room_item in data.rooms:
             room_type = room_types_map[room_item.room_type_id]
-            
+
             # Calculate for this room type & quantity
             base_amount = round(
                 nights * float(room_type.price_per_night) * room_item.quantity,
                 2
             )
 
+            # 💸 Apply best applicable promotion to the base (pre-GST) amount
+            _, item_discount = best_promotion_for_item(
+                active_promotions,
+                room_item.room_type_id,
+                base_amount,
+                data.check_in
+            )
+            discounted_base = round(base_amount - item_discount, 2)
+
             gst_amount = round(
-                base_amount * float(room_type.gst_percent) / 100,
+                discounted_base * float(room_type.gst_percent) / 100,
                 2
             )
 
-            item_total = round(base_amount + gst_amount, 2)
-            
+            item_total = round(discounted_base + gst_amount, 2)
+
             total_base += base_amount
             total_gst += gst_amount
+            total_discount += item_discount
             total_room_amount += item_total
-            
+
             booking_items_data.append({
                 "room_type_id": room_item.room_type_id,
                 "quantity": room_item.quantity,
                 "base_amount": base_amount,
                 "gst_amount": gst_amount,
+                "discount_amount": item_discount,
                 "total_amount": item_total
             })
 
@@ -186,11 +203,13 @@ def create_booking(
         booking = Booking(
             guest_id=guest.guest_id,
             check_in=data.check_in,
+            check_in_time=data.check_in_time,
             check_out=data.check_out,
             booking_source=data.booking_source,
             status="pending_payment",
             base_amount=total_base,
             gst_amount=total_gst,
+            discount_amount=total_discount,
             total_amount=total_room_amount,
             convenience_fee=convenience_base,
             convenience_gst=convenience_gst,
@@ -208,6 +227,7 @@ def create_booking(
                 quantity=item_data["quantity"],
                 base_amount=item_data["base_amount"],
                 gst_amount=item_data["gst_amount"],
+                discount_amount=item_data["discount_amount"],
                 total_amount=item_data["total_amount"]
             )
             db.add(booking_item)
@@ -221,10 +241,12 @@ def create_booking(
             "booking_id": booking.booking_id,
             "guest_id": guest.guest_id,
             "check_in": booking.check_in,
+            "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
             "check_out": booking.check_out,
             "status": booking.status,
             "base_amount": float(booking.base_amount),
             "gst_amount": float(booking.gst_amount),
+            "discount_amount": float(booking.discount_amount or 0),
             "total_amount": float(booking.total_amount),
             "convenience_fee": float(booking.convenience_fee),
             "convenience_gst": float(booking.convenience_gst),
@@ -294,6 +316,7 @@ def read_all_bookings(
             "room_types": ", ".join(room_types),
             "room_count": len(booking.booking_items),
             "check_in": booking.check_in,
+            "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
             "check_out": booking.check_out,
             "status": booking.status,
             "payable_amount": float(booking.grand_total),
@@ -368,6 +391,7 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
             "quantity": item.quantity,
             "base_amount": float(item.base_amount),
             "gst_amount": float(item.gst_amount),
+            "discount_amount": float(item.discount_amount or 0),
             "total_amount": float(item.total_amount)
         })
 
@@ -384,6 +408,7 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
 
         "stay": {
             "check_in": booking.check_in,
+            "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
             "check_out": booking.check_out,
             "nights": (booking.check_out - booking.check_in).days,
         },
@@ -391,6 +416,7 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
         "charges": {
             "room_base": float(booking.base_amount),
             "room_gst": float(booking.gst_amount),
+            "discount": float(booking.discount_amount or 0),
             "room_total": float(booking.total_amount),
 
             "convenience_fee": float(booking.convenience_fee),

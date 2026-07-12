@@ -29,6 +29,8 @@ const AdminHeader = () => {
           <nav className="hidden md:flex space-x-6 text-[#E5C07B] font-medium">
             <Link to="/admin" className="hover:text-[#FCD34D]">Dashboard</Link>
             <Link to="/admin/room-types" className="hover:text-[#FCD34D]">Room Types</Link>
+            <Link to="/admin/rooms" className="hover:text-[#FCD34D]">Rooms</Link>
+            <Link to="/admin/promotions" className="hover:text-[#FCD34D]">Promotions</Link>
             <Link to="/admin/room-availability" className="hover:text-[#FCD34D]">Room Availability</Link>
             <Link to="/admin/user-check" className="hover:text-[#FCD34D]">Users</Link>
             <Link to="/admin/bookings" className="hover:text-[#FCD34D]">Bookings</Link>
@@ -78,7 +80,9 @@ const AdminHeader = () => {
 
         <nav className="flex flex-col px-6 py-6 space-y-6 text-[#E5C07B] font-medium">
           <Link to="/admin" onClick={() => setMenuOpen(false)}>Dashboard</Link>
-          <Link to="/admin/room-type" onClick={() => setMenuOpen(false)}>Room Types</Link>
+          <Link to="/admin/room-types" onClick={() => setMenuOpen(false)}>Room Types</Link>
+          <Link to="/admin/rooms" onClick={() => setMenuOpen(false)}>Rooms</Link>
+          <Link to="/admin/promotions" onClick={() => setMenuOpen(false)}>Promotions</Link>
           <Link to="/admin/room-availability" onClick={() => setMenuOpen(false)}>Room Availability</Link>
           <Link to="/admin/user-check" onClick={() => setMenuOpen(false)}>Users</Link>
           <Link to="/admin/bookings" onClick={() => setMenuOpen(false)}>Bookings</Link>

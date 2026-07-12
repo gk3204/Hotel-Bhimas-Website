@@ -9,10 +9,13 @@ from datetime import datetime
 import hmac
 import hashlib
 from database import SessionLocal
-from models import Booking, Payment, BookingItem, RoomType, WebhookEvent
+from models import Booking, Payment, BookingItem, RoomType, WebhookEvent, Folio, FolioCharge
+from schemas import DeskPaymentRecord
 from utils.pdf_generator import generate_booking_pdf
 from utils.email_service import send_booking_email
 from utils.auth_utils import require_reception_or_admin
+from utils.audit import write_audit, _resolve_user_id
+from routers.folio import _recompute as _folio_recompute
 
 # Try to import razorpay, but allow app to run without it
 try:
@@ -285,10 +288,12 @@ async def verify_payment(
         "guest_email": booking.guest.email,
         "guest_phone": booking.guest.phone,
         "check_in": booking.check_in,
+        "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
         "check_out": booking.check_out,
         "status": booking.status,
         "base_amount": float(booking.base_amount),
         "gst_amount": float(booking.gst_amount),
+        "discount_amount": float(booking.discount_amount or 0),
         "total_amount": float(booking.total_amount),
         "convenience_fee": float(booking.convenience_fee),
         "convenience_gst": float(booking.convenience_gst),
@@ -582,3 +587,106 @@ async def payment_webhook(request: Request, db: Session = Depends(get_db)):
     except Exception as e:
         logger.error(f"❌ Webhook processing error: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail="Webhook processing failed")
+
+
+# =====================================================================
+# DESK PAYMENTS (prompt 06 — minimal pull-forward from prompt 08).
+# Records a payment taken at the front desk (cash / card-machine / UPI / bank).
+# No gateway involved. Prompt 08 adds receipts, refunds and cash-shift linkage.
+# =====================================================================
+
+def total_paid(db: Session, booking_id: int) -> float:
+    """Sum of recorded payments for a booking (the anti-fraud 'recorded payment' gate
+    used by check-in and card issue). Recorded = Payment.status == 'paid'."""
+    total = (
+        db.query(func.coalesce(func.sum(Payment.amount), 0))
+        .filter(Payment.booking_id == booking_id, Payment.status == "paid")
+        .scalar()
+    )
+    return float(total or 0)
+
+
+@router.post("/record")
+def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
+                        user=Depends(require_reception_or_admin)):
+    """Record a desk payment against a booking. Idempotent on client_ref (offline
+    outbox re-flushes return the original row). If the booking has an open folio,
+    a matching negative 'payment' line is posted so the balance updates."""
+    try:
+        # Idempotency: an outbox re-flush with the same client_ref returns the original.
+        if data.client_ref:
+            existing = db.query(Payment).filter(Payment.client_ref == data.client_ref).first()
+            if existing:
+                return _desk_payment_response(db, existing, duplicate=True)
+
+        booking = db.query(Booking).filter(Booking.booking_id == data.booking_id).first()
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        if booking.status not in ("confirmed", "checked_in"):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Cannot record a payment against a '{booking.status}' booking")
+
+        payment = Payment(
+            booking_id=booking.booking_id,
+            gateway="desk",
+            method=data.method,
+            payment_id_gateway=data.reference,
+            amount=Decimal(str(round(data.amount, 2))),
+            currency="INR",
+            status="paid",
+            client_ref=data.client_ref,
+        )
+        db.add(payment)
+        db.flush()
+
+        # Post a credit line on the open folio (payments stay allowed after invoicing;
+        # a settled folio takes no more money).
+        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        if folio:
+            if folio.status != "open":
+                raise HTTPException(status_code=409, detail="Folio is settled — no further payments")
+            ref = f" ({data.reference})" if data.reference else ""
+            db.add(FolioCharge(
+                folio_id=folio.id,
+                type="payment",
+                description=f"Desk payment — {data.method}{ref}",
+                qty=1,
+                unit_price=-round(data.amount, 2),
+                amount=-round(data.amount, 2),
+                gst_percent=0,
+                posted_by=_resolve_user_id(db, user),
+            ))
+            _folio_recompute(db, folio)
+
+        db.commit()
+        write_audit(db, user, "payment.desk_record", "payment", payment.payment_id,
+                    after={"booking_id": booking.booking_id, "amount": float(payment.amount),
+                           "method": data.method, "reference": data.reference,
+                           "client_ref": data.client_ref},
+                    client="desktop", commit=True)
+        logger.info(f"✅ Desk payment ₹{payment.amount} ({data.method}) recorded for booking {booking.booking_id}")
+        return _desk_payment_response(db, payment)
+
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        logger.error(f"❌ Desk payment failed: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to record payment")
+
+
+def _desk_payment_response(db: Session, payment: Payment, duplicate: bool = False):
+    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    return {
+        "payment_id": payment.payment_id,
+        "booking_id": payment.booking_id,
+        "amount": float(payment.amount),
+        "method": payment.method,
+        "status": payment.status,
+        "duplicate": duplicate,
+        "total_paid": total_paid(db, payment.booking_id),
+        "folio_id": folio.id if folio else None,
+        "folio_balance": float(folio.balance or 0) if folio else None,
+    }

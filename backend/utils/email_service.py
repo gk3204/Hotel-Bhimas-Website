@@ -51,6 +51,8 @@ def send_booking_email(booking_data, pdf_path):
 
     check_in_str = booking_data['check_in'].strftime("%d %B %Y")
     check_out_str = booking_data['check_out'].strftime("%d %B %Y")
+    arrival_time = booking_data.get('check_in_time')
+    arrival_str = arrival_time[:5] if arrival_time else None  # "HH:MM:SS" -> "HH:MM"
     nights = (booking_data['check_out'] - booking_data['check_in']).days
 
     # ✅ FIX: Richer TextPart that mirrors HTML (reduces spam score)
@@ -61,7 +63,7 @@ Dear {booking_data['guest_name']},
 Your booking has been successfully confirmed. Please find the details below.
 
 Booking ID   : {booking_data['booking_id']}
-Check-in     : {check_in_str}
+Check-in     : {check_in_str}{f" (Arrival ~{arrival_str})" if arrival_str else ""}
 Check-out    : {check_out_str}
 Nights       : {nights}
 Total Paid   : Rs. {booking_data['grand_total']}
@@ -136,7 +138,7 @@ Email: hotelbhimas@gmail.com
               </tr>
               <tr style="border-bottom:1px solid #e8e8e8; background:#ffffff;">
                 <td style="color:#888888; font-size:13px;">Check-in</td>
-                <td style="color:#222222; font-size:14px;">{check_in_str}</td>
+                <td style="color:#222222; font-size:14px;">{check_in_str}{f" &nbsp;(Arrival ~{arrival_str})" if arrival_str else ""}</td>
               </tr>
               <tr style="border-bottom:1px solid #e8e8e8;">
                 <td style="color:#888888; font-size:13px;">Check-out</td>
@@ -544,3 +546,156 @@ Hotel Bhimas
     except Exception as e:
         logger.error(f"❌ Admin cancellation email error: {str(e)}")
         return False
+
+def send_invoice_email(invoice_data, pdf_path):
+    """Send a folio GST tax invoice to the guest (+ hotel copy) via Mailjet (prompt 07).
+
+    invoice_data comes from routers/folio.py _invoice_payload:
+    invoice_no, invoice_date, guest{name,phone,email}, booking{...}, grand_total, balance_due.
+    """
+    if not MAILJET_API_KEY or not MAILJET_API_SECRET:
+        logger.error("❌ Mailjet credentials missing")
+        raise Exception("Mailjet not configured")
+
+    guest = invoice_data["guest"]
+    booking = invoice_data["booking"]
+    invoice_no = invoice_data["invoice_no"]
+
+    guest_recipients = [{"Email": guest["email"], "Name": guest["name"]}]
+    hotel_recipients = [{"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"}]
+
+    pdf_attachments = []
+    if pdf_path and os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+        try:
+            with open(pdf_path, "rb") as f:
+                pdf_attachments.append({
+                    "ContentType": "application/pdf",
+                    "Filename": invoice_no.replace("/", "-") + ".pdf",
+                    "Base64Content": base64.b64encode(f.read()).decode()
+                })
+        except Exception as e:
+            logger.warning(f"⚠️ Invoice PDF attach failed: {str(e)}")
+
+    check_in_str = booking["check_in"].strftime("%d %B %Y") if booking["check_in"] else "N/A"
+    check_out_str = booking["check_out"].strftime("%d %B %Y") if booking["check_out"] else "N/A"
+    invoice_date_str = invoice_data["invoice_date"].strftime("%d %B %Y")
+
+    text_body = f"""Hotel Bhimas - Tax Invoice
+
+Dear {guest['name']},
+
+Thank you for staying with us. Please find your GST tax invoice attached.
+
+Invoice No   : {invoice_no}
+Invoice Date : {invoice_date_str}
+Booking ID   : {booking['booking_id']}
+Check-in     : {check_in_str}
+Check-out    : {check_out_str}
+Grand Total  : Rs. {invoice_data['grand_total']:,.2f}
+Balance Due  : Rs. {invoice_data['balance_due']:,.2f}
+
+A PDF copy of the invoice is attached to this email.
+
+---
+Hotel Bhimas
+42, G Car Street, Tirupati - 517501
+Landline: +91-877-2225744
+Mobile: +91-9347172758
+Email: hotelbhimas@gmail.com
+GSTIN: 37AAACK9397F1Z3
+"""
+
+    email_body = f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Tax Invoice - Hotel Bhimas</title>
+</head>
+<body style="margin:0; padding:0; background-color:#f4f4f4; font-family: Arial, sans-serif;">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background-color:#f4f4f4; padding:20px 0;">
+  <tr><td align="center">
+    <table width="600" cellpadding="0" cellspacing="0" border="0"
+           style="max-width:600px; width:100%; background:#ffffff; border-radius:8px; overflow:hidden; border:1px solid #e0e0e0;">
+      <tr>
+        <td align="center" style="background-color:#000000; padding:30px 20px;">
+          <h1 style="color:#D4AF37; font-size:26px; letter-spacing:3px; margin:0 0 6px 0;">HOTEL BHIMAS</h1>
+          <p style="color:#ffffff; font-size:12px; margin:0; letter-spacing:2px;">LUXURY &amp; COMFORT</p>
+        </td>
+      </tr>
+      <tr>
+        <td style="padding:30px 30px 20px 30px;">
+          <h2 style="color:#222222; font-size:20px; margin:0 0 16px 0;">Tax Invoice</h2>
+          <p style="color:#444444; font-size:15px; line-height:1.6; margin:0 0 20px 0;">
+            Dear <strong>{guest['name']}</strong>,<br><br>
+            Thank you for staying with Hotel Bhimas. Your GST tax invoice is attached as a PDF.
+          </p>
+          <table width="100%" cellpadding="10" cellspacing="0" border="0"
+                 style="background:#f9f9f9; border-radius:6px; border:1px solid #e8e8e8;">
+            <tr style="border-bottom:1px solid #e8e8e8;">
+              <td style="color:#888888; font-size:13px; width:40%;">Invoice No</td>
+              <td style="color:#222222; font-size:14px; font-weight:bold;">{invoice_no}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #e8e8e8; background:#ffffff;">
+              <td style="color:#888888; font-size:13px;">Invoice Date</td>
+              <td style="color:#222222; font-size:14px;">{invoice_date_str}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #e8e8e8;">
+              <td style="color:#888888; font-size:13px;">Stay</td>
+              <td style="color:#222222; font-size:14px;">{check_in_str} to {check_out_str}</td>
+            </tr>
+            <tr style="border-bottom:1px solid #e8e8e8; background:#ffffff;">
+              <td style="color:#888888; font-size:13px;">Grand Total</td>
+              <td style="color:#222222; font-size:14px; font-weight:bold;">Rs. {invoice_data['grand_total']:,.2f}</td>
+            </tr>
+            <tr>
+              <td style="color:#888888; font-size:13px;">Balance Due</td>
+              <td style="color:#222222; font-size:14px; font-weight:bold;">Rs. {invoice_data['balance_due']:,.2f}</td>
+            </tr>
+          </table>
+          <p style="color:#888888; font-size:12px; line-height:1.6; margin:20px 0 0 0;">
+            Hotel Bhimas · 42, G Car Street, Tirupati - 517501 · GSTIN: 37AAACK9397F1Z3<br>
+            +91-877-2225744 · +91-9347172758 · hotelbhimas@gmail.com
+          </p>
+        </td>
+      </tr>
+    </table>
+  </td></tr>
+</table>
+</body>
+</html>"""
+
+    try:
+        data = {
+            "Messages": [
+                {
+                    "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas"},
+                    "To": guest_recipients,
+                    "Subject": f"Tax Invoice {invoice_no} - Hotel Bhimas",
+                    "TextPart": text_body,
+                    "HTMLPart": email_body,
+                    "Attachments": pdf_attachments,
+                    "ReplyTo": {"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"},
+                    "Headers": {"X-Entity-Ref-ID": invoice_no},
+                },
+                {
+                    "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas Bookings"},
+                    "To": hotel_recipients,
+                    "Subject": f"[INVOICE SENT] {invoice_no} - {guest['name']} (Booking {booking['booking_id']})",
+                    "TextPart": text_body,
+                    "HTMLPart": email_body,
+                    "Attachments": pdf_attachments,
+                }
+            ]
+        }
+
+        result = mailjet.send.create(data=data)
+
+        if result.status_code == 200:
+            logger.info(f"✅ Invoice email sent: {invoice_no}")
+        else:
+            logger.error(f"❌ Mailjet failed: {result.status_code} — {result.json()}")
+            raise Exception("Invoice email sending failed")
+
+    except Exception as e:
+        logger.error(f"❌ Invoice email error: {str(e)}")
+        raise

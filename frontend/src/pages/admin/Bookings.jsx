@@ -494,6 +494,14 @@ const Bookings = () => {
                       </p>
                     </div>
                     <div>
+                      <p className="text-slate-400 text-xs mb-1">Arrival Time</p>
+                      <p className="font-semibold">
+                        {selectedBooking.stay.check_in_time
+                          ? selectedBooking.stay.check_in_time.slice(0, 5)
+                          : "—"}
+                      </p>
+                    </div>
+                    <div>
                       <p className="text-slate-400 text-xs mb-1">Check Out</p>
                       <p className="font-semibold">
                         {selectedBooking.stay.check_out}
@@ -520,6 +528,14 @@ const Bookings = () => {
                         ₹{selectedBooking.charges.room_base}
                       </span>
                     </div>
+                    {parseFloat(selectedBooking.charges.discount || 0) > 0 && (
+                      <div className="flex justify-between">
+                        <span className="text-green-400">Discount</span>
+                        <span className="font-semibold text-green-400">
+                          − ₹{selectedBooking.charges.discount}
+                        </span>
+                      </div>
+                    )}
                     <div className="flex justify-between">
                       <span className="text-slate-400">Room GST (18%)</span>
                       <span className="font-semibold">

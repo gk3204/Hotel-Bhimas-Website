@@ -125,10 +125,14 @@ def generate_booking_pdf(booking_data, payment_data):
     room_types_list = [item['room_type_name'] for item in booking_data['booking_items']]
     room_types_str = ", ".join(room_types_list) if room_types_list else "N/A"
 
+    arrival_time = booking_data.get('check_in_time')
+    arrival_display = arrival_time[:5] if arrival_time else "N/A"  # "HH:MM:SS" -> "HH:MM"
+
     booking_table_data = [
         ["Booking ID", str(booking_data['booking_id'])],
         ["Room Type(s)", room_types_str],
         ["Check-in", booking_data['check_in'].strftime("%d-%m-%Y")],
+        ["Expected Arrival Time", arrival_display],
         ["Check-out", booking_data['check_out'].strftime("%d-%m-%Y")],
         ["Status", booking_data['status'].upper()],
     ]
@@ -211,17 +215,22 @@ def generate_booking_pdf(booking_data, payment_data):
 
     base_amount = booking_data['base_amount']
     gst_amount = booking_data['gst_amount']
+    discount_amount = booking_data.get('discount_amount', 0) or 0
     convenience_fee = booking_data['convenience_fee']
     convenience_gst = booking_data['convenience_gst']
     grand_total = booking_data['grand_total']
     total_convnience_fee = convenience_fee + convenience_gst
-    
+
     payment_summary_data = [
         [f"{nights} Night(s)", f"Rs. {base_amount:,.2f}"],
+    ]
+    if discount_amount > 0:
+        payment_summary_data.append(["Discount", f"- Rs. {discount_amount:,.2f}"])
+    payment_summary_data.extend([
         ["GST", f"Rs. {gst_amount:,.2f}"],
         ["Convenience Fee", f"Rs. {total_convnience_fee:,.2f}"],
         ["GRAND TOTAL", f"Rs. {grand_total:,.2f}"],
-    ]
+    ])
     
     payment_summary_table = Table(payment_summary_data, colWidths=[300, 150])
     payment_summary_table.setStyle(TableStyle([
@@ -324,4 +333,343 @@ def generate_booking_pdf(booking_data, payment_data):
     # Build PDF
     doc.build(elements)
 
+    return file_path
+
+
+# =====================================================
+# GST TAX INVOICE (prompt 07 — folio billing)
+# =====================================================
+
+_ONES = ["", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
+         "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen",
+         "Eighteen", "Nineteen"]
+_TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"]
+
+
+def _two_digits(n):
+    return _ONES[n] if n < 20 else (_TENS[n // 10] + (" " + _ONES[n % 10] if n % 10 else ""))
+
+
+def _amount_in_words(amount):
+    """Indian-system (lakh/crore) amount in words, e.g. 'Rupees One Lakh Twenty Three Thousand and Five Paise Only'."""
+    rupees = int(amount)
+    paise = int(round((amount - rupees) * 100))
+    if rupees == 0:
+        words = "Zero"
+    else:
+        parts = []
+        crore, rest = divmod(rupees, 10000000)
+        lakh, rest = divmod(rest, 100000)
+        thousand, rest = divmod(rest, 1000)
+        hundred, tens = divmod(rest, 100)
+        if crore:
+            parts.append(_two_digits(crore) + " Crore")
+        if lakh:
+            parts.append(_two_digits(lakh) + " Lakh")
+        if thousand:
+            parts.append(_two_digits(thousand) + " Thousand")
+        if hundred:
+            parts.append(_ONES[hundred] + " Hundred")
+        if tens:
+            parts.append(_two_digits(tens))
+        words = " ".join(parts)
+    out = f"Rupees {words}"
+    if paise:
+        out += f" and {_two_digits(paise)} Paise"
+    return out + " Only"
+
+
+def generate_folio_invoice_pdf(invoice_data):
+    """
+    Generate a GST tax invoice PDF for a folio (prompt 07).
+
+    Args:
+        invoice_data: dict from routers/folio.py _invoice_payload:
+            invoice_no, invoice_date, folio_id, guest{name,phone,email},
+            booking{booking_id,check_in,check_out,nights},
+            lines[{description,qty,unit_price,gst_percent,amount}],
+            discount_lines[], payment_lines[],
+            gst_rows[{gst_percent,taxable,cgst,sgst,total}],
+            charges_total, discount_total, taxable_total, cgst_total,
+            sgst_total, grand_total, payments_total, balance_due
+    Returns the generated file path (temp dir).
+    """
+    import tempfile
+    file_path = os.path.join(tempfile.gettempdir(), f"invoice_folio_{invoice_data['folio_id']}.pdf")
+
+    doc = SimpleDocTemplate(file_path, pagesize=A4,
+                            rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontSize = 9
+    styles["Heading2"].fontSize = 11
+    elements = []
+
+    # Header (same brand block as the booking confirmation)
+    logo_path = "assets/logo-gold.png"
+    hotel_info = Paragraph(
+        "<b>HOTEL BHIMAS</b><br/>"
+        "Luxury & Comfort Stay<br/>"
+        "42, G Car Street, Tirupati - 517501<br/>"
+        "Landline: +91877-2225744<br/>"
+        "Mobile: +919347172758<br/>"
+        "GSTIN: 37AAACK9397F1Z3",
+        styles["Normal"]
+    )
+    if os.path.exists(logo_path):
+        logo = Image(logo_path, width=1.5 * inch, height=1 * inch)
+        elements.append(Table([[logo, hotel_info]], colWidths=[120, 350]))
+    else:
+        elements.append(hotel_info)
+    elements.append(Spacer(1, 0.3 * inch))
+
+    title_style = ParagraphStyle(
+        name="TaxInvoiceTitle", parent=styles["Title"],
+        textColor=colors.HexColor("#B8860B"), fontSize=16, alignment=1, spaceAfter=16,
+    )
+    elements.append(Paragraph("TAX INVOICE", title_style))
+
+    # Invoice / stay meta
+    booking = invoice_data["booking"]
+    guest = invoice_data["guest"]
+    meta_data = [
+        ["Invoice No", invoice_data["invoice_no"],
+         "Invoice Date", invoice_data["invoice_date"].strftime("%d-%m-%Y")],
+        ["Booking ID", str(booking["booking_id"]),
+         "Nights", str(booking["nights"])],
+        ["Guest", guest["name"], "Phone", guest["phone"]],
+        ["Check-in", booking["check_in"].strftime("%d-%m-%Y") if booking["check_in"] else "N/A",
+         "Check-out", booking["check_out"].strftime("%d-%m-%Y") if booking["check_out"] else "N/A"],
+    ]
+    meta_table = Table(meta_data, colWidths=[80, 190, 80, 130])
+    meta_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
+        ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f5f5f5")),
+        ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+    ]))
+    elements.append(meta_table)
+    elements.append(Spacer(1, 0.3 * inch))
+
+    # Line items (GST-inclusive amounts)
+    elements.append(Paragraph("<b>Charges</b>", styles["Heading2"]))
+    elements.append(Spacer(1, 0.12 * inch))
+    items_data = [["Description", "Qty", "Rate", "GST %", "Amount"]]
+    for line in invoice_data["lines"]:
+        items_data.append([
+            Paragraph(line["description"] or "", styles["Normal"]),
+            f"{line['qty']:g}",
+            f"Rs. {line['unit_price']:,.2f}",
+            f"{line['gst_percent']:g}%" if line["gst_percent"] is not None else "-",
+            f"Rs. {line['amount']:,.2f}",
+        ])
+    for line in invoice_data["discount_lines"]:
+        items_data.append([
+            Paragraph(line["description"] or "Discount", styles["Normal"]),
+            "", "", "", f"- Rs. {abs(line['amount']):,.2f}",
+        ])
+    items_table = Table(items_data, colWidths=[220, 40, 80, 50, 90])
+    items_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (1, 0), (-1, -1), 'RIGHT'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+    ]))
+    elements.append(items_table)
+    elements.append(Spacer(1, 0.25 * inch))
+
+    # GST summary per slab (CGST/SGST split)
+    elements.append(Paragraph("<b>GST Summary</b>", styles["Heading2"]))
+    elements.append(Spacer(1, 0.12 * inch))
+    gst_data = [["GST %", "Taxable Value", "CGST", "SGST", "Total"]]
+    for row in invoice_data["gst_rows"]:
+        half = row["gst_percent"] / 2
+        gst_data.append([
+            f"{row['gst_percent']:g}%",
+            f"Rs. {row['taxable']:,.2f}",
+            f"Rs. {row['cgst']:,.2f} ({half:g}%)",
+            f"Rs. {row['sgst']:,.2f} ({half:g}%)",
+            f"Rs. {row['total']:,.2f}",
+        ])
+    gst_data.append([
+        "Total",
+        f"Rs. {invoice_data['taxable_total']:,.2f}",
+        f"Rs. {invoice_data['cgst_total']:,.2f}",
+        f"Rs. {invoice_data['sgst_total']:,.2f}",
+        f"Rs. {invoice_data['charges_total']:,.2f}",
+    ])
+    gst_table = Table(gst_data, colWidths=[60, 110, 110, 110, 90])
+    gst_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 9),
+        ('ALIGN', (1, 0), (-1, -1), 'RIGHT'),
+        ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+    ]))
+    elements.append(gst_table)
+    elements.append(Spacer(1, 0.25 * inch))
+
+    # Totals
+    totals_data = [["Total Charges", f"Rs. {invoice_data['charges_total']:,.2f}"]]
+    if invoice_data["discount_total"]:
+        totals_data.append(["Discount", f"- Rs. {abs(invoice_data['discount_total']):,.2f}"])
+    totals_data.append(["GRAND TOTAL", f"Rs. {invoice_data['grand_total']:,.2f}"])
+    if invoice_data["payments_total"]:
+        totals_data.append(["Advance / Payments", f"- Rs. {abs(invoice_data['payments_total']):,.2f}"])
+    totals_data.append(["BALANCE DUE", f"Rs. {invoice_data['balance_due']:,.2f}"])
+    totals_table = Table(totals_data, colWidths=[300, 150])
+    totals_table.setStyle(TableStyle([
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('FONTSIZE', (0, 0), (-1, -1), 11),
+        ('LINEABOVE', (0, 2), (-1, 2), 1, colors.black),
+        ('TEXTCOLOR', (0, -1), (-1, -1), colors.HexColor("#B8860B")),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+    ]))
+    elements.append(totals_table)
+    elements.append(Spacer(1, 0.12 * inch))
+
+    words_style = ParagraphStyle(name="AmountWords", parent=styles["Normal"], fontSize=9)
+    elements.append(Paragraph(
+        f"<b>Amount in words:</b> {_amount_in_words(invoice_data['grand_total'])}", words_style))
+    elements.append(Spacer(1, 0.4 * inch))
+
+    footer_style = ParagraphStyle(
+        name="InvoiceFooter", parent=styles["Normal"],
+        fontSize=9, textColor=colors.grey, alignment=1,
+    )
+    elements.append(Paragraph(
+        "Thank you for staying with Hotel Bhimas. This is a computer-generated invoice.",
+        footer_style))
+    elements.append(Spacer(1, 0.15 * inch))
+    elements.append(Paragraph(
+        "For support contact: +919347172758 | hotelbhimas@gmail.com",
+        footer_style))
+
+    doc.build(elements)
+    return file_path
+
+def generate_registration_slip_pdf(slip_data):
+    """
+    Guest registration slip printed at check-in (prompt 06). The guest signs it.
+
+    Args:
+        slip_data: dict from routers/reception.py registration_slip:
+            booking_id, guest_name, phone, email, id_type, id_number_masked,
+            rooms [room_number...], check_in, check_out, checked_in_at,
+            booking_source, grand_total, paid_total, balance
+    Returns the generated file path (temp dir).
+    """
+    import tempfile
+    file_path = os.path.join(tempfile.gettempdir(), f"registration_slip_{slip_data['booking_id']}.pdf")
+
+    doc = SimpleDocTemplate(file_path, pagesize=A4,
+                            rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontSize = 9
+    elements = []
+
+    # Header (same brand block as the invoice)
+    logo_path = "assets/logo-gold.png"
+    hotel_info = Paragraph(
+        "<b>HOTEL BHIMAS</b><br/>"
+        "Luxury & Comfort Stay<br/>"
+        "42, G Car Street, Tirupati - 517501<br/>"
+        "Landline: +91877-2225744<br/>"
+        "Mobile: +919347172758<br/>"
+        "GSTIN: 37AAACK9397F1Z3",
+        styles["Normal"]
+    )
+    if os.path.exists(logo_path):
+        logo = Image(logo_path, width=1.5 * inch, height=1 * inch)
+        elements.append(Table([[logo, hotel_info]], colWidths=[120, 350]))
+    else:
+        elements.append(hotel_info)
+    elements.append(Spacer(1, 0.3 * inch))
+
+    title_style = ParagraphStyle(
+        name="SlipTitle", parent=styles["Title"],
+        textColor=colors.HexColor("#B8860B"), fontSize=16, alignment=1, spaceAfter=16,
+    )
+    elements.append(Paragraph("GUEST REGISTRATION SLIP", title_style))
+
+    def _d(value):
+        return value.strftime("%d-%m-%Y") if value else "N/A"
+
+    def _dt(value):
+        return value.strftime("%d-%m-%Y %H:%M") if value else "N/A"
+
+    id_label = (slip_data.get("id_type") or "").replace("_", " ").title() or "N/A"
+    meta_data = [
+        ["Booking ID", str(slip_data["booking_id"]),
+         "Checked in", _dt(slip_data.get("checked_in_at"))],
+        ["Guest", slip_data.get("guest_name") or "", "Phone", slip_data.get("phone") or ""],
+        ["ID Type", id_label, "ID Number", slip_data.get("id_number_masked") or "N/A"],
+        ["Room(s)", ", ".join(slip_data.get("rooms") or []) or "N/A",
+         "Source", (slip_data.get("booking_source") or "").replace("_", " ").title()],
+        ["Check-in", _d(slip_data.get("check_in")), "Check-out", _d(slip_data.get("check_out"))],
+    ]
+    meta_table = Table(meta_data, colWidths=[80, 190, 80, 130])
+    meta_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
+        ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f5f5f5")),
+        ('FONTNAME', (1, 1), (1, 1), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+    ]))
+    elements.append(meta_table)
+    elements.append(Spacer(1, 0.25 * inch))
+
+    totals_rows = [
+        ["Stay total", f"Rs. {slip_data.get('grand_total', 0):,.2f}"],
+        ["Paid", f"Rs. {slip_data.get('paid_total', 0):,.2f}"],
+    ]
+    if slip_data.get("balance") is not None:
+        totals_rows.append(["Balance", f"Rs. {slip_data['balance']:,.2f}"])
+    totals_table = Table(totals_rows, colWidths=[120, 150], hAlign='LEFT')
+    totals_table.setStyle(TableStyle([
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('FONTSIZE', (0, 0), (-1, -1), 10),
+        ('TEXTCOLOR', (0, -1), (-1, -1), colors.HexColor("#B8860B")),
+        ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+    ]))
+    elements.append(totals_table)
+    elements.append(Spacer(1, 0.35 * inch))
+
+    terms_style = ParagraphStyle(name="SlipTerms", parent=styles["Normal"],
+                                 fontSize=8, textColor=colors.grey)
+    elements.append(Paragraph(
+        "I confirm the above details are correct. I agree to the hotel's terms of stay: "
+        f"checkout by the hotel's checkout time on {_d(slip_data.get('check_out'))}; "
+        "key cards remain hotel property; charges signed to the room are payable at checkout.",
+        terms_style))
+    elements.append(Spacer(1, 0.6 * inch))
+
+    sign_table = Table(
+        [["", ""],
+         ["Guest signature", "Front desk"]],
+        colWidths=[220, 220],
+    )
+    sign_table.setStyle(TableStyle([
+        ('LINEABOVE', (0, 1), (0, 1), 0.7, colors.black),
+        ('LINEABOVE', (1, 1), (1, 1), 0.7, colors.black),
+        ('TOPPADDING', (0, 0), (-1, 0), 24),
+        ('FONTSIZE', (0, 1), (-1, 1), 9),
+    ]))
+    elements.append(sign_table)
+
+    doc.build(elements)
     return file_path

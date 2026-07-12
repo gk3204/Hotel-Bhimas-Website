@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiRequest } from "../../api/api";
 import { checkRoomAvailability } from "../../api/roomtype";
+import { getActivePromotions } from "../../api/promotions";
 import { FaPlus, FaMinus, FaUsers, FaBed, FaCoffee } from "react-icons/fa";
 import LoadingSpinner from "../../components/LoadingSpinner";
 import { withMinimumDelay } from "../../utils/loadingDelay";
@@ -10,6 +11,7 @@ const Booking = () => {
   const navigate = useNavigate();
 
   const [roomTypes, setRoomTypes] = useState([]);
+  const [promotions, setPromotions] = useState([]);
   const [selectedRooms, setSelectedRooms] = useState({});
   const [availability, setAvailability] = useState({});
   const [availabilityLoading, setAvailabilityLoading] = useState(false);
@@ -23,6 +25,7 @@ const Booking = () => {
     phone: "",
     email: "",
     check_in: "",
+    check_in_time: "",
     check_out: "",
   });
 
@@ -46,6 +49,11 @@ const Booking = () => {
         setSelectedRooms(initial);
       })
       .catch((err) => console.error("Error fetching room types:", err));
+
+    // Fetch active promotions to preview discounts (backend stays authoritative)
+    getActivePromotions()
+      .then((data) => setPromotions(data))
+      .catch((err) => console.error("Error fetching promotions:", err));
   }, []);
 
   /* ================= CHECK AVAILABILITY ON DATE CHANGE ================= */
@@ -130,6 +138,49 @@ const Booking = () => {
     return diffDays > 0 ? diffDays : 0;
   };
 
+  /* ================= DISCOUNT PREVIEW (mirrors backend) ================= */
+
+  // Best applicable promotion discount for a room-type line item's base amount.
+  // Backend remains the authoritative source; this is only for on-screen preview.
+  const bestDiscountForRoom = (roomTypeId, baseAmount) => {
+    const checkIn = formData.check_in; // "YYYY-MM-DD" (ISO strings compare correctly)
+    let best = 0;
+    promotions.forEach((p) => {
+      if (p.room_type_id !== null && p.room_type_id !== roomTypeId) return;
+      if (p.valid_from && checkIn && checkIn < p.valid_from) return;
+      if (p.valid_to && checkIn && checkIn > p.valid_to) return;
+      const discount =
+        p.discount_type === "percent"
+          ? baseAmount * (p.discount_value / 100)
+          : Math.min(p.discount_value, baseAmount);
+      if (discount > best) best = discount;
+    });
+    return best;
+  };
+
+  // Short offer label to show on a room card ("" if none applies).
+  // Percent promos show "X% OFF"; flat promos show "₹X OFF".
+  const promoLabelForRoom = (roomTypeId) => {
+    const checkIn = formData.check_in;
+    let best = null; // { discount, label }
+    promotions.forEach((p) => {
+      if (p.room_type_id !== null && p.room_type_id !== roomTypeId) return;
+      if (p.valid_from && checkIn && checkIn < p.valid_from) return;
+      if (p.valid_to && checkIn && checkIn > p.valid_to) return;
+      // Rank promos by discount on a reference base so we surface the strongest.
+      const ref =
+        p.discount_type === "percent"
+          ? p.discount_value
+          : Math.min(p.discount_value, 100);
+      const label =
+        p.discount_type === "percent"
+          ? `${Math.round(p.discount_value)}% OFF`
+          : `₹${Math.round(p.discount_value)} OFF`;
+      if (!best || ref > best.rank) best = { rank: ref, label };
+    });
+    return best ? best.label : "";
+  };
+
   /* ================= CALCULATE TOTAL PRICE ================= */
 
   const calculateTotal = () => {
@@ -137,6 +188,7 @@ const Booking = () => {
     if (nights <= 0) return null;
 
     let totalBase = 0;
+    let totalDiscount = 0;
     let totalGST = 0;
 
     Object.entries(selectedRooms).forEach(([roomTypeId, quantity]) => {
@@ -144,8 +196,11 @@ const Booking = () => {
         const roomType = roomTypes.find(r => r.room_type_id === parseInt(roomTypeId));
         if (roomType) {
           const baseAmount = nights * roomType.price_per_night * quantity;
-          const gstAmount = baseAmount * (roomType.gst_percent / 100);
+          const discount = bestDiscountForRoom(roomType.room_type_id, baseAmount);
+          const discountedBase = baseAmount - discount;
+          const gstAmount = discountedBase * (roomType.gst_percent / 100);
           totalBase += baseAmount;
+          totalDiscount += discount;
           totalGST += gstAmount;
         }
       }
@@ -153,7 +208,7 @@ const Booking = () => {
 
     if (totalBase === 0) return null;
 
-    const roomTotal = totalBase + totalGST;
+    const roomTotal = totalBase - totalDiscount + totalGST;
     const convenienceBase = roomTotal * 0.02;
     const convenienceGST = convenienceBase * 0.18;
     const convenienceFeeTotal = convenienceBase + convenienceGST;
@@ -162,6 +217,7 @@ const Booking = () => {
     return {
       nights,
       baseAmount: totalBase.toFixed(2),
+      discountAmount: totalDiscount.toFixed(2),
       gstAmount: totalGST.toFixed(2),
       roomTotal: roomTotal.toFixed(2),
       convenienceFeeTotal: convenienceFeeTotal.toFixed(2),
@@ -197,6 +253,11 @@ const Booking = () => {
       return;
     }
 
+    if (!formData.check_in_time) {
+      setError("Please select your expected arrival time");
+      return;
+    }
+
     try {
       setLoading(true);
       setError(null);
@@ -210,6 +271,7 @@ const Booking = () => {
             phone: formData.phone,
             email: formData.email,
             check_in: formData.check_in,
+            check_in_time: formData.check_in_time,
             check_out: formData.check_out,
             rooms: selectedRoomsList,
             booking_source: "website",
@@ -371,6 +433,19 @@ const Booking = () => {
                       className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-purple-600 focus:ring-2 focus:ring-purple-600/20 transition"
                     />
                   </div>
+
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Expected Arrival Time *</label>
+                    <input
+                      type="time"
+                      name="check_in_time"
+                      value={formData.check_in_time}
+                      onChange={handleChange}
+                      required
+                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-purple-600 focus:ring-2 focus:ring-purple-600/20 transition"
+                    />
+                    <p className="text-xs text-gray-500 mt-1">Let us know roughly when you'll arrive so reception can prepare.</p>
+                  </div>
                 </div>
 
                 {formData.check_in && formData.check_out && (
@@ -444,6 +519,11 @@ const Booking = () => {
                             </div>
                           </div>
                           <div className="text-right">
+                            {promoLabelForRoom(roomType.room_type_id) && (
+                              <span className="inline-block mb-1 px-2 py-0.5 rounded-full bg-green-100 text-green-700 text-xs font-bold">
+                                {promoLabelForRoom(roomType.room_type_id)}
+                              </span>
+                            )}
                             <p className="text-3xl font-bold text-[#E5C07B] mb-1">
                               ₹{roomType.price_per_night}
                             </p>
@@ -627,6 +707,12 @@ const Booking = () => {
                         <span>Base Amount:</span>
                         <span className="font-semibold">₹{priceInfo.baseAmount}</span>
                       </div>
+                      {parseFloat(priceInfo.discountAmount) > 0 && (
+                        <div className="flex justify-between text-green-600">
+                          <span>Discount:</span>
+                          <span className="font-semibold">− ₹{priceInfo.discountAmount}</span>
+                        </div>
+                      )}
                       <div className="flex justify-between text-gray-700">
                         <span>GST:</span>
                         <span className="font-semibold">₹{priceInfo.gstAmount}</span>

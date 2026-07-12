@@ -33,3 +33,27 @@ def require_reception_or_admin(user=Depends(get_current_user)):
     if user.get("role") not in ["admin", "reception"]:
         raise HTTPException(status_code=403, detail="Access denied")
     return user
+
+
+def require_housekeeper_or_admin(user=Depends(get_current_user)):
+    if user.get("role") not in ["admin", "housekeeper"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return user
+
+
+def require_maintenance_or_admin(user=Depends(get_current_user)):
+    if user.get("role") not in ["admin", "maintenance"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return user
+
+
+def require_roles(*roles):
+    """Generic role gate. Usage: dependencies=[Depends(require_roles('admin', 'reception'))]"""
+    allowed = set(roles)
+
+    def _dep(user=Depends(get_current_user)):
+        if user.get("role") not in allowed:
+            raise HTTPException(status_code=403, detail="Access denied")
+        return user
+
+    return _dep

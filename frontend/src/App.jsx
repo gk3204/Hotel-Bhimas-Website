@@ -27,12 +27,14 @@ import PaymentFailed from "./pages/public/PaymentFailed";
 import Dashboard from "./pages/admin/Dashboard";
 import AdminLogin from "./pages/admin/AdminLogin";
 import RoomTypes from "./pages/admin/RoomTypes";
+import AdminRooms from "./pages/admin/Rooms";
 import RoomAvailability from "./pages/admin/RoomAvailability";
 import UserSecurityCheck from "./pages/admin/UserSecurityCheck";
 import UserManagement from "./pages/admin/UserManagement";
 import Bookings from "./pages/admin/Bookings";
 import Payments from "./pages/admin/Payments";
 import Enquiries from "./pages/admin/Enquiries";
+import Promotions from "./pages/admin/Promotions";
 
 //Reception Pages
 import ReceptionDashboard from "./pages/reception/ReceptionDashboard";
@@ -75,6 +77,8 @@ function App() {
       >
         <Route path="/admin" element={<Dashboard />} />
         <Route path="/admin/room-types" element={<RoomTypes />} />
+        <Route path="/admin/rooms" element={<AdminRooms />} />
+        <Route path="/admin/promotions" element={<Promotions />} />
         <Route path="/admin/room-availability" element={<RoomAvailability />} />
         <Route path="/admin/bookings" element={<Bookings />} />
         <Route path="/admin/payments" element={<Payments />} />
