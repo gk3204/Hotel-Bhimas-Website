@@ -174,6 +174,16 @@ class DeskPaymentRecord(BaseModel):
     client_ref: Optional[str] = Field(None, max_length=64)   # desktop uuid (offline outbox dedupe)
 
 
+class PaymentRefundRequest(BaseModel):
+    """Desk refund of a recorded payment (prompt 08). Per-payment, single-shot
+    (retryable only after a 'failed' gateway refund). Requires admin approval."""
+    payment_id: int = Field(..., gt=0)
+    amount: float = Field(..., gt=0, le=10_000_000)
+    reason: str = Field(..., min_length=3, max_length=100)
+    mode: str = Field("cash", pattern="^(cash|upi|bank)$")   # how money goes back (desk path; ignored for razorpay)
+    reference: Optional[str] = Field(None, max_length=100)   # UPI / bank ref of the payout
+
+
 class CheckinAssignment(BaseModel):
     """Specific physical rooms for one booking item (len(room_ids) must equal item.quantity)."""
     booking_item_id: int = Field(..., gt=0)

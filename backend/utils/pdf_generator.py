@@ -673,3 +673,141 @@ def generate_registration_slip_pdf(slip_data):
 
     doc.build(elements)
     return file_path
+
+
+def generate_payment_receipt_pdf(receipt_data):
+    """
+    Payment receipt / refund voucher printed at the desk (prompt 08).
+
+    Args:
+        receipt_data: dict from routers/payments.py payment_receipt_pdf:
+            kind ("payment"|"refund"), payment_id, receipt_no, booking_id,
+            guest_name, guest_phone, date, amount, method, reference, gateway,
+            collected_by_name, and for refunds: refund_id, refund_amount,
+            refund_reason, refund_mode, refund_reference
+    Returns the generated file path (temp dir).
+    """
+    import tempfile
+    is_refund = receipt_data.get("kind") == "refund"
+    file_path = os.path.join(
+        tempfile.gettempdir(),
+        f"{'refund_voucher' if is_refund else 'payment_receipt'}_{receipt_data['payment_id']}.pdf")
+
+    doc = SimpleDocTemplate(file_path, pagesize=A4,
+                            rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontSize = 9
+    elements = []
+
+    # Header (same brand block as the invoice / registration slip)
+    logo_path = "assets/logo-gold.png"
+    hotel_info = Paragraph(
+        "<b>HOTEL BHIMAS</b><br/>"
+        "Luxury & Comfort Stay<br/>"
+        "42, G Car Street, Tirupati - 517501<br/>"
+        "Landline: +91877-2225744<br/>"
+        "Mobile: +919347172758<br/>"
+        "GSTIN: 37AAACK9397F1Z3",
+        styles["Normal"]
+    )
+    if os.path.exists(logo_path):
+        logo = Image(logo_path, width=1.5 * inch, height=1 * inch)
+        elements.append(Table([[logo, hotel_info]], colWidths=[120, 350]))
+    else:
+        elements.append(hotel_info)
+    elements.append(Spacer(1, 0.3 * inch))
+
+    title_style = ParagraphStyle(
+        name="ReceiptTitle", parent=styles["Title"],
+        textColor=colors.HexColor("#B8860B"), fontSize=16, alignment=1, spaceAfter=16,
+    )
+    elements.append(Paragraph("REFUND VOUCHER" if is_refund else "PAYMENT RECEIPT", title_style))
+
+    def _dt(value):
+        return value.strftime("%d-%m-%Y %H:%M") if value else "N/A"
+
+    method_label = (receipt_data.get("method") or "").replace("_", " ").upper() or "N/A"
+    meta_data = [
+        ["Receipt No", receipt_data.get("receipt_no") or "N/A",
+         "Date", _dt(receipt_data.get("date")) if not is_refund else _dt(datetime.now())],
+        ["Booking ID", str(receipt_data.get("booking_id") or "N/A"),
+         "Guest", receipt_data.get("guest_name") or "N/A"],
+        ["Phone", receipt_data.get("guest_phone") or "N/A",
+         "Collected by", receipt_data.get("collected_by_name") or "Front desk"],
+    ]
+    if is_refund:
+        meta_data += [
+            ["Original payment", f"#{receipt_data['payment_id']} — {method_label} "
+                                 f"Rs. {receipt_data.get('amount', 0):,.2f}",
+             "Paid on", _dt(receipt_data.get("date"))],
+            ["Refund ID", receipt_data.get("refund_id") or "N/A",
+             "Refund mode", (receipt_data.get("refund_mode") or receipt_data.get("gateway") or "").upper() or "N/A"],
+            ["Refund ref", receipt_data.get("refund_reference") or "N/A",
+             "Reason", receipt_data.get("refund_reason") or "N/A"],
+        ]
+    else:
+        meta_data += [
+            ["Mode", method_label, "Reference", receipt_data.get("reference") or "N/A"],
+        ]
+    meta_table = Table(meta_data, colWidths=[80, 190, 80, 130])
+    meta_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
+        ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f5f5f5")),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+    ]))
+    elements.append(meta_table)
+    elements.append(Spacer(1, 0.3 * inch))
+
+    # Big amount box + amount in words
+    amount = (receipt_data.get("refund_amount") if is_refund else receipt_data.get("amount")) or 0
+    amount_label = "AMOUNT REFUNDED" if is_refund else "AMOUNT RECEIVED"
+    amount_table = Table([[amount_label, f"Rs. {amount:,.2f}"]], colWidths=[220, 220])
+    amount_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#B8860B")),
+        ('TEXTCOLOR', (0, 0), (-1, -1), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 12),
+        ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('LEFTPADDING', (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+    ]))
+    elements.append(amount_table)
+    words_style = ParagraphStyle(name="ReceiptWords", parent=styles["Normal"],
+                                 fontSize=9, textColor=colors.grey, spaceBefore=6)
+    elements.append(Paragraph(f"Amount in words: {_amount_in_words(amount)}", words_style))
+    elements.append(Spacer(1, 0.15 * inch))
+
+    note_style = ParagraphStyle(name="ReceiptNote", parent=styles["Normal"],
+                                fontSize=8, textColor=colors.grey)
+    if is_refund:
+        elements.append(Paragraph(
+            "Refund issued against the original payment above. "
+            "This voucher is the guest's acknowledgement of receiving the refund.", note_style))
+    else:
+        elements.append(Paragraph(
+            "This receipt records money received against the booking above. "
+            "It is not a tax invoice — the GST tax invoice is issued with the folio.", note_style))
+    elements.append(Spacer(1, 0.6 * inch))
+
+    sign_labels = (["Paid out by", "Received by guest"] if is_refund
+                   else ["Received by", "Guest"])
+    sign_table = Table([["", ""], sign_labels], colWidths=[220, 220])
+    sign_table.setStyle(TableStyle([
+        ('LINEABOVE', (0, 1), (0, 1), 0.7, colors.black),
+        ('LINEABOVE', (1, 1), (1, 1), 0.7, colors.black),
+        ('TOPPADDING', (0, 0), (-1, 0), 24),
+        ('FONTSIZE', (0, 1), (-1, 1), 9),
+    ]))
+    elements.append(sign_table)
+
+    footer_style = ParagraphStyle(name="ReceiptFooter", parent=styles["Normal"],
+                                  fontSize=8, textColor=colors.grey, alignment=1, spaceBefore=20)
+    elements.append(Paragraph(
+        "For support contact: +919347172758 | hotelbhimas@gmail.com", footer_style))
+
+    doc.build(elements)
+    return file_path

@@ -118,10 +118,15 @@ class Payment(Base):
     status = Column(String, index=True)    # created | paid | failed
     method = Column(String(20), nullable=True)  # desk payments: cash|card|upi|bank
     client_ref = Column(String(64), nullable=True, unique=True, index=True)  # desktop-generated uuid (offline outbox dedupe)
-    refund_id = Column(String, nullable=True, index=True)  # Razorpay refund ID
+    refund_id = Column(String, nullable=True, index=True)  # Razorpay refund ID (desk refunds: DESK-xxxxxxxx)
     refund_amount = Column(Numeric(10, 2), nullable=True)  # Amount refunded
     refund_status = Column(String(50), nullable=True, index=True)  # "pending" | "completed" | "failed"
     refund_reason = Column(String(100), nullable=True)  # Admin's reason for refund
+    shift_id = Column(Integer, ForeignKey("cash_shifts.id"), nullable=True, index=True)  # open cash shift a CASH payment was taken in (prompt 12 reconciles)
+    refund_shift_id = Column(Integer, ForeignKey("cash_shifts.id"), nullable=True)  # open cash shift a CASH refund was paid out of
+    collected_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)  # desk user who took the money (from JWT)
+    refund_mode = Column(String(20), nullable=True)  # desk refunds: cash|upi|bank (razorpay refunds leave NULL)
+    refund_reference = Column(String(100), nullable=True)  # UPI / bank reference of the refund payout
     created_at = Column(DateTime, server_default=func.now(), index=True)
 
 
