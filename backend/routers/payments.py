@@ -12,7 +12,7 @@ import hmac
 import hashlib
 from database import SessionLocal
 from models import Booking, Payment, BookingItem, RoomType, WebhookEvent, Folio, FolioCharge, CashShift, User
-from schemas import DeskPaymentRecord, PaymentRefundRequest
+from schemas import DeskPaymentRecord, PaymentRefundRequest, ExcessReturnRequest
 from utils.pdf_generator import generate_booking_pdf, generate_payment_receipt_pdf
 from utils.email_service import send_booking_email
 from utils.auth_utils import require_reception_or_admin, get_current_user
@@ -632,6 +632,19 @@ def require_refund_permission(user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Access denied")
     return user
 
+
+def require_excess_return_permission(user=Depends(get_current_user)):
+    """Excess-return gate: EXCESS_RETURN_REQUIRES_ADMIN (default FALSE) -> reception may
+    return an overpaid deposit. Unlike an arbitrary refund, the amount is computed
+    server-side and capped at the folio's genuine credit, so it is structurally safe."""
+    requires_admin = os.getenv("EXCESS_RETURN_REQUIRES_ADMIN", "false").strip().lower() not in ("false", "0", "no")
+    if requires_admin:
+        if user.get("role") != "admin":
+            raise HTTPException(status_code=403, detail="Excess return requires admin approval")
+    elif user.get("role") not in ["admin", "reception"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return user
+
 def total_paid(db: Session, booking_id: int) -> float:
     """Sum of recorded payments for a booking (the anti-fraud 'recorded payment' gate
     used by check-in and card issue). Recorded = Payment.status == 'paid'."""
@@ -827,6 +840,100 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
         "total_paid": total_paid(db, payment.booking_id),
         "folio_id": folio.id if folio else None,
         "folio_balance": float(folio.balance or 0) if folio else None,
+    }
+
+
+@router.post("/return-excess")
+def return_excess(data: ExcessReturnRequest, db: Session = Depends(get_db),
+                  user=Depends(require_excess_return_permission)):
+    """Return an overpaid advance/deposit (prompt 08b). The amount is computed
+    server-side (= the open folio's credit balance) and auto-allocated across the
+    booking's refundable DESK payments newest-first, stamping the normal refund_*
+    fields on each. Posts ONE positive 'payment' folio line so the balance lands
+    on 0 and the standard checkout gate passes. Gateway (Razorpay) credits are
+    deliberately not auto-returned — use POST /payments/refund per payment."""
+    booking = db.query(Booking).filter(Booking.booking_id == data.booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    folio = db.query(Folio).filter(Folio.booking_id == data.booking_id).first()
+    if not folio or folio.status != "open":
+        raise HTTPException(status_code=409, detail="No open folio for this booking")
+
+    balance = round(float(folio.balance or 0), 2)
+    excess = round(-balance, 2)
+    if excess <= 0:
+        raise HTTPException(status_code=409,
+                            detail=f"No excess to return — folio balance is ₹{balance:,.2f}")
+
+    # Plan the allocation first (no side effects until it fully covers the excess).
+    candidates = (db.query(Payment)
+                  .filter(Payment.booking_id == data.booking_id,
+                          Payment.gateway == "desk",
+                          Payment.status == "paid")
+                  .filter((Payment.refund_status.is_(None)) | (Payment.refund_status == "failed"))
+                  .order_by(Payment.created_at.desc(), Payment.payment_id.desc())
+                  .all())
+    allocations = []
+    remaining = excess
+    for p in candidates:
+        if remaining <= 0:
+            break
+        take = round(min(remaining, float(p.amount or 0)), 2)
+        if take <= 0:
+            continue
+        allocations.append((p, take))
+        remaining = round(remaining - take, 2)
+    if remaining > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Excess ₹{excess:,.2f} exceeds refundable desk payments — "
+                   f"refund the online payment via Refund (admin) instead")
+
+    try:
+        shift = _open_shift(db) if data.mode == "cash" else None
+        alloc_out = []
+        for p, take in allocations:
+            p.refund_id = f"DESK-{uuid.uuid4().hex[:8].upper()}"
+            p.refund_amount = Decimal(str(take))
+            p.refund_status = "completed"
+            p.refund_reason = "Excess deposit return"
+            p.refund_mode = data.mode
+            p.refund_reference = data.reference
+            if data.mode == "cash":
+                p.refund_shift_id = shift.id if shift else None
+            alloc_out.append({"payment_id": p.payment_id, "amount": take, "refund_id": p.refund_id})
+
+        db.add(FolioCharge(
+            folio_id=folio.id,
+            type="payment",
+            description=f"Deposit return — {data.mode}",
+            qty=1,
+            unit_price=excess,
+            amount=excess,
+            gst_percent=0,
+            posted_by=_resolve_user_id(db, user),
+        ))
+        _folio_recompute(db, folio)
+        db.commit()
+        write_audit(db, user, "payment.return_excess", "booking", booking.booking_id,
+                    after={"excess": excess, "mode": data.mode, "reference": data.reference,
+                           "allocations": alloc_out},
+                    client="desktop", commit=True)
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ Excess return failed for booking {data.booking_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to record the excess return")
+
+    logger.info(f"✅ Excess ₹{excess} returned ({data.mode}) for booking {booking.booking_id} "
+                f"across {len(alloc_out)} payment(s)")
+    return {
+        "booking_id": booking.booking_id,
+        "returned": excess,
+        "mode": data.mode,
+        "allocations": alloc_out,
+        "folio_id": folio.id,
+        "folio_balance": float(folio.balance or 0),
+        "total_paid": total_paid(db, booking.booking_id),
     }
 
 

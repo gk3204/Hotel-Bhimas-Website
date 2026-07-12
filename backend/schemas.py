@@ -184,6 +184,14 @@ class PaymentRefundRequest(BaseModel):
     reference: Optional[str] = Field(None, max_length=100)   # UPI / bank ref of the payout
 
 
+class ExcessReturnRequest(BaseModel):
+    """Return an overpaid advance/deposit (prompt 08b). Amount is computed server-side
+    (= the folio's credit balance) and auto-allocated across refundable desk payments."""
+    booking_id: int = Field(..., gt=0)
+    mode: str = Field("cash", pattern="^(cash|upi|bank)$")   # how the money is handed back
+    reference: Optional[str] = Field(None, max_length=100)   # UPI / bank ref of the payout
+
+
 class CheckinAssignment(BaseModel):
     """Specific physical rooms for one booking item (len(room_ids) must equal item.quantity)."""
     booking_item_id: int = Field(..., gt=0)

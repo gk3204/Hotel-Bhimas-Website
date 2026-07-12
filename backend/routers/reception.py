@@ -497,6 +497,10 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         override_used = False
         if balance != 0:
             if not data.override:
+                if balance < 0:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Guest has overpaid ₹{-balance:,.2f} — return the excess before checkout")
                 raise HTTPException(
                     status_code=409,
                     detail=f"Folio balance is ₹{balance:,.2f} — settle it before checkout (or use an admin override)")
