@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { getAllEnquiries, updateEnquiryStatus } from "../../api/enquiry";
 import { FaSync } from "react-icons/fa";
 import { useConfirm } from "../../components/ConfirmDialog";
+import { PageShell, PrimaryButton } from "../../components/admin/BackofficeUI";
 
 const Enquiries = () => {
   const [enquiries, setEnquiries] = useState([]);
@@ -60,26 +61,17 @@ const Enquiries = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8 flex justify-between items-start">
-          <div>
-            <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-              💬 Contact Enquiries
-            </h1>
-            <p className="text-slate-400">Manage and respond to guest inquiries</p>
-          </div>
-          <button
-            onClick={fetchEnquiries}
-            disabled={loading}
-            className="bg-slate-700 hover:bg-slate-600 disabled:opacity-50 disabled:cursor-not-allowed px-6 py-3 rounded-lg font-semibold transition flex items-center gap-2"
-          >
-            <FaSync size={16} className={loading ? "animate-spin" : ""} /> {loading ? "Loading..." : "Refresh"}
-          </button>
-        </div>
-
-        {/* Error Message */}
+    <PageShell
+      icon="💬"
+      title="Contact Enquiries"
+      subtitle="Manage and respond to guest inquiries"
+      right={
+        <PrimaryButton onClick={fetchEnquiries} disabled={loading}>
+          <FaSync size={16} className={loading ? "animate-spin" : ""} /> {loading ? "Loading…" : "Refresh"}
+        </PrimaryButton>
+      }
+    >
+      {/* Error Message */}
         {error && (
           <div className="bg-red-500/20 border border-red-500/50 text-red-300 px-6 py-4 rounded-xl mb-8 flex items-center justify-between">
             <span>❌ {error}</span>
@@ -181,8 +173,7 @@ const Enquiries = () => {
             ))}
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 };
 

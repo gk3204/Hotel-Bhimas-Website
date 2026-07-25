@@ -1,9 +1,7 @@
 import React, { useEffect, useState } from "react";
-import { FaBroom, FaSyncAlt, FaCheckDouble, FaSave } from "react-icons/fa";
+import { FaSyncAlt, FaCheckDouble, FaSave } from "react-icons/fa";
 import { getRooms, getConfig, updateConfig, inspectRoom } from "../../api/housekeeping";
-
-const inputCls =
-  "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
+import { PageShell } from "../../components/admin/BackofficeUI";
 
 const hkChip = (s) => {
   const map = {
@@ -77,17 +75,11 @@ export default function Housekeeping() {
     r.room_status === "cleaning" || r.housekeeping_status === "clean" || r.housekeeping_status === "dirty";
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-6">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-3">
-            <FaBroom /> Housekeeping
-          </h1>
-          <p className="text-slate-400">
-            Housekeepers set cleaning status; a supervisor marks a room <b>inspected</b> before it is re-sellable.
-          </p>
-        </div>
-
+    <PageShell
+      icon="🧹"
+      title="Housekeeping"
+      subtitle="Housekeepers set cleaning status; a supervisor marks a room inspected before it is re-sellable."
+    >
         {/* Config */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-6 backdrop-blur">
           <h2 className="text-xl font-bold text-[#E5C07B] mb-5">Settings</h2>
@@ -179,7 +171,6 @@ export default function Housekeeping() {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 }

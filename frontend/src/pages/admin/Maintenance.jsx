@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { FaWrench, FaSyncAlt, FaCheckDouble, FaCheck } from "react-icons/fa";
+import { FaSyncAlt, FaCheckDouble, FaCheck } from "react-icons/fa";
+import { PageShell } from "../../components/admin/BackofficeUI";
 import {
   getTickets,
   getTicket,
@@ -119,16 +120,11 @@ export default function Maintenance() {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-6">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-3">
-            <FaWrench /> Maintenance
-          </h1>
-          <p className="text-slate-400">
-            Assign tickets to a technician, approve required parts, and verify-close. Purchased parts post to the shift ledger.
-          </p>
-        </div>
+    <PageShell
+      icon="🔧"
+      title="Maintenance"
+      subtitle="Assign tickets to a technician, approve required parts, and verify-close. Purchased parts post to the shift ledger."
+    >
 
         {/* Filters + summary */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-5 rounded-2xl shadow-xl mb-6 backdrop-blur flex flex-wrap items-end gap-4">
@@ -245,8 +241,7 @@ export default function Maintenance() {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 }
 

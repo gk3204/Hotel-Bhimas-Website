@@ -280,16 +280,19 @@ export function Tabs({ tabs, active, onChange }) {
   );
 }
 
-export function PageShell({ icon, title, subtitle, toast, children }) {
+export function PageShell({ icon, title, subtitle, toast, right, children }) {
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
       <div className="max-w-7xl mx-auto">
         <Toast message={toast} />
-        <div className="mb-6">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            {icon} {title}
-          </h1>
-          <p className="text-slate-400">{subtitle}</p>
+        <div className="mb-6 flex items-start justify-between gap-4">
+          <div>
+            <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
+              {icon} {title}
+            </h1>
+            <p className="text-slate-400">{subtitle}</p>
+          </div>
+          {right && <div className="shrink-0">{right}</div>}
         </div>
         {children}
       </div>
