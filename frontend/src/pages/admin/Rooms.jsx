@@ -7,6 +7,7 @@ import {
   toggleRoomActive,
 } from "../../api/rooms";
 import { getRoomTypes } from "../../api/roomTypes";
+import { useConfirm } from "../../components/ConfirmDialog";
 import { FaPlus, FaEdit, FaTrash, FaToggleOn, FaToggleOff } from "react-icons/fa";
 
 const STATUSES = ["vacant", "occupied", "cleaning", "inspected", "maintenance", "blocked"];
@@ -104,8 +105,14 @@ const Rooms = () => {
     }
   };
 
+  const { confirm } = useConfirm();
+
   const handleDelete = async (room) => {
-    if (!window.confirm(`Delete room ${room.room_number}?`)) return;
+    if (!(await confirm({
+      title: `Delete room ${room.room_number}?`,
+      message: "This permanently removes the room.",
+      confirmText: "Delete", tone: "danger",
+    }))) return;
     try {
       await deleteRoom(room.room_id);
       loadAll();

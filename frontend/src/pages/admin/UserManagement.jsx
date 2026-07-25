@@ -6,6 +6,7 @@ import {
   deleteUser,
 } from "../../api/users";
 import { FaPlus, FaEdit, FaTrash } from "react-icons/fa";
+import { useConfirm } from "../../components/ConfirmDialog";
 
 // Role chip styles + labels (matches the backend role vocab: admin|reception|housekeeper|maintenance).
 const ROLE_META = {
@@ -95,8 +96,14 @@ const UserManagement = () => {
     }
   };
 
+  const { confirm } = useConfirm();
+
   const handleDelete = async (id) => {
-    if (window.confirm("Delete this user?")) {
+    if (await confirm({
+      title: "Delete this user?",
+      message: "The user will lose access immediately.",
+      confirmText: "Delete", tone: "danger",
+    })) {
       try {
         await deleteUser(id);
         loadUsers();

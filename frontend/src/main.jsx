@@ -2,12 +2,15 @@ import React from "react";
 import ReactDOM from "react-dom/client";
 import App from "./App";
 import { BrowserRouter } from "react-router-dom";
+import { ConfirmProvider } from "./components/ConfirmDialog";
 import "./index.css";
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>
     <BrowserRouter>
-      <App />
+      <ConfirmProvider>
+        <App />
+      </ConfirmProvider>
     </BrowserRouter>
   </React.StrictMode>
 );

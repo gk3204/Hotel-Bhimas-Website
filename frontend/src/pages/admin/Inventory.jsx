@@ -4,6 +4,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { FaBell, FaBoxOpen, FaDownload, FaPlus, FaSave, FaSearch } from "react-icons/fa";
 import * as api from "../../api/stock";
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Spinner, Stat, Tabs, fmtDate, inputCls, money, useToast,
@@ -78,9 +79,14 @@ function ItemsTab({ showToast }) {
   }, [search, category]);
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
+  const { confirm } = useConfirm();
 
   const remove = async (it) => {
-    if (!window.confirm(`Deactivate ${it.name}? Past movements stay attributed to it.`)) return;
+    if (!(await confirm({
+      title: `Deactivate ${it.name}?`,
+      message: "Past movements stay attributed to it.",
+      confirmText: "Deactivate", tone: "danger",
+    }))) return;
     try {
       await api.deactivateItem(it.id);
       showToast(`${it.name} deactivated`);

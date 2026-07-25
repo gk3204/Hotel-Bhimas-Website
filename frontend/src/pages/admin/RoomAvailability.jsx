@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { getRoomTypes } from "../../api/roomTypes";
 import { jwtDecode } from "jwt-decode";
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   getBlockedDates,
   blockDate,
@@ -8,6 +9,7 @@ import {
 } from "../../api/availability";
 
 const RoomAvailability = () => {
+  const { notify } = useConfirm();
   const [roomTypes, setRoomTypes] = useState([]);
   const [selectedRoomType, setSelectedRoomType] = useState("");
   const [blockedDates, setBlockedDates] = useState([]);
@@ -44,7 +46,10 @@ const RoomAvailability = () => {
   };
 
   const handleBlock = async () => {
-    if (!selectedRoomType || !date) return alert("Select room & date");
+    if (!selectedRoomType || !date) {
+      notify({ title: "Missing info", message: "Select a room type and a date first." });
+      return;
+    }
 
     await blockDate({
       room_type_id: parseInt(selectedRoomType),

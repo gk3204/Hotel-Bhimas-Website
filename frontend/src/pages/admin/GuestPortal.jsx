@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { FaCheck, FaPlus, FaSave, FaSearch, FaTimes } from "react-icons/fa";
 import * as api from "../../api/portal";
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Spinner, Tabs, fmtDate, inputCls, money, useToast,
@@ -207,6 +208,7 @@ function MenuTab({ showToast }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [editing, setEditing] = useState(null);
+  const { confirm } = useConfirm();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -219,7 +221,11 @@ function MenuTab({ showToast }) {
   useEffect(() => { load(); /* eslint-disable-next-line */ }, []);
 
   const remove = async (m) => {
-    if (!window.confirm(`Make "${m.name}" unavailable?`)) return;
+    if (!(await confirm({
+      title: `Make "${m.name}" unavailable?`,
+      message: "Guests won't see it on the room-service menu.",
+      confirmText: "Hide item", tone: "danger",
+    }))) return;
     try { await api.deactivateMenuItem(m.id); showToast(`${m.name} hidden`); load(); }
     catch (e) { showToast(e.message || "Could not update"); }
   };

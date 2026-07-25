@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { FaFileCsv, FaFilePdf, FaPlus, FaSave, FaSearch } from "react-icons/fa";
 import * as api from "../../api/backoffice";
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Spinner, Stat, Tabs, daysAgo, fmtDate, inputCls, money, today, useToast,
@@ -98,9 +99,14 @@ const EMPTY_COMPANY = {
 
 function CompaniesTab({ companies, loading, error, search, setSearch, reload, showToast, onOpenLedger }) {
   const [editing, setEditing] = useState(null);
+  const { confirm } = useConfirm();
 
   const remove = async (c) => {
-    if (!window.confirm(`Deactivate ${c.name}? Its ledger and invoices stay readable.`)) return;
+    if (!(await confirm({
+      title: `Deactivate ${c.name}?`,
+      message: "Its ledger and invoices stay readable.",
+      confirmText: "Deactivate", tone: "danger",
+    }))) return;
     try {
       await api.deactivateCompany(c.company_id);
       showToast(`${c.name} deactivated`);

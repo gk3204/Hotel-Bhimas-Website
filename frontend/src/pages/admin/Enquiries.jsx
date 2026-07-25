@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { getAllEnquiries, updateEnquiryStatus } from "../../api/enquiry";
 import { FaSync } from "react-icons/fa";
+import { useConfirm } from "../../components/ConfirmDialog";
 
 const Enquiries = () => {
   const [enquiries, setEnquiries] = useState([]);
@@ -8,6 +9,7 @@ const Enquiries = () => {
   const [error, setError] = useState(null);
   const [selectedStatus, setSelectedStatus] = useState({});
   const [updating, setUpdating] = useState(null);
+  const { notify } = useConfirm();
 
   useEffect(() => {
     fetchEnquiries();
@@ -39,7 +41,7 @@ const Enquiries = () => {
       
       setSelectedStatus({ ...selectedStatus, [enquiryId]: newStatus });
     } catch (err) {
-      alert("Failed to update status: " + err.message);
+      notify({ title: "Update failed", message: err.message });
     } finally {
       setUpdating(null);
     }

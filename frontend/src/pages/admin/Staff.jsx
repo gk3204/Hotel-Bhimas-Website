@@ -4,6 +4,7 @@ import {
   FaCopy, FaFileCsv, FaFilePdf, FaIdCard, FaPlus, FaSearch, FaSync,
 } from "react-icons/fa";
 import * as api from "../../api/backoffice";
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Spinner, Stat, Tabs, daysAgo, fmtDate, inputCls, money, today, useToast,
@@ -107,8 +108,14 @@ function RosterTab({ staff, showToast }) {
     return [...staff].sort((a, b) => (ids.has(b.user_id) ? 1 : 0) - (ids.has(a.user_id) ? 1 : 0));
   }, [staff, data]);
 
+  const { confirm } = useConfirm();
+
   const copyForward = async () => {
-    if (!window.confirm(`Copy this week's duties into the week of ${fmtDate(addDays(week, 7))}?`)) return;
+    if (!(await confirm({
+      title: "Copy this week's duties forward?",
+      message: `Into the week of ${fmtDate(addDays(week, 7))}.`,
+      confirmText: "Copy",
+    }))) return;
     try {
       const res = await api.copyRosterWeek({
         source_week_start: week, target_week_start: addDays(week, 7), overwrite: false,
@@ -121,7 +128,11 @@ function RosterTab({ staff, showToast }) {
   };
 
   const removeShift = async (s) => {
-    if (!window.confirm(`Remove ${s.staff_name}'s ${s.shift_type} duty on ${fmtDate(s.shift_date)}?`)) return;
+    if (!(await confirm({
+      title: "Remove duty?",
+      message: `${s.staff_name}'s ${s.shift_type} duty on ${fmtDate(s.shift_date)}.`,
+      confirmText: "Remove", tone: "danger",
+    }))) return;
     try {
       await api.deleteShift(s.id);
       showToast("Duty removed");

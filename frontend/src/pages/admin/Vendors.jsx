@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { FaBell, FaPlus, FaSave, FaSearch, FaSync } from "react-icons/fa";
 import * as api from "../../api/backoffice";
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Stat, Tabs, fmtDate, inputCls, money, today, useToast,
@@ -94,9 +95,14 @@ const VENDOR_FIELDS = [
 
 function VendorsTab({ vendors, loading, error, reload, search, setSearch, category, setCategory, showToast }) {
   const [editing, setEditing] = useState(null);
+  const { confirm } = useConfirm();
 
   const remove = async (v) => {
-    if (!window.confirm(`Deactivate ${v.name}? Past expenses stay attributed to it.`)) return;
+    if (!(await confirm({
+      title: `Deactivate ${v.name}?`,
+      message: "Past expenses stay attributed to it.",
+      confirmText: "Deactivate", tone: "danger",
+    }))) return;
     try {
       await api.deactivateVendor(v.id);
       showToast(`${v.name} deactivated`);
