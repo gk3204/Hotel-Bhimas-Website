@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
-import AdminHeader from "../components/AdminHeader";
+import AdminSidebar from "../components/admin/AdminSidebar";
 import RouteErrorBoundary from "../components/RouteErrorBoundary";
 import { getComplianceConfig } from "../api/compliance";
 
@@ -48,8 +48,9 @@ const AdminLayout = () => {
 
   return (
     <div className="min-h-screen bg-[#0F172A] text-white">
-      <AdminHeader />
-      <div className="p-6">
+      <AdminSidebar />
+      {/* Content sits to the right of the fixed sidebar on md+, full-width on mobile. */}
+      <div className="md:ml-64 min-w-0">
         <RouteErrorBoundary key={location.pathname}>
           <Outlet />
         </RouteErrorBoundary>
