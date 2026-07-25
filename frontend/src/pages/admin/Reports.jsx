@@ -197,7 +197,15 @@ export default function Reports() {
     }
   };
 
-  const projected = data ? cfg.project(data) : null;
+  // Safety net: never let a data/shape mismatch (e.g. an in-flight tab switch) crash the whole page.
+  let projected = null;
+  if (data) {
+    try {
+      projected = cfg.project(data);
+    } catch {
+      projected = null;
+    }
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
@@ -220,7 +228,13 @@ export default function Reports() {
           {TAB_ORDER.map((k) => (
             <button
               key={k}
-              onClick={() => setTab(k)}
+              onClick={() => {
+                // Clear the previous report's data in the SAME render as the tab change, so the new
+                // tab's projector never runs against the old tab's differently-shaped response.
+                setTab(k);
+                setData(null);
+                setError("");
+              }}
               className={`px-4 py-2 rounded-lg font-semibold transition text-sm ${
                 tab === k
                   ? "bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900"

@@ -1,10 +1,12 @@
 import React, { useEffect, useRef } from "react";
-import { Outlet, useNavigate } from "react-router-dom";
+import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import AdminHeader from "../components/AdminHeader";
+import RouteErrorBoundary from "../components/RouteErrorBoundary";
 import { getComplianceConfig } from "../api/compliance";
 
 const AdminLayout = () => {
   const navigate = useNavigate();
+  const location = useLocation();
   const timerRef = useRef(null);
   const minutesRef = useRef(15); // default; refined from compliance config
 
@@ -48,7 +50,9 @@ const AdminLayout = () => {
     <div className="min-h-screen bg-[#0F172A] text-white">
       <AdminHeader />
       <div className="p-6">
-        <Outlet />
+        <RouteErrorBoundary key={location.pathname}>
+          <Outlet />
+        </RouteErrorBoundary>
       </div>
     </div>
   );
