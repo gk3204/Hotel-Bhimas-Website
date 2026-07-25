@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { PageShell } from "../../components/admin/BackofficeUI";
 import {
   getPromotions,
   createPromotion,
@@ -126,18 +127,11 @@ const Promotions = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            🎉 Promotions & Discounts
-          </h1>
-          <p className="text-slate-400">
-            Turn on discounts during slow periods to attract more bookings. Active promotions apply
-            automatically to matching bookings.
-          </p>
-        </div>
+    <PageShell
+      icon="🎉"
+      title="Promotions & Discounts"
+      subtitle="Turn on discounts during slow periods to attract more bookings. Active promotions apply automatically to matching bookings."
+    >
 
         {/* CREATE FORM */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-8 rounded-2xl shadow-xl mb-10 backdrop-blur">
@@ -434,8 +428,7 @@ const Promotions = () => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 };
 

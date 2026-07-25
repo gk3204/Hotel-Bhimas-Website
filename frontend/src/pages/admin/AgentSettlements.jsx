@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { PageShell } from "../../components/admin/BackofficeUI";
 import { getSettlement, getAgentSettlement, recordPayout } from "../../api/settlements";
 import { FaMoneyBillWave, FaEye, FaSearch } from "react-icons/fa";
 
@@ -73,14 +74,11 @@ const AgentSettlements = () => {
   const totals = report?.totals;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            💼 Agent Settlement
-          </h1>
-          <p className="text-slate-400">Booked, commission accrued, paid, and outstanding per agent. Leave dates empty for the lifetime balance.</p>
-        </div>
+    <PageShell
+      icon="💼"
+      title="Agent Settlement"
+      subtitle="Booked, commission accrued, paid, and outstanding per agent. Leave dates empty for the lifetime balance."
+    >
 
         {/* Filter */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-8 backdrop-blur">
@@ -255,8 +253,7 @@ const AgentSettlements = () => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 };
 

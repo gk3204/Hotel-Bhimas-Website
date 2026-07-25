@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { PageShell } from "../../components/admin/BackofficeUI";
 import { getRatePlans, createRatePlan, deleteRatePlan, getQuote } from "../../api/ratePlans";
 import { getRoomTypes } from "../../api/roomTypes";
 import { getAgents } from "../../api/travelAgents";
@@ -116,17 +117,11 @@ const RatePlans = () => {
   const channelLabel = (c) => CHANNELS.find((x) => x.value === c)?.label || c;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            📅 Rate Plans
-          </h1>
-          <p className="text-slate-400">
-            Seasonal / weekend / per-channel & per-agent price overrides. Highest priority wins;
-            an agent's own rate applies unless a higher-priority plan matches the night.
-          </p>
-        </div>
+    <PageShell
+      icon="📅"
+      title="Rate Plans"
+      subtitle="Seasonal / weekend / per-channel & per-agent price overrides. Highest priority wins; an agent's own rate applies unless a higher-priority plan matches the night."
+    >
 
         {/* Room type picker */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-8 backdrop-blur">
@@ -284,8 +279,7 @@ const RatePlans = () => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 };
 
