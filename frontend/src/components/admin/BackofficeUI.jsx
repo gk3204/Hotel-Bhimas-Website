@@ -1,0 +1,265 @@
+// Shared gold-on-dark building blocks for the back-office admin screens
+// (Companies / Vendors / Staff — prompt 18 slices 7/13/12/9).
+//
+// Same brand and spacing as pages/admin/Compliance.jsx and RoomTypes.jsx — slate-900 surfaces,
+// #E5C07B gold accent, rounded-2xl cards. Extracted rather than pasted three times; nothing here
+// introduces a second look, it just names the pieces those pages already use.
+import React from "react";
+
+export const GOLD = "#E5C07B";
+
+export const inputCls =
+  "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white w-full " +
+  "focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition " +
+  "disabled:opacity-50";
+
+export const money = (v) =>
+  `₹ ${Number(v || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
+export const today = () => new Date().toISOString().slice(0, 10);
+export const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+/** DD-MM-YYYY, the convention used everywhere in this product. */
+export const fmtDate = (iso) => {
+  if (!iso) return "—";
+  const d = String(iso).slice(0, 10).split("-");
+  return d.length === 3 ? `${d[2]}-${d[1]}-${d[0]}` : String(iso);
+};
+
+export function Field({ label, hint, children, ...props }) {
+  return (
+    <div className="flex flex-col">
+      <label className="mb-2 text-sm font-semibold text-slate-300">{label}</label>
+      {children || <input {...props} className={inputCls} />}
+      {hint && <span className="mt-1 text-xs text-slate-500">{hint}</span>}
+    </div>
+  );
+}
+
+export function SelectField({ label, options, hint, ...props }) {
+  return (
+    <Field label={label} hint={hint}>
+      <select {...props} className={inputCls}>
+        {options.map((o) =>
+          typeof o === "string" ? (
+            <option key={o} value={o}>{o}</option>
+          ) : (
+            <option key={o.value} value={o.value}>{o.label}</option>
+          )
+        )}
+      </select>
+    </Field>
+  );
+}
+
+export function PrimaryButton({ children, className = "", ...props }) {
+  return (
+    <button
+      {...props}
+      className={`bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-bold px-6 py-2.5
+        rounded-lg transition-all hover:scale-105 disabled:opacity-50 disabled:hover:scale-100
+        flex items-center justify-center gap-2 ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+export function GhostButton({ children, className = "", ...props }) {
+  return (
+    <button
+      {...props}
+      className={`bg-slate-700 hover:bg-slate-600 text-white font-semibold px-4 py-2.5 rounded-lg
+        transition disabled:opacity-50 flex items-center justify-center gap-2 ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+export function DangerButton({ children, className = "", ...props }) {
+  return (
+    <button
+      {...props}
+      className={`bg-red-900/60 hover:bg-red-800/70 border border-red-700/60 text-red-100
+        font-semibold px-4 py-2.5 rounded-lg transition disabled:opacity-50
+        flex items-center justify-center gap-2 ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
+export function Card({ title, right, children, className = "" }) {
+  return (
+    <div
+      className={`bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700
+        rounded-2xl shadow-xl backdrop-blur overflow-hidden ${className}`}
+    >
+      {(title || right) && (
+        <div className="p-5 border-b border-slate-700 flex items-center justify-between gap-4">
+          <h2 className="text-lg font-bold text-[#E5C07B]">{title}</h2>
+          {right}
+        </div>
+      )}
+      {children}
+    </div>
+  );
+}
+
+export function Spinner({ className = "" }) {
+  return (
+    <div className={`flex items-center justify-center ${className}`}>
+      <div className="animate-spin">
+        <div className="h-10 w-10 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full" />
+      </div>
+    </div>
+  );
+}
+
+const CHIP_TONES = {
+  ok: "bg-emerald-900/50 border-emerald-600/50 text-emerald-200",
+  warn: "bg-amber-900/50 border-amber-600/50 text-amber-200",
+  danger: "bg-red-900/50 border-red-600/50 text-red-200",
+  info: "bg-sky-900/50 border-sky-600/50 text-sky-200",
+  gold: "bg-[#E5C07B]/15 border-[#E5C07B]/50 text-[#E5C07B]",
+  neutral: "bg-slate-700/60 border-slate-600 text-slate-300",
+};
+
+export function Chip({ tone = "neutral", children }) {
+  return (
+    <span
+      className={`inline-block px-2.5 py-1 rounded-full border text-xs font-semibold whitespace-nowrap
+        ${CHIP_TONES[tone] || CHIP_TONES.neutral}`}
+    >
+      {children}
+    </span>
+  );
+}
+
+export function Stat({ label, value, tone = "" }) {
+  return (
+    <div className="bg-slate-900/50 border border-slate-700 rounded-xl p-4">
+      <div className="text-slate-400 text-xs mb-1">{label}</div>
+      <div className={`text-xl font-bold ${tone || "text-white"}`}>{value}</div>
+    </div>
+  );
+}
+
+/** Table with the loading / error / empty states the guidelines require (never optional). */
+export function DataTable({ columns, rows, renderRow, loading, error, empty = "No records." }) {
+  if (loading) return <Spinner className="p-12" />;
+  if (error) return <div className="p-8 text-center text-red-300">{error}</div>;
+  if (!rows || rows.length === 0)
+    return (
+      <div className="p-12 text-center text-slate-400">
+        <div className="text-5xl mb-4">📭</div>
+        <p>{empty}</p>
+      </div>
+    );
+  return (
+    <div className="overflow-x-auto">
+      <table className="w-full text-left text-sm">
+        <thead className="bg-slate-900/80 border-b border-slate-700">
+          <tr>
+            {columns.map((c) => (
+              <th key={c} className="px-4 py-3 font-semibold whitespace-nowrap">{c}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-slate-700">
+          {rows.map((r, i) => (
+            <tr key={r.id ?? r.user_id ?? i} className="hover:bg-slate-700/30 transition">
+              {renderRow(r, i).map((cell, j) => (
+                <td key={j} className="px-4 py-2.5 text-slate-200 whitespace-nowrap">
+                  {cell === null || cell === undefined || cell === "" ? "—" : cell}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+export function Modal({ title, onClose, children, wide = false }) {
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-start justify-center p-4 overflow-y-auto"
+      onClick={onClose}
+    >
+      <div
+        className={`bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full my-8
+          ${wide ? "max-w-4xl" : "max-w-2xl"}`}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="p-5 border-b border-slate-700 flex items-center justify-between">
+          <h3 className="text-lg font-bold text-[#E5C07B]">{title}</h3>
+          <button onClick={onClose} className="text-slate-400 hover:text-white text-2xl leading-none px-2">
+            ×
+          </button>
+        </div>
+        <div className="p-6">{children}</div>
+      </div>
+    </div>
+  );
+}
+
+export function Toast({ message }) {
+  if (!message) return null;
+  return (
+    <div className="fixed top-6 right-6 z-[60] bg-slate-800 border border-[#E5C07B]/40 text-white px-5 py-3 rounded-xl shadow-2xl max-w-md">
+      {message}
+    </div>
+  );
+}
+
+export function Tabs({ tabs, active, onChange }) {
+  return (
+    <div className="flex flex-wrap gap-2 mb-6">
+      {tabs.map(([key, label]) => (
+        <button
+          key={key}
+          onClick={() => onChange(key)}
+          className={`px-4 py-2 rounded-lg font-semibold transition text-sm ${
+            active === key
+              ? "bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900"
+              : "bg-slate-800/60 border border-slate-700 text-slate-300 hover:bg-slate-700/60"
+          }`}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+export function PageShell({ icon, title, subtitle, toast, children }) {
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
+      <div className="max-w-7xl mx-auto">
+        <Toast message={toast} />
+        <div className="mb-6">
+          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
+            {icon} {title}
+          </h1>
+          <p className="text-slate-400">{subtitle}</p>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/** Small hook: a toast that clears itself, used by every back-office page. */
+export function useToast(ms = 3500) {
+  const [toast, setToast] = React.useState("");
+  const show = React.useCallback(
+    (m) => {
+      setToast(m);
+      setTimeout(() => setToast(""), ms);
+    },
+    [ms]
+  );
+  return [toast, show];
+}

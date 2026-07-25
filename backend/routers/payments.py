@@ -1,22 +1,24 @@
 # backend/routers/payment.py
 from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from decimal import Decimal
 import os
 import uuid
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 import hmac
 import hashlib
 from database import SessionLocal
 from models import Booking, Payment, BookingItem, RoomType, WebhookEvent, Folio, FolioCharge, CashShift, User
-from schemas import DeskPaymentRecord, PaymentRefundRequest, ExcessReturnRequest
+from schemas import DeskPaymentRecord, PaymentRefundRequest, ExcessReturnRequest, DeskCollectRequest
 from utils.pdf_generator import generate_booking_pdf, generate_payment_receipt_pdf
 from utils.email_service import send_booking_email
 from utils.auth_utils import require_reception_or_admin, get_current_user
 from utils.audit import write_audit, _resolve_user_id
+from utils.owner_otp import consume_otp
+from utils.settings import get_desk_pay_config
 from routers.folio import _recompute as _folio_recompute
 
 # Try to import razorpay, but allow app to run without it
@@ -125,9 +127,9 @@ def get_all_payments(db: Session = Depends(get_db)):
 
 
 # 📊 GET payment details
-@router.get("/{payment_id}")
+@router.get("/{payment_id}", dependencies=[Depends(require_reception_or_admin)])
 def get_payment(payment_id: int, db: Session = Depends(get_db)):
-    """Get specific payment details"""
+    """Get specific payment details (reception/admin only — financial + refund data)."""
     payment = db.query(Payment).filter(
         Payment.payment_id == payment_id
     ).first()
@@ -240,6 +242,11 @@ async def verify_payment(
     booking = db.query(Booking).filter(
         Booking.booking_id == payment.booking_id
     ).with_for_update().first()  # 🔒 Lock to prevent concurrent modification
+
+    # Guard: a payment with no matching booking would NPE on the status writes below.
+    if not booking:
+        logger.error(f"Payment {payment.payment_id} references missing booking {payment.booking_id}")
+        raise HTTPException(status_code=404, detail="Booking for this payment not found")
 
     # ❌ If payment failed
     if payment_status != "success":
@@ -455,9 +462,11 @@ def retry_payment(booking_id: int, db: Session = Depends(get_db)):
 @router.post("/webhook")
 async def payment_webhook(request: Request, db: Session = Depends(get_db)):
     """
-    Razorpay webhook endpoint for payment status updates
-    Handles: payment.authorized, payment.failed
-    Implements idempotency to prevent duplicate processing
+    Razorpay webhook endpoint for payment status updates.
+    Handles: payment.authorized / payment.failed (website checkout) and
+    payment.captured / qr_code.credited / payment_link.paid (desk collect, prompt 19).
+    Implements idempotency (WebhookEvent.event_id) to prevent duplicate processing.
+    Requires RAZORPAY_WEBHOOK_SECRET in the environment.
     """
     
     try:
@@ -500,85 +509,106 @@ async def payment_webhook(request: Request, db: Session = Depends(get_db)):
             logger.info(f"⚠️ Webhook {event_id} already processed - skipping")
             return {"status": "already_processed", "event_id": event_id}
         
-        # Get payment data from webhook
-        payment_data = data.get("payload", {}).get("payment", {})
-        razorpay_order_id = payment_data.get("order_id")
-        razorpay_payment_id = payment_data.get("id")
-        
-        if not razorpay_order_id:
-            logger.warning(f"⚠️ Webhook missing order_id: {event_id}")
-            return {"status": "ignored", "reason": "no_order_id"}
-        
-        # Find payment record
-        payment = db.query(Payment).filter(
-            Payment.order_id == razorpay_order_id
-        ).first()
-        
+        # Extract entities (Razorpay nests the real object under payload.<kind>.entity).
+        payload = data.get("payload", {}) or {}
+        payment_entity = (payload.get("payment", {}) or {}).get("entity", {}) or {}
+        razorpay_order_id = payment_entity.get("order_id")
+        razorpay_payment_id = payment_entity.get("id")
+
+        # Locate our Payment row per event type. Website checkout matches by order_id;
+        # desk-collect (prompt 19) has no order_id — a UPI QR matches by qr_code_id and a
+        # payment link by payment_link_id.
+        payment = None
+        if event in ("payment.authorized", "payment.failed", "payment.captured"):
+            if razorpay_order_id:
+                payment = db.query(Payment).filter(Payment.order_id == razorpay_order_id).first()
+        elif event == "qr_code.credited":
+            qr_id = (payload.get("qr_code", {}) or {}).get("entity", {}).get("id")
+            if qr_id:
+                payment = db.query(Payment).filter(Payment.qr_code_id == qr_id).first()
+        elif event == "payment_link.paid":
+            pl_id = (payload.get("payment_link", {}) or {}).get("entity", {}).get("id")
+            if pl_id:
+                payment = db.query(Payment).filter(Payment.payment_link_id == pl_id).first()
+
         if not payment:
-            logger.warning(f"⚠️ Payment order not found: {razorpay_order_id}")
-            # Store event anyway to prevent re-processing
-            webhook_event = WebhookEvent(
-                event_id=event_id,
-                event_type=event,
-                payment_id=razorpay_payment_id,
-                status="payment_not_found",
-                raw_data=str(data)
-            )
-            db.add(webhook_event)
+            # Unknown/irrelevant event or a payment we don't track (e.g. a duplicate
+            # payment.captured for a QR we match via qr_code.credited). Record it so it is
+            # never reprocessed, and ack.
+            reason = "payment_not_found" if event in (
+                "payment.authorized", "payment.failed", "payment.captured",
+                "qr_code.credited", "payment_link.paid") else "ignored"
+            db.add(WebhookEvent(event_id=event_id, event_type=event,
+                                payment_id=razorpay_payment_id, status=reason, raw_data=str(data)))
             db.commit()
-            return {"status": "payment_not_found"}
-        
-        booking = db.query(Booking).filter(
-            Booking.booking_id == payment.booking_id
-        ).first()
-        
-        # 🎯 Handle payment.authorized event
+            return {"status": reason, "event_id": event_id}
+
+        booking = db.query(Booking).filter(Booking.booking_id == payment.booking_id).first()
+
+        # 🎯 Success events
         if event == "payment.authorized":
-            logger.info(f"✅ Payment authorized: {razorpay_payment_id} for booking {booking.booking_id}")
-            
-            payment.payment_id_gateway = razorpay_payment_id
-            payment.status = "paid"
-            
-            # Check booking hasn't expired
-            if booking.status == "cancelled":
+            # Website checkout flow (unchanged): mark paid + confirm the booking.
+            if booking and booking.status == "cancelled":
                 logger.warning(f"❌ Cannot confirm expired booking {booking.booking_id}")
                 payment.status = "failed"
                 webhook_event_status = "booking_expired"
             else:
-                booking.status = "confirmed"
+                _mark_payment_paid(db, payment, razorpay_payment_id)
+                if booking:
+                    booking.status = "confirmed"
                 webhook_event_status = "processed"
-            
             db.commit()
-        
+
+        elif event in ("payment.captured", "qr_code.credited", "payment_link.paid"):
+            # qr_code.credited / payment_link.paid are always desk-collect. payment.captured also
+            # fires for WEBSITE orders (which payment.authorized already settled) — only a payment
+            # raised at the desk carries a collect_method, so gate the desk-collect handling on it.
+            is_desk = payment.collect_method in ("upi_qr", "link")
+            if is_desk:
+                # Desk-collect (prompt 19): the folio is marked paid ONLY here, by the gateway.
+                logger.info(f"✅ Desk collection captured: payment {payment.payment_id} via {event}")
+                _mark_payment_paid(db, payment, razorpay_payment_id)
+                webhook_event_status = "processed"
+                db.commit()
+                write_audit(db, None, "payment.desk_collect_captured", "payment", payment.payment_id,
+                            after={"event": event, "gateway_payment_id": razorpay_payment_id,
+                                   "booking_id": payment.booking_id, "amount": float(payment.amount or 0)},
+                            client="system", commit=True)
+            else:
+                # Website capture: payment.authorized already marked this paid + confirmed the
+                # booking. Settle idempotently; do NOT mislabel it as a desk collection in the audit.
+                logger.info(f"↩️ Website capture for payment {payment.payment_id} via {event} "
+                            f"(already settled by payment.authorized)")
+                _mark_payment_paid(db, payment, razorpay_payment_id)
+                webhook_event_status = "processed"
+                db.commit()
+
         # 🎯 Handle payment.failed event
         elif event == "payment.failed":
-            logger.warning(f"❌ Payment failed: {razorpay_payment_id} for booking {booking.booking_id}")
-            
+            logger.warning(f"❌ Payment failed: {razorpay_payment_id} for booking {payment.booking_id}")
             payment.status = "failed"
-            booking.status = "payment_pending"  # Keep reservation for retry
-            
+            if booking and booking.status not in ("checked_in", "checked_out"):
+                booking.status = "payment_pending"  # keep the reservation for retry (website flow)
             db.commit()
             webhook_event_status = "processed"
-        
+
         else:
-            # Ignore other events
             logger.info(f"⏭️ Ignoring event type: {event}")
             webhook_event_status = "ignored"
-        
+
         # 🔒 Store webhook event to prevent duplicate processing
-        webhook_event = WebhookEvent(
+        db.add(WebhookEvent(
             event_id=event_id,
             event_type=event,
             booking_id=booking.booking_id if booking else None,
             payment_id=razorpay_payment_id,
             status=webhook_event_status,
             raw_data=str(data)
-        )
-        db.add(webhook_event)
+        ))
         db.commit()
-        
+
         logger.info(f"✅ Webhook {event_id} processed successfully")
-        
+
         return {
             "status": "received",
             "event_id": event_id,
@@ -621,9 +651,15 @@ def _open_shift(db: Session):
 
 
 def require_refund_permission(user=Depends(get_current_user)):
-    """Refund gate: REFUND_REQUIRES_ADMIN (default true) -> admin only.
-    Read at call time so the flag can be changed without a restart.
-    Interim approval mechanism — prompt 11 replaces this with owner OTP."""
+    """Refund gate. Two approval modes, read at call time so flags change without a restart:
+      - REFUND_REQUIRES_OWNER_OTP (default false, prompt 11): owner OTP IS the approval, so
+        reception+admin pass the gate and the endpoint consumes the OTP in its body.
+      - else REFUND_REQUIRES_ADMIN (default true, prompt 08 interim): admin JWT required.
+    """
+    if os.getenv("REFUND_REQUIRES_OWNER_OTP", "false").strip().lower() not in ("false", "0", "no"):
+        if user.get("role") not in ["admin", "reception"]:
+            raise HTTPException(status_code=403, detail="Access denied")
+        return user
     requires_admin = os.getenv("REFUND_REQUIRES_ADMIN", "true").strip().lower() not in ("false", "0", "no")
     if requires_admin:
         if user.get("role") != "admin":
@@ -654,6 +690,109 @@ def total_paid(db: Session, booking_id: int) -> float:
         .scalar()
     )
     return float(total or 0)
+
+
+# =====================================================================
+# INTEGRATED DESK PAYMENTS — UPI QR + Razorpay link (prompt 19).
+# A gateway-confirmed collection raised at the desk: the guest scans a
+# dynamic UPI QR or opens a payment link; Razorpay's WEBHOOK (not staff)
+# marks the Payment paid and posts the folio credit. Cash falls back to
+# the proven recorded-cash path (record_desk_payment). Anti-fraud: the
+# folio is settled only by the gateway event, never by a staff assertion.
+# Fee policy is config-driven (get_desk_pay_config): UPI QR ~0% (fee off),
+# cards/links may pass ~2% + GST (fee on). Reuses Payment / WebhookEvent /
+# _open_shift / total_paid / _folio_recompute — no new subsystems.
+# =====================================================================
+
+
+def _compute_desk_fee(cfg: dict, method: str, base: float, apply_fee_override=None) -> float:
+    """Convenience fee (GST-inclusive) the guest pays on top of `base` for a non-cash desk
+    collection, per config. UPI QR is ~0% MDR so its fee is off by default; cards/links can
+    pass the ~2% MDR + GST-on-fee. Cash is always 0. `apply_fee_override` (from the request)
+    forces the per-method toggle on/off when not None."""
+    if method == "cash":
+        return 0.0
+    enabled = {"upi_qr": cfg["fee_on_upi"], "link": cfg["fee_on_link"]}.get(method, False)
+    if apply_fee_override is not None:
+        enabled = bool(apply_fee_override)
+    if not enabled or cfg["fee_card_percent"] <= 0:
+        return 0.0
+    fee = base * cfg["fee_card_percent"] / 100.0
+    fee_with_gst = fee * (1.0 + cfg["fee_gst_percent"] / 100.0)
+    return round(fee_with_gst, 2)
+
+
+def _mark_payment_paid(db: Session, payment: Payment, gateway_payment_id, method=None):
+    """Shared 'a gateway payment succeeded' routine for the desk-collect webhook events
+    (qr_code.credited / payment_link.paid / payment.captured) and the live-reconcile fallback.
+    Idempotent: a Payment already 'paid' is left untouched. If the booking's folio is open it
+    posts the convenience-fee charge (if any) + the NEGATIVE 'payment' credit line and recomputes
+    the balance — mirroring record_desk_payment. Does NOT commit (the caller owns the txn)."""
+    if payment.status == "paid":
+        return
+    if gateway_payment_id:
+        payment.payment_id_gateway = gateway_payment_id
+    payment.status = "paid"
+    if method:                       # desk QR/link already carry method='upi'; website path passes None
+        payment.method = method
+    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    if folio and folio.status == "open":
+        fee = float(payment.convenience_fee_amount or 0)
+        if fee > 0:
+            db.add(FolioCharge(
+                folio_id=folio.id, type="misc",
+                description=f"Convenience fee ({payment.collect_method or payment.method})",
+                qty=1, unit_price=fee, amount=fee, gst_percent=0,
+                posted_by=payment.collected_by))
+        amt = round(float(payment.amount or 0), 2)
+        ref = f" ({gateway_payment_id})" if gateway_payment_id else ""
+        db.add(FolioCharge(
+            folio_id=folio.id, type="payment",
+            description=f"Desk {payment.collect_method or 'payment'} — {payment.method}{ref}",
+            qty=1, unit_price=-amt, amount=-amt, gst_percent=0,
+            posted_by=payment.collected_by))
+        _folio_recompute(db, folio)
+
+
+def _try_live_reconcile(db: Session, payment: Payment):
+    """Best-effort belt-and-suspenders to the webhook: ask Razorpay directly whether a still-
+    pending desk-collect payment has been captured (or has expired). The webhook is primary; this
+    covers webhook delay/misconfiguration when the desktop polls GET /{id}/status. Never raises."""
+    try:
+        client = get_razorpay_client()
+        if not client:
+            return
+        captured_gw_id = None
+        expired = False
+        if payment.qr_code_id:
+            pays = client.qrcode.fetch_all_payments(payment.qr_code_id)
+            for item in (pays.get("items") or []):
+                if item.get("status") == "captured":
+                    captured_gw_id = item.get("id")
+                    break
+            if not captured_gw_id:
+                qr = client.qrcode.fetch(payment.qr_code_id)
+                if qr.get("status") == "closed":   # single-use QR auto-closes on pay; else expired
+                    expired = True
+        elif payment.payment_link_id:
+            pl = client.payment_link.fetch(payment.payment_link_id)
+            if pl.get("status") == "paid":
+                pmts = pl.get("payments") or []
+                captured_gw_id = (pmts[0].get("payment_id") if pmts else None) or payment.payment_id_gateway or "paid"
+            elif pl.get("status") in ("expired", "cancelled"):
+                expired = True
+        if captured_gw_id:
+            _mark_payment_paid(db, payment, captured_gw_id, method="upi")
+            db.commit()
+            write_audit(db, None, "payment.desk_collect_reconciled", "payment", payment.payment_id,
+                        after={"gateway_payment_id": captured_gw_id, "source": "poll"},
+                        client="system", commit=True)
+        elif expired and payment.status == "created":
+            payment.status = "expired"
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"live reconcile failed for payment {getattr(payment, 'payment_id', '?')}: {e}")
 
 
 @router.post("/record")
@@ -689,8 +828,14 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
             collected_by=_resolve_user_id(db, user),
         )
         if data.method == "cash":
+            # Hard cash gate (prompt 12): cash must land in an open drawer so it is
+            # attributable to a shift. Non-cash (card/upi/bank) is unaffected.
             shift = _open_shift(db)
-            payment.shift_id = shift.id if shift else None
+            if not shift:
+                raise HTTPException(
+                    status_code=409,
+                    detail="No cash shift is open — open a cash shift before recording cash.")
+            payment.shift_id = shift.id
         db.add(payment)
         db.flush()
 
@@ -720,6 +865,21 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
                            "client_ref": data.client_ref, "shift_id": payment.shift_id},
                     client="desktop", commit=True)
         logger.info(f"✅ Desk payment ₹{payment.amount} ({data.method}) recorded for booking {booking.booking_id}")
+        # Best-effort WhatsApp payment receipt (prompt 15) — must not break the payment.
+        try:
+            from utils.settings import get_setting
+            guest = booking.guest
+            if guest and guest.phone and \
+               str(get_setting(db, "wa_receipt_enabled", "true")).strip().lower() not in ("false", "0", "no", ""):
+                from utils import whatsapp_service
+                whatsapp_service.send_template(
+                    db, guest.phone, "payment_receipt",
+                    {"guest_name": guest.name, "amount": f"{float(payment.amount):.2f}",
+                     "method": data.method, "booking_ref": str(booking.booking_id)},
+                    guest_id=guest.guest_id, booking_id=booking.booking_id,
+                    client_ref=f"receipt:{payment.payment_id}")
+        except Exception as e:
+            logger.warning(f"payment receipt WhatsApp failed: {e}")
         return _desk_payment_response(db, payment)
 
     except HTTPException:
@@ -747,6 +907,234 @@ def _desk_payment_response(db: Session, payment: Payment, duplicate: bool = Fals
     }
 
 
+# --------------------------------------------------- desk collect (UPI QR / link)
+
+def _desk_collect_response(db: Session, payment: Payment, short_url=None, expires_at=None):
+    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    return {
+        "payment_id": payment.payment_id,
+        "booking_id": payment.booking_id,
+        "collect_method": payment.collect_method,
+        "method": payment.method,
+        "status": payment.status,
+        "amount": float(payment.amount or 0),
+        "fee": float(payment.convenience_fee_amount or 0),
+        "qr_code_id": payment.qr_code_id,
+        "payment_link_id": payment.payment_link_id,
+        "short_url": short_url,
+        "expires_at": expires_at,
+        "total_paid": total_paid(db, payment.booking_id),
+        "folio_id": folio.id if folio else None,
+        "folio_balance": float(folio.balance or 0) if folio else None,
+    }
+
+
+@router.post("/desk/collect")
+def desk_collect(data: DeskCollectRequest, db: Session = Depends(get_db),
+                 user=Depends(require_reception_or_admin)):
+    """Raise a gateway-confirmed desk collection for the exact amount (prompt 19).
+      - upi_qr -> a Razorpay dynamic UPI QR (near-0% MDR; preferred). Poll GET /{id}/status.
+      - link   -> a Razorpay payment link (send via WhatsApp/SMS). Confirmed by the same webhook.
+      - cash   -> falls back to the proven recorded-cash path (shift gate + folio credit + receipt).
+    A convenience fee is added per config for card-like methods (off on UPI by default) and shown
+    transparently. For upi_qr/link the folio is marked paid ONLY by the webhook, never here."""
+    cfg = get_desk_pay_config(db)
+
+    # Idempotency: an outbox re-flush / double-click with the same client_ref returns the original.
+    if data.client_ref:
+        existing = db.query(Payment).filter(Payment.client_ref == data.client_ref).first()
+        if existing:
+            return _desk_collect_response(db, existing)
+
+    booking = db.query(Booking).filter(Booking.booking_id == data.booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.status not in ("confirmed", "checked_in"):
+        raise HTTPException(status_code=409,
+                            detail=f"Cannot collect against a '{booking.status}' booking")
+
+    base = round(data.amount, 2)
+
+    # ---- cash fallback: reuse the recorded-cash path unchanged (shift gate + folio + receipt) ----
+    if data.method == "cash":
+        if not cfg["cash_enabled"]:
+            raise HTTPException(status_code=409, detail="Cash collection is disabled")
+        rec = record_desk_payment(
+            DeskPaymentRecord(booking_id=data.booking_id, amount=base, method="cash",
+                              reference=data.reference, client_ref=data.client_ref),
+            db=db, user=user)
+        rec["collect_method"] = "cash"
+        return rec
+
+    client = get_razorpay_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Online payments are unavailable (Razorpay not configured)")
+
+    fee = _compute_desk_fee(cfg, data.method, base, data.apply_fee)
+    charge = round(base + fee, 2)
+    guest = booking.guest
+
+    # ---- UPI dynamic QR ----
+    if data.method == "upi_qr":
+        if not cfg["upi_qr_enabled"]:
+            raise HTTPException(status_code=409, detail="UPI QR collection is disabled")
+        close_by = int((datetime.utcnow() + timedelta(minutes=cfg["qr_expiry_minutes"])).timestamp())
+        try:
+            qr = client.qrcode.create({
+                "type": "upi_qr",
+                "name": ((guest.name if guest else "") or "Hotel Bhimas guest")[:40],
+                "usage": "single_use",
+                "fixed_amount": True,
+                "payment_amount": int(round(charge * 100)),
+                "description": f"Booking {booking.booking_id} — Hotel Bhimas",
+                "close_by": close_by,
+                "notes": {"booking_id": str(booking.booking_id), "desk": "reception"},
+            })
+        except Exception as e:
+            logger.error(f"❌ Razorpay QR create failed for booking {booking.booking_id}: {e}", exc_info=True)
+            raise HTTPException(status_code=502, detail="Failed to create the UPI QR")
+        payment = Payment(
+            booking_id=booking.booking_id, gateway="razorpay", method="upi",
+            collect_method="upi_qr", amount=Decimal(str(charge)),
+            convenience_fee_amount=Decimal(str(fee)), currency="INR", status="created",
+            client_ref=data.client_ref, collected_by=_resolve_user_id(db, user),
+            qr_code_id=qr.get("id"), qr_image_url=qr.get("image_url"))
+        db.add(payment)
+        db.commit()
+        write_audit(db, user, "payment.desk_collect", "payment", payment.payment_id,
+                    after={"booking_id": booking.booking_id, "method": "upi_qr",
+                           "amount": float(charge), "fee": float(fee), "qr_code_id": payment.qr_code_id},
+                    client="desktop", commit=True)
+        logger.info(f"🧾 Desk UPI QR ₹{charge} raised for booking {booking.booking_id} (qr {payment.qr_code_id})")
+        return _desk_collect_response(db, payment, expires_at=close_by)
+
+    # ---- Razorpay payment link ----
+    if not cfg["link_enabled"]:
+        raise HTTPException(status_code=409, detail="Payment link collection is disabled")
+    try:
+        plink = client.payment_link.create({
+            "amount": int(round(charge * 100)), "currency": "INR",
+            "description": f"Booking {booking.booking_id} — Hotel Bhimas",
+            "customer": {"name": (guest.name if guest else "") or "",
+                         "contact": (guest.phone if guest else "") or "",
+                         "email": (guest.email if guest else "") or ""},
+            "notify": {"sms": False, "email": False},
+            "reminder_enable": False,
+            "notes": {"booking_id": str(booking.booking_id), "desk": "reception"},
+        })
+    except Exception as e:
+        logger.error(f"❌ Razorpay payment link create failed for booking {booking.booking_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Failed to create the payment link")
+    payment = Payment(
+        booking_id=booking.booking_id, gateway="razorpay", method="upi",
+        collect_method="link", amount=Decimal(str(charge)),
+        convenience_fee_amount=Decimal(str(fee)), currency="INR", status="created",
+        client_ref=data.client_ref, collected_by=_resolve_user_id(db, user),
+        payment_link_id=plink.get("id"))
+    db.add(payment)
+    db.commit()
+    write_audit(db, user, "payment.desk_collect", "payment", payment.payment_id,
+                after={"booking_id": booking.booking_id, "method": "link",
+                       "amount": float(charge), "fee": float(fee), "payment_link_id": payment.payment_link_id},
+                client="desktop", commit=True)
+    logger.info(f"🔗 Desk payment link ₹{charge} raised for booking {booking.booking_id} (plink {payment.payment_link_id})")
+    return _desk_collect_response(db, payment, short_url=plink.get("short_url"))
+
+
+@router.post("/desk/link")
+def desk_link(data: DeskCollectRequest, db: Session = Depends(get_db),
+              user=Depends(require_reception_or_admin)):
+    """Create a Razorpay payment link for the exact amount (prompt 19). Thin alias of
+    /desk/collect with method='link' so the desktop can call a clear URL; returns short_url."""
+    data.method = "link"
+    return desk_collect(data, db=db, user=user)
+
+
+@router.get("/{payment_id}/status")
+def payment_status(payment_id: int, db: Session = Depends(get_db),
+                   user=Depends(require_reception_or_admin)):
+    """Poll a desk-collect payment until it is paid/failed/expired (prompt 19). While still
+    'created' it also does a best-effort live Razorpay reconcile as a fallback to the webhook."""
+    payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.status == "created" and (payment.qr_code_id or payment.payment_link_id):
+        _try_live_reconcile(db, payment)
+        payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
+    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    return {
+        "payment_id": payment.payment_id,
+        "booking_id": payment.booking_id,
+        "collect_method": payment.collect_method,
+        "method": payment.method,
+        "status": payment.status,          # created | paid | failed | expired
+        "amount": float(payment.amount or 0),
+        "fee": float(payment.convenience_fee_amount or 0),
+        "total_paid": total_paid(db, payment.booking_id),
+        "folio_id": folio.id if folio else None,
+        "folio_balance": float(folio.balance or 0) if folio else None,
+    }
+
+
+@router.get("/{payment_id}/qr.png")
+def payment_qr_png(payment_id: int, db: Session = Depends(get_db),
+                   user=Depends(require_reception_or_admin)):
+    """Serve the QR image bytes for a UPI-QR desk collection (prompt 19). Proxies Razorpay's
+    hosted QR image so the desktop can reuse its authed byte-download channel (no direct CDN hit)."""
+    payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if not payment.qr_image_url:
+        raise HTTPException(status_code=404, detail="No QR image for this payment")
+    try:
+        import requests
+        r = requests.get(payment.qr_image_url, timeout=10)
+        r.raise_for_status()
+        content = r.content
+        ctype = r.headers.get("Content-Type", "image/png")
+    except Exception as e:
+        logger.error(f"❌ QR image fetch failed for payment {payment_id}: {e}", exc_info=True)
+        raise HTTPException(status_code=502, detail="Failed to fetch the QR image")
+    return Response(content=content, media_type=ctype)
+
+
+@router.post("/{payment_id}/send-link")
+def send_payment_link(payment_id: int, db: Session = Depends(get_db),
+                      user=Depends(require_reception_or_admin)):
+    """WhatsApp the Razorpay payment link to the guest (prompt 19 + 15). Best-effort/stub-off
+    when WhatsApp env is unset (a message row is still logged). Idempotent on the payment."""
+    payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.collect_method != "link" or not payment.payment_link_id:
+        raise HTTPException(status_code=409, detail="This payment is not a payment link")
+    booking = db.query(Booking).filter(Booking.booking_id == payment.booking_id).first()
+    guest = booking.guest if booking else None
+    if not guest or not guest.phone:
+        raise HTTPException(status_code=400, detail="The guest has no phone number on file")
+    short_url = None
+    try:
+        client = get_razorpay_client()
+        if client:
+            pl = client.payment_link.fetch(payment.payment_link_id)
+            short_url = pl.get("short_url")
+    except Exception as e:
+        logger.warning(f"payment link fetch failed for send-link {payment_id}: {e}")
+    if not short_url:
+        raise HTTPException(status_code=502, detail="Could not fetch the payment link URL")
+    try:
+        from utils import whatsapp_service
+        whatsapp_service.send_template(
+            db, guest.phone, "payment_link",
+            {"guest_name": guest.name, "amount": f"{float(payment.amount):.2f}", "link": short_url},
+            guest_id=guest.guest_id, booking_id=booking.booking_id,
+            client_ref=f"paylink:{payment.payment_id}")
+    except Exception as e:
+        logger.warning(f"payment link WhatsApp send failed for {payment_id}: {e}")
+        raise HTTPException(status_code=502, detail="Failed to send the WhatsApp message")
+    return {"sent": True, "short_url": short_url, "phone": guest.phone}
+
+
 # ------------------------------------------------------------------ refunds
 
 @router.post("/refund")
@@ -767,6 +1155,11 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
     amount = round(data.amount, 2)
     if amount > float(payment.amount):
         raise HTTPException(status_code=400, detail="Refund exceeds payment amount")
+
+    # Owner-approval OTP (prompt 11): opt-in via REFUND_REQUIRES_OWNER_OTP. Consumed here so
+    # the code is only spent if the refund itself commits. 403 if missing/invalid/expired.
+    if os.getenv("REFUND_REQUIRES_OWNER_OTP", "false").strip().lower() not in ("false", "0", "no"):
+        consume_otp(db, data.owner_otp_id, data.owner_otp_code, "refund", user)
 
     folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
     folio_open = bool(folio and folio.status == "open")

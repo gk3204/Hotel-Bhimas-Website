@@ -3,6 +3,7 @@ import { Routes, Route } from "react-router-dom";
 import PublicLayout from "./layouts/PublicLayout";
 import AdminLayout from "./layouts/AdminLayout";
 import ReceptionLayout from "./layouts/ReceptionLayout";
+import StaffLayout from "./layouts/StaffLayout";
 import ProtectedRoute from "./components/ProtectedRoute";
 
 // Public Pages
@@ -19,6 +20,8 @@ import CancellationPolicy from "./pages/public/CancellationPolicy";
 import Restaurant from "./pages/public/Restaurant";
 import Rooms from "./pages/public/Rooms";
 import Booking from "./pages/public/Booking";
+import PreArrival from "./pages/public/PreArrival";
+import GuestPortal from "./pages/public/GuestPortal";
 import PaymentSuccess from "./pages/public/PaymentSuccess";
 import PaymentFailed from "./pages/public/PaymentFailed";
 
@@ -35,11 +38,37 @@ import Bookings from "./pages/admin/Bookings";
 import Payments from "./pages/admin/Payments";
 import Enquiries from "./pages/admin/Enquiries";
 import Promotions from "./pages/admin/Promotions";
+import TravelAgents from "./pages/admin/TravelAgents";
+import RatePlans from "./pages/admin/RatePlans";
+import AgentSettlements from "./pages/admin/AgentSettlements";
+import FraudDashboard from "./pages/admin/FraudDashboard";
+import CashShiftSettings from "./pages/admin/CashShiftSettings";
+import AdminHousekeeping from "./pages/admin/Housekeeping";
+import AdminMaintenance from "./pages/admin/Maintenance";
+import GuestDirectory from "./pages/admin/GuestDirectory";
+import WhatsAppMessaging from "./pages/admin/WhatsAppMessaging";
+import OwnerDashboard from "./pages/admin/OwnerDashboard";
+import Reports from "./pages/admin/Reports";
+import OtaChannels from "./pages/admin/OtaChannels";
+import Compliance from "./pages/admin/Compliance";
+import Reviews from "./pages/admin/Reviews";
+import Companies from "./pages/admin/Companies";
+import Vendors from "./pages/admin/Vendors";
+import Staff from "./pages/admin/Staff";
+import Inventory from "./pages/admin/Inventory";
+import Complaints from "./pages/admin/Complaints";
+import GuestPortalAdmin from "./pages/admin/GuestPortal";
+import TwoFactorSettings from "./pages/admin/TwoFactorSettings";
 
 //Reception Pages
 import ReceptionDashboard from "./pages/reception/ReceptionDashboard";
 import ReceptionPayments from "./pages/reception/Payments";
 import ReceptionEnquiries from "./pages/reception/Enquiries";
+
+// Staff PWA (housekeeper + maintenance)
+import StaffHome from "./pages/staff/StaffHome";
+import MyRooms from "./pages/staff/MyRooms";
+import MyTickets from "./pages/staff/MyTickets";
 
 function App() {
   return (
@@ -64,6 +93,12 @@ function App() {
         <Route path="/payment-failed/:bookingId" element={<PaymentFailed />} />
       </Route>
 
+      {/* PRE-ARRIVAL DIGITAL REGISTRATION (public, tokenized — prompt 14) */}
+      <Route path="/pre-arrival/:token" element={<PreArrival />} />
+
+      {/* IN-ROOM GUEST PORTAL (public, tokenized — prompt 18d) */}
+      <Route path="/portal/:token" element={<GuestPortal />} />
+
       {/* ADMIN LOGIN */}
       <Route path="/admin-login" element={<AdminLogin />} />
 
@@ -75,16 +110,37 @@ function App() {
           </ProtectedRoute>
         }
       >
-        <Route path="/admin" element={<Dashboard />} />
+        <Route path="/admin" element={<OwnerDashboard />} />
+        <Route path="/admin/home" element={<Dashboard />} />
+        <Route path="/admin/reports" element={<Reports />} />
         <Route path="/admin/room-types" element={<RoomTypes />} />
         <Route path="/admin/rooms" element={<AdminRooms />} />
         <Route path="/admin/promotions" element={<Promotions />} />
+        <Route path="/admin/travel-agents" element={<TravelAgents />} />
+        <Route path="/admin/rate-plans" element={<RatePlans />} />
+        <Route path="/admin/agent-settlements" element={<AgentSettlements />} />
+        <Route path="/admin/fraud" element={<FraudDashboard />} />
+        <Route path="/admin/cash-shift" element={<CashShiftSettings />} />
+        <Route path="/admin/ota" element={<OtaChannels />} />
+        <Route path="/admin/housekeeping" element={<AdminHousekeeping />} />
+        <Route path="/admin/maintenance" element={<AdminMaintenance />} />
+        <Route path="/admin/guests" element={<GuestDirectory />} />
+        <Route path="/admin/messaging" element={<WhatsAppMessaging />} />
         <Route path="/admin/room-availability" element={<RoomAvailability />} />
         <Route path="/admin/bookings" element={<Bookings />} />
         <Route path="/admin/payments" element={<Payments />} />
         <Route path="/admin/enquiries" element={<Enquiries />} />
         <Route path="/admin/user-check" element={<UserSecurityCheck />} />
         <Route path="/admin/users" element={<UserManagement />} />
+        <Route path="/admin/compliance" element={<Compliance />} />
+        <Route path="/admin/reviews" element={<Reviews />} />
+        <Route path="/admin/companies" element={<Companies />} />
+        <Route path="/admin/vendors" element={<Vendors />} />
+        <Route path="/admin/staff" element={<Staff />} />
+        <Route path="/admin/inventory" element={<Inventory />} />
+        <Route path="/admin/complaints" element={<Complaints />} />
+        <Route path="/admin/guest-portal" element={<GuestPortalAdmin />} />
+        <Route path="/admin/security-2fa" element={<TwoFactorSettings />} />
       </Route>
 
       {/* Reception LAYOUT (Protected) */}
@@ -100,6 +156,19 @@ function App() {
         <Route path="/reception/availability" element={<RoomAvailability />} />
         <Route path="/reception/payments" element={<ReceptionPayments />} />
         <Route path="/reception/enquiries" element={<ReceptionEnquiries />} />
+      </Route>
+
+      {/* STAFF PWA LAYOUT (housekeeper + maintenance, Protected) */}
+      <Route
+        element={
+          <ProtectedRoute allowedRoles={["housekeeper", "maintenance"]}>
+            <StaffLayout />
+          </ProtectedRoute>
+        }
+      >
+        <Route path="/staff" element={<StaffHome />} />
+        <Route path="/staff/rooms" element={<MyRooms />} />
+        <Route path="/staff/tickets" element={<MyTickets />} />
       </Route>
 
     </Routes>

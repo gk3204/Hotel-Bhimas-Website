@@ -79,3 +79,6 @@ docker-compose.override.yml
 # Temp files
 *.tmp
 *.bak
+
+# CRM local upload fallback (runtime data; R2 used in prod) — prompt 14
+backend/uploads/

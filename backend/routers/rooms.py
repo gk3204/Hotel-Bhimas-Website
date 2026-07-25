@@ -2,6 +2,7 @@
 programmed with (card code BBFFRR). Admin manages rooms; reception reads them (desktop room grid).
 """
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -121,6 +122,8 @@ def set_room_status(room_id: int, data: RoomStatusUpdate, db: Session = Depends(
         raise HTTPException(status_code=404, detail="Room not found")
     before = room.status
     room.status = data.status
+    if data.status != before:
+        room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
     db.commit()
     write_audit(db, None, "room.status", "room", room.room_id,
                 before={"status": before}, after={"status": room.status}, client="web", commit=True)

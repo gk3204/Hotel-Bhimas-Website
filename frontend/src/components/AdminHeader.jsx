@@ -28,9 +28,29 @@ const AdminHeader = () => {
           {/* Desktop Nav */}
           <nav className="hidden md:flex space-x-6 text-[#E5C07B] font-medium">
             <Link to="/admin" className="hover:text-[#FCD34D]">Dashboard</Link>
+            <Link to="/admin/reports" className="hover:text-[#FCD34D]">Reports</Link>
             <Link to="/admin/room-types" className="hover:text-[#FCD34D]">Room Types</Link>
             <Link to="/admin/rooms" className="hover:text-[#FCD34D]">Rooms</Link>
             <Link to="/admin/promotions" className="hover:text-[#FCD34D]">Promotions</Link>
+            <Link to="/admin/travel-agents" className="hover:text-[#FCD34D]">Agents</Link>
+            <Link to="/admin/rate-plans" className="hover:text-[#FCD34D]">Rate Plans</Link>
+            <Link to="/admin/agent-settlements" className="hover:text-[#FCD34D]">Settlements</Link>
+            <Link to="/admin/fraud" className="hover:text-[#FCD34D]">Fraud</Link>
+            <Link to="/admin/cash-shift" className="hover:text-[#FCD34D]">Cash</Link>
+            <Link to="/admin/housekeeping" className="hover:text-[#FCD34D]">Housekeeping</Link>
+            <Link to="/admin/maintenance" className="hover:text-[#FCD34D]">Maintenance</Link>
+            <Link to="/admin/guests" className="hover:text-[#FCD34D]">Guests</Link>
+            <Link to="/admin/messaging" className="hover:text-[#FCD34D]">WhatsApp</Link>
+            <Link to="/admin/ota" className="hover:text-[#FCD34D]">OTA</Link>
+            <Link to="/admin/compliance" className="hover:text-[#FCD34D]">Compliance</Link>
+            <Link to="/admin/reviews" className="hover:text-[#FCD34D]">Reviews</Link>
+            <Link to="/admin/companies" className="hover:text-[#FCD34D]">Companies</Link>
+            <Link to="/admin/vendors" className="hover:text-[#FCD34D]">Vendors</Link>
+            <Link to="/admin/staff" className="hover:text-[#FCD34D]">Staff</Link>
+            <Link to="/admin/inventory" className="hover:text-[#FCD34D]">Inventory</Link>
+            <Link to="/admin/complaints" className="hover:text-[#FCD34D]">Complaints</Link>
+            <Link to="/admin/guest-portal" className="hover:text-[#FCD34D]">Portal</Link>
+            <Link to="/admin/security-2fa" className="hover:text-[#FCD34D]">2FA</Link>
             <Link to="/admin/room-availability" className="hover:text-[#FCD34D]">Room Availability</Link>
             <Link to="/admin/user-check" className="hover:text-[#FCD34D]">Users</Link>
             <Link to="/admin/bookings" className="hover:text-[#FCD34D]">Bookings</Link>
@@ -80,9 +100,29 @@ const AdminHeader = () => {
 
         <nav className="flex flex-col px-6 py-6 space-y-6 text-[#E5C07B] font-medium">
           <Link to="/admin" onClick={() => setMenuOpen(false)}>Dashboard</Link>
+          <Link to="/admin/reports" onClick={() => setMenuOpen(false)}>Reports</Link>
           <Link to="/admin/room-types" onClick={() => setMenuOpen(false)}>Room Types</Link>
           <Link to="/admin/rooms" onClick={() => setMenuOpen(false)}>Rooms</Link>
           <Link to="/admin/promotions" onClick={() => setMenuOpen(false)}>Promotions</Link>
+          <Link to="/admin/travel-agents" onClick={() => setMenuOpen(false)}>Agents</Link>
+          <Link to="/admin/rate-plans" onClick={() => setMenuOpen(false)}>Rate Plans</Link>
+          <Link to="/admin/agent-settlements" onClick={() => setMenuOpen(false)}>Settlements</Link>
+          <Link to="/admin/fraud" onClick={() => setMenuOpen(false)}>Fraud</Link>
+          <Link to="/admin/cash-shift" onClick={() => setMenuOpen(false)}>Cash</Link>
+          <Link to="/admin/housekeeping" onClick={() => setMenuOpen(false)}>Housekeeping</Link>
+          <Link to="/admin/maintenance" onClick={() => setMenuOpen(false)}>Maintenance</Link>
+          <Link to="/admin/guests" onClick={() => setMenuOpen(false)}>Guests</Link>
+          <Link to="/admin/messaging" onClick={() => setMenuOpen(false)}>WhatsApp</Link>
+          <Link to="/admin/ota" onClick={() => setMenuOpen(false)}>OTA</Link>
+          <Link to="/admin/compliance" onClick={() => setMenuOpen(false)}>Compliance</Link>
+          <Link to="/admin/reviews" onClick={() => setMenuOpen(false)}>Reviews</Link>
+          <Link to="/admin/companies" onClick={() => setMenuOpen(false)}>Companies</Link>
+          <Link to="/admin/vendors" onClick={() => setMenuOpen(false)}>Vendors</Link>
+          <Link to="/admin/staff" onClick={() => setMenuOpen(false)}>Staff</Link>
+          <Link to="/admin/inventory" onClick={() => setMenuOpen(false)}>Inventory</Link>
+          <Link to="/admin/complaints" onClick={() => setMenuOpen(false)}>Complaints</Link>
+          <Link to="/admin/guest-portal" onClick={() => setMenuOpen(false)}>Portal</Link>
+          <Link to="/admin/security-2fa" onClick={() => setMenuOpen(false)}>2FA</Link>
           <Link to="/admin/room-availability" onClick={() => setMenuOpen(false)}>Room Availability</Link>
           <Link to="/admin/user-check" onClick={() => setMenuOpen(false)}>Users</Link>
           <Link to="/admin/bookings" onClick={() => setMenuOpen(false)}>Bookings</Link>

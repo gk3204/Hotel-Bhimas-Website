@@ -20,16 +20,21 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
 from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, BookingItem, \
-    Folio, FolioCharge, CardIssuance
+    Folio, FolioCharge, CardIssuance, TravelAgent, Company
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, FolioOpenRequest, \
     RoomShiftRequest
 from utils.auth_utils import require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
+from utils.rate_engine import quote_stay
+from utils.housekeeping import on_room_dirtied, set_hk_status
+from models import HousekeepingStatus
 from routers.promotions import get_active_promotions, best_promotion_for_item
 from routers.payments import total_paid
 from routers.folio import open_folio, _recompute, _get_invoice
+from routers.crm import check_guest_gate, match_guest, accrue_loyalty_on_checkout
 from scripts.expire_booking_jobs import expire_pending_bookings
+from services import company_service, ota_service
 
 logger = logging.getLogger(__name__)
 
@@ -120,8 +125,9 @@ def desk_availability(
 
 
 # ---- Create a desk booking (walk-in or advance; single or group) ----
-@router.post("/bookings", dependencies=[Depends(require_reception_or_admin)])
-def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db)):
+@router.post("/bookings")
+def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
+                        user=Depends(require_reception_or_admin)):
     try:
         expire_pending_bookings(db)
 
@@ -130,6 +136,27 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail="Check-in date cannot be in the past")
         if data.check_out <= data.check_in:
             raise HTTPException(status_code=400, detail="Check-out must be after check-in")
+
+        # Resolve the pricing channel/agent (prompt 10). An agent booking prices from
+        # that agent's negotiated rate/plans; commission is accrued on the booking.
+        agent = None
+        if data.agent_id:
+            agent = db.query(TravelAgent).filter(
+                TravelAgent.id == data.agent_id,
+                TravelAgent.is_active == True,  # noqa: E712
+            ).first()
+            if not agent:
+                raise HTTPException(status_code=400, detail="Travel agent not found or inactive")
+        channel = "agent" if agent else "walk_in"
+
+        # Corporate bill-to (prompt 18 slice 7). Validated here so a walk-in that the desk knows
+        # is a company guest is flagged from the start; the folio is actually routed at check-in
+        # (routers/folio.py POST /folio/{id}/bill-to), once the charges exist.
+        company = None
+        if data.company_id:
+            company = company_service.get_company(db, data.company_id, active_only=True)
+            if not company:
+                raise HTTPException(status_code=400, detail="Company not found or inactive")
 
         # Validate + availability (row-locked to prevent concurrent overbooking)
         rt_map = {}
@@ -154,19 +181,43 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db)):
                                     detail=f"Not enough {rt.name}s available. Available: {max(0, available)}, Requested: {item.quantity}")
             rt_map[item.room_type_id] = rt
 
-        # Guest
-        guest = Guest(name=data.guest_name, phone=data.phone, email=data.email)
-        db.add(guest)
+        # Guest — reuse an existing record on an exact phone match (repeat-guest
+        # recognition, prompt 14) so history + loyalty attach to one customer; else create.
+        guest = match_guest(db, data.phone)
+        blacklist_warning = None
+        if guest:
+            gate = check_guest_gate(db, guest)
+            if gate["blacklist"]:
+                # 'block' stops a non-admin at booking; admin may proceed (audited). 'warn'
+                # always proceeds and surfaces a banner in the response.
+                if gate["enforcement"] == "block" and user.get("role") != "admin":
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"Guest is blacklisted: {gate['reason'] or 'no reason on file'}. "
+                               f"An admin login is required to override and book.")
+                blacklist_warning = gate["reason"] or "Guest is on the watchlist"
+            # keep the thin record fresh if the caller corrected name/email
+            if data.guest_name:
+                guest.name = data.guest_name
+            if data.email:
+                guest.email = data.email
+        else:
+            guest = Guest(name=data.guest_name, phone=data.phone, email=data.email)
+            db.add(guest)
         db.flush()
 
-        # Pricing (same math as online, auto-promotions, but NO convenience fee)
+        # Pricing (auto-promotions, NO convenience fee). The per-night base comes from
+        # the shared rate engine (rack / agent rate / seasonal-weekend plan by channel+date),
+        # then promotions + GST apply exactly as before.
         nights = (data.check_out - data.check_in).days
         promos = get_active_promotions(db)
         total_base = total_gst = total_discount = total_room = 0.0
         items_data = []
         for item in data.rooms:
             rt = rt_map[item.room_type_id]
-            base = round(nights * float(rt.price_per_night) * item.quantity, 2)
+            base = quote_stay(db, rt, data.check_in, data.check_out,
+                              channel=channel, agent_id=data.agent_id,
+                              quantity=item.quantity)["base"]
             _, disc = best_promotion_for_item(promos, item.room_type_id, base, data.check_in)
             dbase = round(base - disc, 2)
             gst = round(dbase * float(rt.gst_percent) / 100, 2)
@@ -179,6 +230,12 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db)):
                 "room_type_id": item.room_type_id, "quantity": item.quantity,
                 "base_amount": base, "gst_amount": gst, "discount_amount": disc, "total_amount": itotal,
             })
+
+        # Commission accrues on agent bookings: % of the discounted (pre-GST) room value.
+        commission_percent = float(agent.commission_percent or 0) if agent else None
+        commission_amount = None
+        if agent:
+            commission_amount = round((round(total_base, 2) - round(total_discount, 2)) * commission_percent / 100, 2)
 
         booking = Booking(
             guest_id=guest.guest_id,
@@ -194,25 +251,48 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db)):
             convenience_fee=0,
             convenience_gst=0,
             grand_total=round(total_room, 2),  # desk booking: no convenience fee
+            agent_id=agent.id if agent else None,
+            commission_percent=commission_percent,
+            commission_amount=commission_amount,
+            company_id=company.id if company else None,
+            bill_to=(data.bill_to or "guest") if company else "guest",
         )
         db.add(booking)
         db.flush()
+        # OTA tracking snapshot (prompt 17): stamp OTA booking id + commission + net payout when the
+        # source is an OTA channel. Commission % = the desk override else the per-OTA config default.
+        ota_service.apply_ota_fields(db, booking, data.booking_source,
+                                     ota_booking_id=data.ota_booking_id,
+                                     commission_percent_override=data.ota_commission_percent)
         for d in items_data:
             db.add(BookingItem(booking_id=booking.booking_id, **d))
         db.commit()
         db.refresh(booking)
 
-        write_audit(db, None, "booking.desk_create", "booking", booking.booking_id,
+        # `user`, not None: the audit trail must record WHO took the booking. Anonymous desk
+        # bookings were an audit gap; the staff-performance report (prompt 18 slice 9) reads this.
+        write_audit(db, user, "booking.desk_create", "booking", booking.booking_id,
                     after={"guest": data.guest_name, "check_in": str(data.check_in),
                            "check_out": str(data.check_out), "source": data.booking_source,
-                           "rooms": len(data.rooms), "grand_total": round(total_room, 2)},
+                           "rooms": len(data.rooms), "grand_total": round(total_room, 2),
+                           "agent_id": agent.id if agent else None,
+                           "commission_amount": commission_amount,
+                           "company_id": booking.company_id, "bill_to": booking.bill_to},
                     client="desktop", commit=True)
+
+        # Best-effort WhatsApp booking confirmation (prompt 15) — must not break booking.
+        _wa_notify(db, "wa_confirmation_enabled", guest, "booking_confirmation",
+                   {"guest_name": guest.name, "check_in": str(data.check_in),
+                    "check_out": str(data.check_out), "booking_ref": str(booking.booking_id)},
+                   booking_id=booking.booking_id,
+                   client_ref=f"confirmation:{booking.booking_id}")
 
         return {
             "booking_id": booking.booking_id,
             "guest_name": guest.name,
             "status": booking.status,
             "booking_source": booking.booking_source,
+            "agent_id": booking.agent_id,
             "check_in": str(booking.check_in),
             "check_out": str(booking.check_out),
             "nights": nights,
@@ -220,6 +300,16 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db)):
             "gst_amount": float(booking.gst_amount),
             "discount_amount": float(booking.discount_amount),
             "grand_total": float(booking.grand_total),
+            "commission_percent": commission_percent,
+            "commission_amount": commission_amount,
+            "ota_booking_id": booking.ota_booking_id,
+            "ota_commission_percent": float(booking.ota_commission_percent) if booking.ota_commission_percent is not None else None,
+            "ota_net_payout": float(booking.ota_net_payout) if booking.ota_net_payout is not None else None,
+            "guest_id": guest.guest_id,
+            "blacklist_warning": blacklist_warning,   # prompt 14: non-null when a watchlisted guest was booked
+            "company_id": booking.company_id,
+            "company_name": company.name if company else None,
+            "bill_to": booking.bill_to,
         }
     except HTTPException:
         raise
@@ -260,6 +350,20 @@ def _checkout_override_requires_admin() -> bool:
     return os.getenv("CHECKOUT_OVERRIDE_REQUIRES_ADMIN", "true").strip().lower() not in ("false", "0", "no")
 
 
+def booking_checkout_moment(booking: Booking, ref=None) -> datetime:
+    """The real checkout moment for a booking (the shared anchor for BOTH card expiry and
+    the '2h before checkout' WhatsApp reminder — prompt 15). This is the checkout time
+    BEFORE the grace buffer.
+    24h mode (default): the ACTUAL check-in moment + nights x 24h.
+    Fixed mode: checkout date @ CHECKOUT_HOUR.
+    `ref` stands in for the check-in moment before the guest is checked in."""
+    ref = ref or datetime.now()
+    nights = max(1, (booking.check_out - booking.check_in).days)
+    if _checkout_mode() == "fixed":
+        return datetime.combine(booking.check_out, time(hour=_checkout_hour()))
+    return (booking.checked_in_at or ref) + timedelta(days=nights)
+
+
 def _card_window(booking: Booking):
     """Card validity window.
     24h mode (default): expiry = the ACTUAL check-in moment + nights x 24h + grace
@@ -267,12 +371,25 @@ def _card_window(booking: Booking):
     check-in moment (the wizard checks in and encodes within the same minute).
     Fixed mode: expiry = checkout date @ CHECKOUT_HOUR + grace."""
     valid_from = datetime.now()
-    nights = max(1, (booking.check_out - booking.check_in).days)
-    if _checkout_mode() == "fixed":
-        base = datetime.combine(booking.check_out, time(hour=_checkout_hour()))
-    else:
-        base = (booking.checked_in_at or valid_from) + timedelta(days=nights)
+    base = booking_checkout_moment(booking, ref=valid_from)
     return valid_from, base + timedelta(minutes=_grace_minutes())
+
+
+def _wa_notify(db, setting_key, guest, template, params, booking_id=None, client_ref=None):
+    """Best-effort transactional WhatsApp send (prompt 15), gated by an app_settings toggle.
+    Never raises — a messaging failure must not break check-in / booking / payment."""
+    try:
+        if not guest or not getattr(guest, "phone", None):
+            return
+        from utils.settings import get_setting
+        if str(get_setting(db, setting_key, "true")).strip().lower() in ("false", "0", "no", ""):
+            return
+        from utils import whatsapp_service
+        whatsapp_service.send_template(db, guest.phone, template, params,
+                                       guest_id=getattr(guest, "guest_id", None),
+                                       booking_id=booking_id, client_ref=client_ref)
+    except Exception as e:
+        logger.warning(f"transactional WhatsApp ({template}) failed: {e}")
 
 
 def _room_code(room: Room) -> str:
@@ -359,6 +476,16 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         if booking.status != "confirmed":
             raise HTTPException(status_code=409,
                                 detail=f"Cannot check in a '{booking.status}' booking")
+
+        # Blacklist/watchlist gate (prompt 14): 'block' stops a non-admin at check-in;
+        # 'warn' surfaces a banner (returned as blacklist_warning) but proceeds.
+        checkin_gate = check_guest_gate(db, booking.guest)
+        if checkin_gate["blacklist"]:
+            if checkin_gate["enforcement"] == "block" and user.get("role") != "admin":
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Guest is blacklisted: {checkin_gate['reason'] or 'no reason on file'}. "
+                           f"An admin login is required to override and check in.")
 
         today = date.today()
         if today < booking.check_in:
@@ -450,22 +577,62 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         booking.checked_in_at = datetime.now()
         for room in rooms_by_id.values():
             room.status = "occupied"
+            room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
         db.commit()
 
         # Folio (idempotent; posts room charges + advance payment credits, own commit).
         open_folio(FolioOpenRequest(booking_id=booking.booking_id), db, user)
         folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
 
+        # Corporate bill-to (prompt 18 slice 7): the booking was flagged for a company, so route
+        # the freshly-posted ROOM lines to it now. `bill_to='company'` routes everything the desk
+        # posts later too (via the folio screen); `split` routes only the room, leaving the guest
+        # to settle incidentals. Best-effort: a credit problem must not block a check-in — the
+        # desk sees the unrouted folio and can resolve it with an admin.
+        company_routing = None
+        if folio and booking.company_id and (booking.bill_to or "guest") != "guest":
+            try:
+                company = company_service.get_company(db, booking.company_id, active_only=True)
+                if company:
+                    room_ids = None
+                    if booking.bill_to == "split":
+                        room_ids = [c.id for c in company_service.routable_charges(db, folio.id)
+                                    if c.type == "room"]
+                    folio.company_id = company.id
+                    company_routing = company_service.route_charges(
+                        db, folio, company, charge_ids=room_ids)
+                    _recompute(db, folio)
+                    db.commit()
+                    company_routing["company_name"] = company.name
+                    company_routing["credit"] = company_service.check_credit(db, company)
+            except Exception as e:
+                logger.error(f"company routing failed at check-in for booking "
+                             f"{booking.booking_id}: {e}", exc_info=True)
+                db.rollback()
+                company_routing = None
+
         write_audit(db, user, "reception.checkin", "booking", booking.booking_id,
                     after={"rooms": [r.room_number for r in rooms_by_id.values()],
                            "id_type": data.id_type,
                            "id_number_masked": booking.guest.id_number_masked,
                            "paid_total": total_paid(db, booking.booking_id),
+                           "company_routing": company_routing,
                            "client_ref": data.client_ref},
                     client="desktop", commit=True)
 
+        # Best-effort WhatsApp welcome / room-ready (prompt 15).
+        _room_nums = ", ".join(r.room_number for r in rooms_by_id.values())
+        _wa_notify(db, "wa_room_ready_enabled", booking.guest, "room_ready",
+                   {"guest_name": booking.guest.name, "room_label": _room_nums},
+                   booking_id=booking.booking_id, client_ref=f"room_ready:{booking.booking_id}")
+
         db.refresh(booking)
-        return _checkin_response(db, booking, folio, already=False)
+        resp = _checkin_response(db, booking, folio, already=False)
+        resp["vip"] = checkin_gate["vip"]
+        resp["blacklist_warning"] = (checkin_gate["reason"] or "Guest is on the watchlist") \
+            if checkin_gate["blacklist"] else None
+        resp["company_routing"] = company_routing
+        return resp
     except HTTPException:
         db.rollback()
         raise
@@ -496,6 +663,21 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
                                 detail=f"Cannot check out a '{booking.status}' booking")
         if not folio:
             raise HTTPException(status_code=409, detail="No folio for this booking — open it first")
+
+        # Corporate bill-to (prompt 18 slice 7): move the company-routed balance onto the
+        # company's city ledger FIRST, so the balance the guest must settle below is only ever
+        # the guest's own. Idempotent — a repeated checkout will not double-post. No cash is
+        # asserted here: the money moves by ledger entry, which is the anti-fraud invariant.
+        company_transfer = None
+        if folio.company_id:
+            try:
+                company_transfer = company_service.transfer_folio_to_company(db, folio, user=user)
+                if company_transfer:
+                    _recompute(db, folio)
+            except Exception as e:
+                logger.error(f"company transfer failed for folio {folio.id}: {e}", exc_info=True)
+                raise HTTPException(status_code=500,
+                                    detail="Failed to transfer the company balance — checkout aborted")
 
         balance = round(float(folio.balance or 0), 2)
         override_used = False
@@ -528,6 +710,8 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
                 room = db.query(Room).filter(Room.room_id == item.room_id).first()
                 if room and room.status == "occupied":
                     room.status = "cleaning"
+                    room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
+                    on_room_dirtied(db, room, booking)          # prompt 13: dirty + auto cleaning task
                 if room:
                     rooms.append(room)
 
@@ -538,6 +722,14 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         for c in cards:
             c.status = "checked_out"
 
+        # Loyalty accrual (prompt 14): award points for the completed stay. Idempotent
+        # (one accrual per booking); joins this transaction. Never blocks checkout.
+        try:
+            points_awarded = accrue_loyalty_on_checkout(db, booking, user)
+        except Exception as e:
+            logger.error(f"loyalty accrual failed for booking {booking.booking_id}: {e}")
+            points_awarded = 0
+
         db.commit()
 
         write_audit(db, user, "reception.checkout", "booking", booking.booking_id,
@@ -545,10 +737,15 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
                     after={"override": override_used, "override_reason": data.override_reason,
                            "cards_invalidated": len(cards),
                            "rooms": [r.room_number for r in rooms],
+                           "loyalty_awarded": points_awarded,
+                           "company_transfer": company_transfer,
                            "client_ref": data.client_ref},
                     client="desktop", commit=True)
 
-        return _checkout_response(db, booking, folio, override=override_used, already=False)
+        resp = _checkout_response(db, booking, folio, override=override_used, already=False)
+        resp["loyalty_awarded"] = points_awarded
+        resp["company_transfer"] = company_transfer
+        return resp
     except HTTPException:
         db.rollback()
         raise
@@ -734,7 +931,11 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             item.room_type_id = new_room.room_type_id
         if old_room.status == "occupied":
             old_room.status = "cleaning"
+            old_room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
+            on_room_dirtied(db, old_room, booking)          # prompt 13: dirty + auto cleaning task
         new_room.status = "occupied"
+        new_room.status_changed_at = datetime.utcnow()
+        set_hk_status(db, new_room.room_id, "occupied", user=user)  # prompt 13: reflect occupancy
 
         old_cards = db.query(CardIssuance).filter(
             CardIssuance.booking_id == booking.booking_id,
@@ -800,6 +1001,14 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
                 folio.id if folio else None,
                 float(folio.balance or 0) if folio else None)
 
+    # Corporate bill-to (prompt 18 slice 7) — cached per board build, not per row.
+    _company_names = {c.id: c.name for c in db.query(Company).all()}
+
+    def _bill_to(b):
+        return {"bill_to": b.bill_to or "guest",
+                "company_id": b.company_id,
+                "company_name": _company_names.get(b.company_id)}
+
     arrivals = []
     for b in db.query(Booking).options(
             joinedload(Booking.guest),
@@ -822,6 +1031,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "paid_total": paid,
             "folio_id": folio_id,
             "folio_balance": folio_balance,
+            **_bill_to(b),
             "items": [{
                 "booking_item_id": i.booking_item_id,
                 "room_type_id": i.room_type_id,
@@ -863,6 +1073,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "folio_balance": folio_balance,
             "valid_from": valid_from.isoformat(),
             "valid_to": valid_to.isoformat(),
+            **_bill_to(b),
             "rooms": rooms,
         })
 
@@ -882,8 +1093,23 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         Room.status == "vacant",
     ).order_by(Room.room_number).all()]
 
+    # prompt 13: every active room + its housekeeping status, for the desktop's
+    # READ-ONLY housekeeping panel (cleaning/dirty rooms are in neither vacant_rooms
+    # nor inhouse, so they need their own list). Reception cannot edit these.
+    rooms_hk = []
+    for r, hk in db.query(Room, HousekeepingStatus).outerjoin(
+        HousekeepingStatus, Room.room_id == HousekeepingStatus.room_id,
+    ).filter(Room.is_active == True).order_by(Room.room_number).all():  # noqa: E712
+        rooms_hk.append({
+            "room_id": r.room_id,
+            "room_number": r.room_number,
+            "room_status": r.status,
+            "housekeeping_status": hk.status if hk else None,
+            "updated_at": hk.updated_at.isoformat() if hk and hk.updated_at else None,
+        })
+
     return {"date": str(today), "arrivals": arrivals, "inhouse": inhouse,
-            "vacant_rooms": vacant_rooms}
+            "vacant_rooms": vacant_rooms, "rooms": rooms_hk}
 
 
 # ---- Registration slip (printed at check-in, guest signs it) ----

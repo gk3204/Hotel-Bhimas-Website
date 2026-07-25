@@ -7,6 +7,14 @@ import {
 } from "../../api/users";
 import { FaPlus, FaEdit, FaTrash } from "react-icons/fa";
 
+// Role chip styles + labels (matches the backend role vocab: admin|reception|housekeeper|maintenance).
+const ROLE_META = {
+  admin: { label: "⚙️ Admin", chip: "bg-red-500/20 text-red-300 border-red-500/30" },
+  reception: { label: "🏨 Reception", chip: "bg-blue-500/20 text-blue-300 border-blue-500/30" },
+  housekeeper: { label: "🧹 Housekeeper", chip: "bg-amber-500/20 text-amber-300 border-amber-500/30" },
+  maintenance: { label: "🔧 Maintenance", chip: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30" },
+};
+
 const UserManagement = () => {
   const [users, setUsers] = useState([]);
   const [editingId, setEditingId] = useState(null);
@@ -60,7 +68,7 @@ const UserManagement = () => {
       loadUsers();
       showToast("User created successfully");
     } catch (err) {
-      showToast("Failed to create user", "error");
+      showToast(err.message || "Failed to create user", "error");
     }
   };
 
@@ -83,7 +91,7 @@ const UserManagement = () => {
       loadUsers();
       showToast("User updated successfully");
     } catch (err) {
-      showToast("Failed to update user", "error");
+      showToast(err.message || "Failed to update user", "error");
     }
   };
 
@@ -107,7 +115,7 @@ const UserManagement = () => {
           <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
             👤 User Management
           </h1>
-          <p className="text-slate-400">Create and manage admin & reception staff accounts</p>
+          <p className="text-slate-400">Create and manage staff accounts — admin, reception, housekeeper, maintenance</p>
         </div>
 
         {/* CREATE FORM */}
@@ -145,6 +153,8 @@ const UserManagement = () => {
               >
                 <option value="reception">🏨 Reception</option>
                 <option value="admin">⚙️ Admin</option>
+                <option value="housekeeper">🧹 Housekeeper</option>
+                <option value="maintenance">🔧 Maintenance</option>
               </select>
             </div>
           </div>
@@ -222,12 +232,11 @@ const UserManagement = () => {
                       <td className="px-6 py-4">
                         <span
                           className={`px-3 py-1 rounded-full text-xs font-bold border ${
-                            user.role === "admin"
-                              ? "bg-red-500/20 text-red-300 border-red-500/30"
-                              : "bg-blue-500/20 text-blue-300 border-blue-500/30"
+                            ROLE_META[user.role]?.chip ||
+                            "bg-slate-500/20 text-slate-300 border-slate-500/30"
                           }`}
                         >
-                          {user.role === "admin" ? "⚙️ Admin" : "🏨 Reception"}
+                          {ROLE_META[user.role]?.label || user.role}
                         </span>
                       </td>
                       <td className="px-6 py-4 space-x-2">

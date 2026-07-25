@@ -9,7 +9,7 @@ load_dotenv(os.path.join(BACKEND, ".env"))
 url = os.getenv("DATABASE_URL")
 if url:
     conn = psycopg2.connect(url)
-    print("Connected via DATABASE_URL")
+    print("Connected via DATABASE_URL: ",url)
 else:
     host, port = os.getenv("DB_HOST"), os.getenv("DB_PORT")
     name = os.getenv("DB_NAME")
@@ -39,6 +39,22 @@ if not table_exists("folios"):
 if not col_exists("rooms", "is_active"):
     to_run.append("004_rooms_setup.sql")
 to_run.append("005_billing_folio.sql")
+to_run.append("006_frontdesk_checkin.sql")
+to_run.append("007_payments_refunds.sql")
+to_run.append("008_rates_agent_pricing.sql")
+to_run.append("009_antifraud_controls.sql")
+to_run.append("010_cash_shift.sql")
+to_run.append("011_housekeeping.sql")
+to_run.append("012_customer_crm.sql")
+to_run.append("013_whatsapp.sql")
+to_run.append("014_reports_dashboard.sql")
+to_run.append("015_ota_tracking.sql")
+to_run.append("016_compliance_india.sql")
+to_run.append("017_desk_payments.sql")
+to_run.append("018_google_reviews.sql")
+to_run.append("019_backoffice.sql")
+to_run.append("020_inventory_complaints.sql")
+to_run.append("021_guest_portal.sql")
 
 for f in to_run:
     path = os.path.join(BACKEND, "migrations", f)
@@ -52,6 +68,10 @@ for f in to_run:
 print("After: folios:", table_exists("folios"),
       "| invoices:", table_exists("invoices"),
       "| invoice_counters:", table_exists("invoice_counters"),
-      "| folio_charges.reversal_of_id:", col_exists("folio_charges", "reversal_of_id"))
+      "| folio_charges.reversal_of_id:", col_exists("folio_charges", "reversal_of_id"),
+      "| owner_otps:", table_exists("owner_otps"),
+      "| rooms.status_changed_at:", col_exists("rooms", "status_changed_at"),
+      "| app_settings:", table_exists("app_settings"),
+      "| cash_shifts.denominations:", col_exists("cash_shifts", "denominations"))
 conn.close()
 print("DONE")

@@ -699,3 +699,177 @@ GSTIN: 37AAACK9397F1Z3
     except Exception as e:
         logger.error(f"❌ Invoice email error: {str(e)}")
         raise
+
+
+def send_company_invoice_email(payload, pdf_path):
+    """Send a consolidated corporate GST invoice to the company's billing contact (prompt 18,
+    slice 7). Mirrors send_invoice_email's Mailjet payload (guest copy -> company copy, plus the
+    hotel copy) and raises on failure so the caller can surface a 502."""
+    if not MAILJET_API_KEY or not MAILJET_API_SECRET:
+        logger.error("❌ Mailjet credentials missing")
+        raise Exception("Mailjet not configured")
+
+    company = payload["company"]
+    invoice_no = payload["invoice_no"]
+
+    pdf_attachments = []
+    if pdf_path and os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+        try:
+            with open(pdf_path, "rb") as f:
+                pdf_attachments.append({
+                    "ContentType": "application/pdf",
+                    "Filename": invoice_no.replace("/", "-") + ".pdf",
+                    "Base64Content": base64.b64encode(f.read()).decode()
+                })
+        except Exception as e:
+            logger.warning(f"⚠️ Company invoice PDF attach failed: {str(e)}")
+
+    contact = company.get("contact_person") or company["name"]
+    text_body = f"""Hotel Bhimas - Tax Invoice (Corporate)
+
+Dear {contact},
+
+Please find attached the consolidated GST tax invoice for your organisation's stays with us.
+
+Invoice No   : {invoice_no}
+Invoice Date : {payload['invoice_date']}
+Period       : {payload['period']}
+Stays        : {len(payload['stays'])}
+Taxable      : Rs. {payload['taxable_total']:,.2f}
+CGST         : Rs. {payload['cgst_total']:,.2f}
+SGST         : Rs. {payload['sgst_total']:,.2f}
+Grand Total  : Rs. {payload['grand_total']:,.2f}
+Balance Due  : Rs. {payload['balance_due']:,.2f}
+
+A PDF copy of the invoice is attached to this email.
+
+---
+Hotel Bhimas
+42, G Car Street, Tirupati - 517501
+Landline: +91-877-2225744
+Email: hotelbhimas@gmail.com
+GSTIN: 37AAACK9397F1Z3
+"""
+
+    rows_html = "".join(
+        f"<tr><td style='padding:6px 8px;border-bottom:1px solid #eee'>{s['guest_name']}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee'>{s['check_in']} – {s['check_out']}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee'>{s['invoice_no']}</td>"
+        f"<td style='padding:6px 8px;border-bottom:1px solid #eee;text-align:right'>"
+        f"Rs. {s['amount']:,.2f}</td></tr>"
+        for s in payload["stays"]
+    )
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:640px;margin:auto;color:#1f2937">
+      <h2 style="color:#B8860B">Tax Invoice {invoice_no}</h2>
+      <p>Dear {contact},</p>
+      <p>Please find attached the consolidated GST tax invoice for
+         <b>{company['name']}</b> covering <b>{payload['period']}</b>.</p>
+      <table style="width:100%;border-collapse:collapse;font-size:14px;margin:18px 0">
+        <thead><tr style="background:#f4f4f4">
+          <th style="padding:8px;text-align:left">Guest</th>
+          <th style="padding:8px;text-align:left">Stay</th>
+          <th style="padding:8px;text-align:left">Invoice</th>
+          <th style="padding:8px;text-align:right">Amount</th>
+        </tr></thead>
+        <tbody>{rows_html}</tbody>
+      </table>
+      <p style="font-size:15px"><b>Grand total: Rs. {payload['grand_total']:,.2f}</b><br>
+         Balance due: Rs. {payload['balance_due']:,.2f}</p>
+      <p>— Hotel Bhimas</p>
+    </div>
+    """
+
+    recipients = [{"Email": company["email"], "Name": company["name"]}]
+    hotel_recipients = [{"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"}]
+
+    try:
+        data = {
+            "Messages": [
+                {
+                    "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas"},
+                    "To": recipients,
+                    "Subject": f"Tax Invoice {invoice_no} - Hotel Bhimas",
+                    "TextPart": text_body,
+                    "HTMLPart": html_body,
+                    "Attachments": pdf_attachments,
+                    "ReplyTo": {"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"},
+                    "Headers": {"X-Entity-Ref-ID": invoice_no},
+                },
+                {
+                    "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas Accounts"},
+                    "To": hotel_recipients,
+                    "Subject": f"[CORPORATE INVOICE SENT] {invoice_no} - {company['name']}",
+                    "TextPart": text_body,
+                    "HTMLPart": html_body,
+                    "Attachments": pdf_attachments,
+                },
+            ]
+        }
+        result = mailjet.send.create(data=data)
+        if result.status_code == 200:
+            logger.info(f"✅ Company invoice email sent: {invoice_no}")
+        else:
+            logger.error(f"❌ Mailjet failed: {result.status_code} — {result.json()}")
+            raise Exception("Company invoice email sending failed")
+    except Exception as e:
+        logger.error(f"❌ Company invoice email error: {str(e)}")
+        raise
+
+
+def send_prearrival_link_email(guest_email, guest_name, link, hotel_name="Hotel Bhimas"):
+    """Send the pre-arrival digital-registration link to a guest (prompt 14).
+    Mirrors the Mailjet payload style of the other senders. Raises on failure so the
+    caller can surface a 502 (like send_invoice_email)."""
+    if not MAILJET_API_KEY or not MAILJET_API_SECRET:
+        logger.error("❌ Mailjet credentials missing")
+        raise Exception("Mailjet not configured")
+
+    text_body = (
+        f"Dear {guest_name or 'Guest'},\n\n"
+        f"Welcome to {hotel_name}! To make your check-in quick and contactless, please "
+        f"complete your pre-arrival registration using the secure link below. It only takes "
+        f"a minute — fill in your details and upload a photo of your ID.\n\n"
+        f"{link}\n\n"
+        f"On arrival our front desk will simply verify your details. We look forward to hosting you.\n\n"
+        f"— {hotel_name}"
+    )
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#1f2937">
+      <h2 style="color:#B8860B">Pre-arrival registration</h2>
+      <p>Dear {guest_name or 'Guest'},</p>
+      <p>Welcome to <b>{hotel_name}</b>! To make your check-in quick and contactless, please
+      complete your pre-arrival registration. It only takes a minute — fill in your details
+      and upload a photo of your ID.</p>
+      <p style="text-align:center;margin:28px 0">
+        <a href="{link}" style="background:#D4AF37;color:#1f2937;font-weight:bold;
+        padding:12px 28px;border-radius:8px;text-decoration:none">Complete registration</a>
+      </p>
+      <p style="font-size:12px;color:#6b7280">If the button doesn't work, copy this link:<br>{link}</p>
+      <p>On arrival our front desk will simply verify your details. We look forward to hosting you.</p>
+      <p>— {hotel_name}</p>
+    </div>
+    """
+
+    data = {
+        'Messages': [
+            {
+                "From": {"Email": MAIL_FROM, "Name": hotel_name},
+                "To": [{"Email": guest_email, "Name": guest_name or "Guest"}],
+                "Subject": f"Complete your pre-arrival registration — {hotel_name}",
+                "TextPart": text_body,
+                "HTMLPart": html_body,
+                "ReplyTo": {"Email": "hotelbhimas@gmail.com", "Name": hotel_name},
+            }
+        ]
+    }
+    try:
+        result = mailjet.send.create(data=data)
+        if result.status_code == 200:
+            logger.info(f"✅ Pre-arrival link email sent to {guest_email}")
+        else:
+            logger.error(f"❌ Mailjet failed: {result.status_code} — {result.json()}")
+            raise Exception("Pre-arrival email sending failed")
+    except Exception as e:
+        logger.error(f"❌ Pre-arrival email error: {str(e)}")
+        raise

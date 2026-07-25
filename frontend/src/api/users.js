@@ -8,6 +8,21 @@ function getAuthHeader() {
   };
 }
 
+// Parse a FastAPI error body ({detail: "..."} or {detail: [{msg}]}) into a readable message.
+async function errorDetail(res, fallback) {
+  try {
+    const data = await res.json();
+    if (data?.detail) {
+      return Array.isArray(data.detail)
+        ? data.detail.map((e) => e.msg || e.type).join(". ")
+        : String(data.detail);
+    }
+  } catch {
+    /* ignore parse errors */
+  }
+  return `${fallback} (HTTP ${res.status})`;
+}
+
 
 export async function getUsers() {
   const res = await fetch(`${BASE_URL}/users/`, {
@@ -26,7 +41,7 @@ export async function createUser(data) {
     body: JSON.stringify(data),
   });
 
-  if (!res.ok) throw new Error("Create failed");
+  if (!res.ok) throw new Error(await errorDetail(res, "Create failed"));
   return res.json();
 }
 
@@ -48,7 +63,7 @@ export async function updateUser(id, data) {
     body: JSON.stringify(data),
   });
 
-  if (!res.ok) throw new Error("Update failed");
+  if (!res.ok) throw new Error(await errorDetail(res, "Update failed"));
   return res.json();
 }
 

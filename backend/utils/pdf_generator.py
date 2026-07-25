@@ -542,7 +542,39 @@ def generate_folio_invoice_pdf(invoice_data):
     words_style = ParagraphStyle(name="AmountWords", parent=styles["Normal"], fontSize=9)
     elements.append(Paragraph(
         f"<b>Amount in words:</b> {_amount_in_words(invoice_data['grand_total'])}", words_style))
-    elements.append(Spacer(1, 0.4 * inch))
+    elements.append(Spacer(1, 0.2 * inch))
+
+    # --- GST e-invoice IRN + signed QR (prompt 18, drawn only when an e-invoice exists) ---
+    einvoice = invoice_data.get("einvoice")
+    if einvoice and einvoice.get("signed_qr"):
+        try:
+            from reportlab.graphics.barcode import qr
+            from reportlab.graphics.shapes import Drawing
+            widget = qr.QrCodeWidget(str(einvoice["signed_qr"]))
+            bounds = widget.getBounds()
+            size = 90
+            d = Drawing(size, size, transform=[
+                size / (bounds[2] - bounds[0]), 0, 0,
+                size / (bounds[3] - bounds[1]), 0, 0])
+            d.add(widget)
+            irn_style = ParagraphStyle(name="Irn", parent=styles["Normal"], fontSize=8)
+            irn_para = Paragraph(
+                f"<b>e-Invoice</b><br/><b>IRN:</b> {einvoice.get('irn') or ''}<br/>"
+                f"<b>Ack No:</b> {einvoice.get('ack_no') or ''} "
+                f"<b>Date:</b> {einvoice.get('ack_date') or ''}"
+                + ("<br/><i>(stub — GST_EINVOICE_* not configured)</i>"
+                   if einvoice.get("status") == "stub" else ""),
+                irn_style)
+            qr_table = Table([[d, irn_para]], colWidths=[110, 340])
+            qr_table.setStyle(TableStyle([
+                ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                ('LEFTPADDING', (0, 0), (-1, -1), 0),
+            ]))
+            elements.append(qr_table)
+        except Exception:
+            import logging
+            logging.getLogger(__name__).exception("failed to render e-invoice QR")
+    elements.append(Spacer(1, 0.3 * inch))
 
     footer_style = ParagraphStyle(
         name="InvoiceFooter", parent=styles["Normal"],
@@ -808,6 +840,480 @@ def generate_payment_receipt_pdf(receipt_data):
                                   fontSize=8, textColor=colors.grey, alignment=1, spaceBefore=20)
     elements.append(Paragraph(
         "For support contact: +919347172758 | hotelbhimas@gmail.com", footer_style))
+
+    doc.build(elements)
+    return file_path
+
+
+def generate_shift_report_pdf(shift_data):
+    """
+    End-of-shift cash reconciliation report printed at the desk (prompt 12).
+
+    Args:
+        shift_data: dict from routers/cash_shift.py _report_data:
+            id, station_id, period, status, staff_name, closed_by_name, opened_at, closed_at,
+            opening_balance, collections_cash, expenses_total, payouts_total, expected_cash,
+            counted_cash, variance, close_note, denominations ({"500": 3, ...} or None),
+            expenses ([{category, description, amount, created_at}])
+    Returns the generated file path (temp dir).
+    """
+    import tempfile
+    file_path = os.path.join(tempfile.gettempdir(), f"shift_report_{shift_data['id']}.pdf")
+
+    doc = SimpleDocTemplate(file_path, pagesize=A4,
+                            rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontSize = 9
+    styles["Heading2"].fontSize = 11
+    elements = []
+
+    # Header (same brand block as the invoice / receipt).
+    logo_path = "assets/logo-gold.png"
+    hotel_info = Paragraph(
+        "<b>HOTEL BHIMAS</b><br/>"
+        "Luxury & Comfort Stay<br/>"
+        "42, G Car Street, Tirupati - 517501<br/>"
+        "GSTIN: 37AAACK9397F1Z3",
+        styles["Normal"]
+    )
+    if os.path.exists(logo_path):
+        logo = Image(logo_path, width=1.5 * inch, height=1 * inch)
+        elements.append(Table([[logo, hotel_info]], colWidths=[120, 350]))
+    else:
+        elements.append(hotel_info)
+    elements.append(Spacer(1, 0.3 * inch))
+
+    title_style = ParagraphStyle(
+        name="ShiftTitle", parent=styles["Title"],
+        textColor=colors.HexColor("#B8860B"), fontSize=16, alignment=1, spaceAfter=16,
+    )
+    elements.append(Paragraph("CASH SHIFT REPORT", title_style))
+
+    def _dt(value):
+        if not value:
+            return "N/A"
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value)
+            except ValueError:
+                return value
+        return value.strftime("%d-%m-%Y %H:%M")
+
+    def _rs(v):
+        return f"Rs. {float(v or 0):,.2f}"
+
+    period_label = (shift_data.get("period") or "shift").capitalize()
+    meta_data = [
+        ["Shift No", str(shift_data.get("id") or "N/A"), "Cycle", period_label],
+        ["Station", shift_data.get("station_id") or "N/A",
+         "Status", (shift_data.get("status") or "").upper()],
+        ["Opened by", shift_data.get("staff_name") or "N/A", "Opened at", _dt(shift_data.get("opened_at"))],
+        ["Closed by", shift_data.get("closed_by_name") or "N/A", "Closed at", _dt(shift_data.get("closed_at"))],
+    ]
+    meta_table = Table(meta_data, colWidths=[80, 190, 80, 130])
+    meta_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
+        ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f5f5f5")),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+    ]))
+    elements.append(meta_table)
+    elements.append(Spacer(1, 0.25 * inch))
+
+    # Reconciliation summary
+    elements.append(Paragraph("<b>Reconciliation</b>", styles["Heading2"]))
+    recon = [
+        ["Opening float", _rs(shift_data.get("opening_balance"))],
+        ["+ Cash collections", _rs(shift_data.get("collections_cash"))],
+        ["- Expenses", _rs(shift_data.get("expenses_total"))],
+        ["- Cash payouts / refunds", _rs(shift_data.get("payouts_total"))],
+        ["= Expected in drawer", _rs(shift_data.get("expected_cash"))],
+        ["Counted", _rs(shift_data.get("counted_cash"))],
+    ]
+    recon_table = Table(recon, colWidths=[300, 140])
+    recon_table.setStyle(TableStyle([
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('LINEABOVE', (0, 4), (-1, 4), 0.7, colors.black),
+        ('FONTNAME', (0, 4), (-1, 4), 'Helvetica-Bold'),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+    ]))
+    elements.append(recon_table)
+    elements.append(Spacer(1, 0.1 * inch))
+
+    variance = float(shift_data.get("variance") or 0)
+    var_color = colors.HexColor("#1a7f37") if abs(variance) < 0.005 else colors.HexColor("#b42318")
+    var_label = "BALANCED" if abs(variance) < 0.005 else ("SHORT" if variance < 0 else "OVER")
+    var_table = Table([[f"VARIANCE ({var_label})", _rs(variance)]], colWidths=[220, 220])
+    var_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, -1), var_color),
+        ('TEXTCOLOR', (0, 0), (-1, -1), colors.whitesmoke),
+        ('FONTNAME', (0, 0), (-1, -1), 'Helvetica-Bold'),
+        ('FONTSIZE', (0, 0), (-1, -1), 12),
+        ('ALIGN', (1, 0), (1, 0), 'RIGHT'),
+        ('TOPPADDING', (0, 0), (-1, -1), 8),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 8),
+        ('LEFTPADDING', (0, 0), (-1, -1), 10),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 10),
+    ]))
+    elements.append(var_table)
+    elements.append(Spacer(1, 0.25 * inch))
+
+    # Expenses breakdown
+    expenses = shift_data.get("expenses") or []
+    elements.append(Paragraph("<b>Expenses</b>", styles["Heading2"]))
+    if expenses:
+        rows = [["#", "Category", "Description", "Amount"]]
+        for i, e in enumerate(expenses, 1):
+            rows.append([str(i), (e.get("category") or "").capitalize(),
+                         Paragraph(e.get("description") or "", styles["Normal"]),
+                         _rs(e.get("amount"))])
+        rows.append(["", "", "Total", _rs(shift_data.get("expenses_total"))])
+        exp_table = Table(rows, colWidths=[25, 90, 245, 80])
+        exp_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('ALIGN', (3, 0), (3, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        elements.append(exp_table)
+    else:
+        elements.append(Paragraph("No expenses logged this shift.", styles["Normal"]))
+    elements.append(Spacer(1, 0.2 * inch))
+
+    # Denomination count (if entered)
+    denoms = shift_data.get("denominations")
+    if denoms:
+        elements.append(Paragraph("<b>Cash counted (denominations)</b>", styles["Heading2"]))
+        drows = [["Denomination", "Count", "Value"]]
+        try:
+            items = sorted(denoms.items(), key=lambda kv: float(kv[0]), reverse=True)
+        except (ValueError, AttributeError):
+            items = list(denoms.items())
+        for face, count in items:
+            try:
+                value = float(face) * float(count)
+            except (ValueError, TypeError):
+                value = 0
+            drows.append([f"Rs. {face}", str(count), _rs(value)])
+        den_table = Table(drows, colWidths=[160, 120, 160])
+        den_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 0), (-1, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        elements.append(den_table)
+        elements.append(Spacer(1, 0.2 * inch))
+
+    if shift_data.get("close_note"):
+        note_style = ParagraphStyle(name="ShiftNote", parent=styles["Normal"],
+                                    fontSize=9, textColor=colors.grey)
+        elements.append(Paragraph(f"<b>Note:</b> {shift_data['close_note']}", note_style))
+        elements.append(Spacer(1, 0.3 * inch))
+    else:
+        elements.append(Spacer(1, 0.4 * inch))
+
+    sign_table = Table([["", ""], ["Counted by", "Verified by (manager)"]], colWidths=[220, 220])
+    sign_table.setStyle(TableStyle([
+        ('LINEABOVE', (0, 1), (0, 1), 0.7, colors.black),
+        ('LINEABOVE', (1, 1), (1, 1), 0.7, colors.black),
+        ('TOPPADDING', (0, 0), (-1, 0), 24),
+        ('FONTSIZE', (0, 1), (-1, 1), 9),
+    ]))
+    elements.append(sign_table)
+
+    footer_style = ParagraphStyle(name="ShiftFooter", parent=styles["Normal"],
+                                  fontSize=8, textColor=colors.grey, alignment=1, spaceBefore=20)
+    elements.append(Paragraph(
+        "Cash shift reconciliation — retained for internal audit.", footer_style))
+
+    doc.build(elements)
+    return file_path
+
+
+def generate_company_invoice_pdf(payload):
+    """Consolidated corporate GST tax invoice (prompt 18, slice 7).
+
+    One invoice covering every stay transferred to a company in the period, instead of handing
+    the employer a stack of per-stay bills. Same brand block + GST-split table as
+    generate_folio_invoice_pdf; the line table is per STAY rather than per charge.
+
+    `payload` comes from routers/companies._cinvoice_payload.
+    Returns the generated file path (temp dir).
+    """
+    import re
+    import tempfile
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", payload.get("invoice_no") or "company_invoice").strip("_")
+    file_path = os.path.join(tempfile.gettempdir(), f"{safe.lower()}.pdf")
+
+    doc = SimpleDocTemplate(file_path, pagesize=A4,
+                            rightMargin=24, leftMargin=24, topMargin=24, bottomMargin=24)
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontSize = 9
+    elements = []
+    gold = colors.HexColor("#B8860B")
+
+    # --- brand header (same block as the folio invoice / report) ---
+    logo_path = "assets/logo-gold.png"
+    hotel_info = Paragraph(
+        "<b>HOTEL BHIMAS</b><br/>"
+        "Luxury &amp; Comfort Stay<br/>"
+        "42, G Car Street, Tirupati - 517501<br/>"
+        "Ph: +91-877-2225744 &nbsp;|&nbsp; hotelbhimas@gmail.com<br/>"
+        "GSTIN: 37AAACK9397F1Z3",
+        styles["Normal"]
+    )
+    if os.path.exists(logo_path):
+        logo = Image(logo_path, width=1.5 * inch, height=1 * inch)
+        elements.append(Table([[logo, hotel_info]], colWidths=[120, 350]))
+    else:
+        elements.append(hotel_info)
+    elements.append(Spacer(1, 0.2 * inch))
+
+    title_style = ParagraphStyle(name="CInvTitle", parent=styles["Title"],
+                                 textColor=gold, fontSize=15, alignment=1, spaceAfter=4)
+    elements.append(Paragraph("TAX INVOICE — CORPORATE", title_style))
+    if (payload.get("status") or "") == "cancelled":
+        cancel_style = ParagraphStyle(name="CInvCancelled", parent=styles["Normal"],
+                                      fontSize=11, alignment=1,
+                                      textColor=colors.HexColor("#B00020"), spaceAfter=6)
+        elements.append(Paragraph("<b>** CANCELLED **</b>", cancel_style))
+    elements.append(Spacer(1, 0.08 * inch))
+
+    # --- bill-to + invoice meta, side by side ---
+    company = payload.get("company") or {}
+    bill_to_lines = [f"<b>{company.get('name') or '—'}</b>"]
+    for key in ("address", "city"):
+        if company.get(key):
+            bill_to_lines.append(str(company[key]))
+    if company.get("state"):
+        state = str(company["state"])
+        if company.get("state_code"):
+            state += f" ({company['state_code']})"
+        bill_to_lines.append(state)
+    if company.get("gstin"):
+        bill_to_lines.append(f"GSTIN: {company['gstin']}")
+    if company.get("contact_person"):
+        bill_to_lines.append(f"Attn: {company['contact_person']}")
+    if company.get("phone"):
+        bill_to_lines.append(str(company["phone"]))
+
+    bill_to = Paragraph("<b>Bill to</b><br/>" + "<br/>".join(bill_to_lines), styles["Normal"])
+    meta = Paragraph(
+        f"<b>Invoice No:</b> {payload.get('invoice_no') or ''}<br/>"
+        f"<b>Invoice Date:</b> {payload.get('invoice_date') or ''}<br/>"
+        f"<b>Period:</b> {payload.get('period') or ''}<br/>"
+        f"<b>Stays:</b> {len(payload.get('stays') or [])}",
+        styles["Normal"])
+    meta_table = Table([[bill_to, meta]], colWidths=[280, 265])
+    meta_table.setStyle(TableStyle([
+        ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ('BOX', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+        ('INNERGRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+        ('TOPPADDING', (0, 0), (-1, -1), 6),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 6),
+        ('LEFTPADDING', (0, 0), (-1, -1), 8),
+    ]))
+    elements.append(meta_table)
+    elements.append(Spacer(1, 0.18 * inch))
+
+    # --- per-stay lines ---
+    stay_rows = [[Paragraph(f"<b>{h}</b>", styles["Normal"])
+                  for h in ["#", "Guest", "Check-in", "Check-out", "Stay invoice", "Amount (Rs.)"]]]
+    for i, s in enumerate(payload.get("stays") or [], start=1):
+        stay_rows.append([
+            Paragraph(str(i), styles["Normal"]),
+            Paragraph(str(s.get("guest_name") or "—"), styles["Normal"]),
+            Paragraph(str(s.get("check_in") or ""), styles["Normal"]),
+            Paragraph(str(s.get("check_out") or ""), styles["Normal"]),
+            Paragraph(str(s.get("invoice_no") or ""), styles["Normal"]),
+            Paragraph(f"{float(s.get('amount') or 0):,.2f}", styles["Normal"]),
+        ])
+    stay_table = Table(stay_rows, colWidths=[24, 150, 74, 74, 118, 105], repeatRows=1)
+    stay_table.setStyle(TableStyle([
+        ('BACKGROUND', (0, 0), (-1, 0), gold),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
+        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
+        ('ALIGN', (5, 1), (5, -1), 'RIGHT'),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(stay_table)
+    elements.append(Spacer(1, 0.18 * inch))
+
+    # --- GST split (identical math to the guest invoice: CGST = SGST = slab/2) ---
+    gst_rows = payload.get("gst_rows") or []
+    if gst_rows:
+        gst_table_rows = [[Paragraph(f"<b>{h}</b>", styles["Normal"])
+                           for h in ["GST %", "Taxable (Rs.)", "CGST (Rs.)", "SGST (Rs.)", "Total (Rs.)"]]]
+        for g in gst_rows:
+            gst_table_rows.append([
+                Paragraph(f"{float(g.get('gst_percent') or 0):g}%", styles["Normal"]),
+                Paragraph(f"{float(g.get('taxable') or 0):,.2f}", styles["Normal"]),
+                Paragraph(f"{float(g.get('cgst') or 0):,.2f}", styles["Normal"]),
+                Paragraph(f"{float(g.get('sgst') or 0):,.2f}", styles["Normal"]),
+                Paragraph(f"{float(g.get('total') or 0):,.2f}", styles["Normal"]),
+            ])
+        gst_table = Table(gst_table_rows, colWidths=[70, 120, 110, 110, 135], repeatRows=1)
+        gst_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f0e6cc")),
+            ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
+            ('ALIGN', (1, 1), (-1, -1), 'RIGHT'),
+            ('TOPPADDING', (0, 0), (-1, -1), 4),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+        ]))
+        elements.append(gst_table)
+        elements.append(Spacer(1, 0.15 * inch))
+
+    # --- totals ---
+    grand = float(payload.get("grand_total") or 0)
+    totals_rows = [
+        ["Taxable value", f"{float(payload.get('taxable_total') or 0):,.2f}"],
+        ["CGST", f"{float(payload.get('cgst_total') or 0):,.2f}"],
+        ["SGST", f"{float(payload.get('sgst_total') or 0):,.2f}"],
+        ["Grand total", f"{grand:,.2f}"],
+        ["Received", f"{float(payload.get('paid_total') or 0):,.2f}"],
+        ["Balance due", f"{float(payload.get('balance_due') or 0):,.2f}"],
+    ]
+    totals_table = Table([[Paragraph(f"<b>{a}</b>" if a in ("Grand total", "Balance due") else a,
+                                     styles["Normal"]),
+                           Paragraph(f"<b>{b}</b>" if a in ("Grand total", "Balance due") else b,
+                                     styles["Normal"])]
+                          for a, b in totals_rows],
+                         colWidths=[150, 120], hAlign='RIGHT')
+    totals_table.setStyle(TableStyle([
+        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
+        ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+        ('BACKGROUND', (0, 3), (-1, 3), colors.HexColor("#f0e6cc")),
+        ('BACKGROUND', (0, 5), (-1, 5), colors.HexColor("#f0e6cc")),
+        ('TOPPADDING', (0, 0), (-1, -1), 4),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+    ]))
+    elements.append(totals_table)
+    elements.append(Spacer(1, 0.12 * inch))
+
+    words_style = ParagraphStyle(name="CInvWords", parent=styles["Normal"], fontSize=9)
+    elements.append(Paragraph(f"<b>Amount in words:</b> {_amount_in_words(grand)}", words_style))
+
+    if payload.get("notes"):
+        elements.append(Spacer(1, 0.08 * inch))
+        elements.append(Paragraph(f"<b>Notes:</b> {payload['notes']}", styles["Normal"]))
+
+    footer_style = ParagraphStyle(name="CInvFooter", parent=styles["Normal"],
+                                  fontSize=8, textColor=colors.grey, alignment=1, spaceBefore=20)
+    elements.append(Paragraph(
+        "This is a computer-generated tax invoice. Subject to Tirupati jurisdiction.<br/>"
+        "Hotel Bhimas — GSTIN 37AAACK9397F1Z3", footer_style))
+
+    doc.build(elements)
+    return file_path
+
+
+def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
+    """Generic branded tabular report (prompt 16 Reports & Dashboard).
+
+    Args:
+        title:      report title (e.g. "Daily Sales Report").
+        columns:    list of column header strings.
+        rows:       list of row lists (values; None -> blank).
+        totals_row: optional final bold row (e.g. ["TOTAL", 123.0, ...]).
+        meta:       optional dict of label->value shown under the title (e.g. {"Period": "...",
+                    "Generated": "..."}).
+    Returns the generated file path (temp dir). Reuses the same brand header block as the
+    invoice / shift report.
+    """
+    import re
+    import tempfile
+    safe = re.sub(r"[^A-Za-z0-9]+", "_", (title or "report")).strip("_").lower() or "report"
+    file_path = os.path.join(tempfile.gettempdir(), f"report_{safe}.pdf")
+
+    doc = SimpleDocTemplate(file_path, pagesize=A4,
+                            rightMargin=22, leftMargin=22, topMargin=22, bottomMargin=22)
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontSize = 8
+    elements = []
+
+    # Header (same brand block as the invoice / shift report).
+    logo_path = "assets/logo-gold.png"
+    hotel_info = Paragraph(
+        "<b>HOTEL BHIMAS</b><br/>"
+        "Luxury &amp; Comfort Stay<br/>"
+        "42, G Car Street, Tirupati - 517501<br/>"
+        "GSTIN: 37AAACK9397F1Z3",
+        styles["Normal"]
+    )
+    if os.path.exists(logo_path):
+        logo = Image(logo_path, width=1.5 * inch, height=1 * inch)
+        elements.append(Table([[logo, hotel_info]], colWidths=[120, 350]))
+    else:
+        elements.append(hotel_info)
+    elements.append(Spacer(1, 0.25 * inch))
+
+    title_style = ParagraphStyle(
+        name="ReportTitle", parent=styles["Title"],
+        textColor=colors.HexColor("#B8860B"), fontSize=15, alignment=1, spaceAfter=6,
+    )
+    elements.append(Paragraph(title or "Report", title_style))
+
+    if meta:
+        meta_style = ParagraphStyle(name="ReportMeta", parent=styles["Normal"],
+                                    fontSize=8, textColor=colors.grey, alignment=1, spaceAfter=10)
+        elements.append(Paragraph(
+            " &nbsp;|&nbsp; ".join(f"{k}: {v}" for k, v in meta.items()), meta_style))
+    elements.append(Spacer(1, 0.08 * inch))
+
+    def _cell(v):
+        if v is None:
+            return ""
+        if isinstance(v, float):
+            return f"{v:,.2f}"
+        return str(v)
+
+    header = [str(c) for c in columns]
+    table_rows = [[Paragraph(f"<b>{h}</b>", styles["Normal"]) for h in header]]
+    for r in rows:
+        table_rows.append([Paragraph(_cell(v), styles["Normal"]) for v in r])
+    has_totals = totals_row is not None
+    if has_totals:
+        table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", styles["Normal"]) for v in totals_row])
+
+    table = Table(table_rows, repeatRows=1)
+    style = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2 if has_totals else -1),
+         [colors.white, colors.HexColor("#f5f5f5")]),
+        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+    ]
+    if has_totals:
+        style.append(('BACKGROUND', (0, -1), (-1, -1), colors.HexColor("#f0e6cc")))
+        style.append(('LINEABOVE', (0, -1), (-1, -1), 0.7, colors.HexColor("#B8860B")))
+    table.setStyle(TableStyle(style))
+    elements.append(table)
+
+    if not rows:
+        elements.append(Spacer(1, 0.2 * inch))
+        empty_style = ParagraphStyle(name="ReportEmpty", parent=styles["Normal"],
+                                     fontSize=9, textColor=colors.grey, alignment=1)
+        elements.append(Paragraph("No data for the selected period.", empty_style))
+
+    footer_style = ParagraphStyle(name="ReportFooter", parent=styles["Normal"],
+                                  fontSize=8, textColor=colors.grey, alignment=1, spaceBefore=18)
+    elements.append(Paragraph("Hotel Bhimas — internal management report.", footer_style))
 
     doc.build(elements)
     return file_path

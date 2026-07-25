@@ -21,7 +21,7 @@ const UserSecurityCheck = () => {
 
     try {
       const response = await fetch(
-        import.meta.env.VITE_API_URL || "http://127.0.0.1:8000" + "/admin-security/validate-secret",
+        (import.meta.env.VITE_API_URL || "http://127.0.0.1:8000") + "/admin-security/validate-secret",
         {
           method: "POST",
           headers: {
