@@ -97,7 +97,7 @@ export default function Compliance() {
         {/* Tabs */}
         <div className="flex flex-wrap gap-2 mb-6">
           {TAB_ORDER.map((k) => (
-            <button key={k} onClick={() => setTab(k)}
+            <button key={k} onClick={() => { setTab(k); setData(null); setError(""); }}
               className={`px-4 py-2 rounded-lg font-semibold transition text-sm ${
                 tab === k
                   ? "bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900"
