@@ -2,6 +2,7 @@ import React, { useEffect, useRef } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import AdminSidebar from "../components/admin/AdminSidebar";
 import RouteErrorBoundary from "../components/RouteErrorBoundary";
+import { NAV_ITEMS } from "../components/admin/adminNav";
 import { getComplianceConfig } from "../api/compliance";
 
 const AdminLayout = () => {
@@ -45,6 +46,14 @@ const AdminLayout = () => {
       events.forEach((e) => window.removeEventListener(e, resetTimer));
     };
   }, [navigate]);
+
+  // Reflect the current page in the browser tab title.
+  useEffect(() => {
+    const match = [...NAV_ITEMS]
+      .filter((it) => location.pathname === it.to || (!it.end && location.pathname.startsWith(it.to)))
+      .sort((a, b) => b.to.length - a.to.length)[0];
+    document.title = match ? `${match.label} · Hotel Bhimas Admin` : "Hotel Bhimas Admin";
+  }, [location.pathname]);
 
   return (
     <div className="min-h-screen bg-[#0F172A] text-white">
