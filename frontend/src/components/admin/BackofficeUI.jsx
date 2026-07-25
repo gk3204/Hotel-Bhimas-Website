@@ -4,7 +4,7 @@
 // Same brand and spacing as pages/admin/Compliance.jsx and RoomTypes.jsx — slate-900 surfaces,
 // #E5C07B gold accent, rounded-2xl cards. Extracted rather than pasted three times; nothing here
 // introduces a second look, it just names the pieces those pages already use.
-import React from "react";
+import React, { useEffect, useMemo, useState } from "react";
 
 export const GOLD = "#E5C07B";
 
@@ -146,39 +146,85 @@ export function Stat({ label, value, tone = "" }) {
 }
 
 /** Table with the loading / error / empty states the guidelines require (never optional). */
-export function DataTable({ columns, rows, renderRow, loading, error, empty = "No records." }) {
+// Paginates client-side (rows are already fully loaded on these screens). Defaults to 25 rows/page;
+// tables shorter than that show no footer. Pass `pageSize={0}` to disable and render every row.
+export function DataTable({ columns, rows, renderRow, loading, error, empty = "No records.", pageSize = 25 }) {
+  const total = rows?.length || 0;
+  const paginated = pageSize && total > pageSize;
+  const pageCount = paginated ? Math.ceil(total / pageSize) : 1;
+  const [page, setPage] = useState(0);
+
+  // Keep the page in range when the row set shrinks (e.g. a filter/search narrows results).
+  useEffect(() => {
+    if (page > pageCount - 1) setPage(0);
+  }, [page, pageCount]);
+
+  const view = useMemo(() => {
+    if (!paginated) return rows || [];
+    const start = page * pageSize;
+    return (rows || []).slice(start, start + pageSize);
+  }, [rows, paginated, page, pageSize]);
+
   if (loading) return <Spinner className="p-12" />;
   if (error) return <div className="p-8 text-center text-red-300">{error}</div>;
-  if (!rows || rows.length === 0)
+  if (total === 0)
     return (
       <div className="p-12 text-center text-slate-400">
         <div className="text-5xl mb-4">📭</div>
         <p>{empty}</p>
       </div>
     );
+
+  const from = paginated ? page * pageSize + 1 : 1;
+  const to = paginated ? Math.min(total, (page + 1) * pageSize) : total;
+
   return (
-    <div className="overflow-x-auto">
-      <table className="w-full text-left text-sm">
-        <thead className="bg-slate-900/80 border-b border-slate-700">
-          <tr>
-            {columns.map((c) => (
-              <th key={c} className="px-4 py-3 font-semibold whitespace-nowrap">{c}</th>
-            ))}
-          </tr>
-        </thead>
-        <tbody className="divide-y divide-slate-700">
-          {rows.map((r, i) => (
-            <tr key={r.id ?? r.user_id ?? i} className="hover:bg-slate-700/30 transition">
-              {renderRow(r, i).map((cell, j) => (
-                <td key={j} className="px-4 py-2.5 text-slate-200 whitespace-nowrap">
-                  {cell === null || cell === undefined || cell === "" ? "—" : cell}
-                </td>
+    <>
+      <div className="overflow-x-auto">
+        <table className="w-full text-left text-sm">
+          <thead className="bg-slate-900/80 border-b border-slate-700">
+            <tr>
+              {columns.map((c) => (
+                <th key={c} className="px-4 py-3 font-semibold whitespace-nowrap">{c}</th>
               ))}
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+          <tbody className="divide-y divide-slate-700">
+            {view.map((r, i) => (
+              <tr key={r.id ?? r.user_id ?? (page * (pageSize || 0) + i)} className="hover:bg-slate-700/30 transition">
+                {renderRow(r, page * (pageSize || 0) + i).map((cell, j) => (
+                  <td key={j} className="px-4 py-2.5 text-slate-200 whitespace-nowrap">
+                    {cell === null || cell === undefined || cell === "" ? "—" : cell}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      {paginated && (
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-slate-700 text-sm text-slate-400">
+          <span>Showing <b className="text-slate-200">{from}–{to}</b> of <b className="text-slate-200">{total}</b></span>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => setPage((p) => Math.max(0, p - 1))}
+              disabled={page === 0}
+              className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white disabled:opacity-40 disabled:cursor-not-allowed transition"
+            >
+              Prev
+            </button>
+            <span className="text-slate-300">Page {page + 1} / {pageCount}</span>
+            <button
+              onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))}
+              disabled={page >= pageCount - 1}
+              className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white disabled:opacity-40 disabled:cursor-not-allowed transition"
+            >
+              Next
+            </button>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
 

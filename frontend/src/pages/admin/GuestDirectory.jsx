@@ -8,6 +8,7 @@ import {
   setBlacklist,
 } from "../../api/crm";
 import { FaSearch, FaStar, FaBan, FaEdit, FaGift } from "react-icons/fa";
+import { usePaged, Paginator } from "../../components/admin/Paginator";
 
 const SEGMENTS = [
   { key: "all", label: "All guests" },
@@ -22,6 +23,7 @@ const GuestDirectory = () => {
   const [segment, setSegment] = useState("all");
   const [selected, setSelected] = useState(null); // {guest, history}
   const [toast, setToast] = useState(null);
+  const paged = usePaged(guests, 25);
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -173,6 +175,7 @@ const GuestDirectory = () => {
               <p>No guests match this search.</p>
             </div>
           ) : (
+            <>
             <div className="overflow-x-auto max-h-[600px] overflow-y-auto">
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 sticky top-0 border-b border-slate-700">
@@ -187,7 +190,7 @@ const GuestDirectory = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {guests.map((g) => (
+                  {paged.pageItems.map((g) => (
                     <tr
                       key={g.guest_id}
                       className={`hover:bg-slate-700/30 transition ${g.profile.blacklist ? "opacity-70" : ""}`}
@@ -221,6 +224,8 @@ const GuestDirectory = () => {
                 </tbody>
               </table>
             </div>
+            <Paginator {...paged} />
+            </>
           )}
         </div>
 
