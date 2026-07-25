@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { getAllPayments } from "../../api/payments";
 import { FaSync } from "react-icons/fa";
+import { usePaged, Paginator } from "../../components/admin/Paginator";
 
 const Payments = () => {
   const [payments, setPayments] = useState([]);
@@ -8,6 +9,7 @@ const Payments = () => {
   const [error, setError] = useState(null);
   const [sortField, setSortField] = useState("created_at");
   const [sortOrder, setSortOrder] = useState("desc");
+  const paged = usePaged(payments, 25);
 
   useEffect(() => {
     fetchPayments();
@@ -153,7 +155,7 @@ const Payments = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {payments.map((payment) => (
+                  {paged.pageItems.map((payment) => (
                     <tr key={payment.payment_id} className="hover:bg-slate-700/30 transition">
                       <td className="px-6 py-4 text-sm font-mono text-[#FCD34D]">
                         {payment.payment_id}
@@ -215,6 +217,7 @@ const Payments = () => {
                 </tbody>
               </table>
             </div>
+            <Paginator {...paged} />
           </div>
         )}
       </div>

@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { FaSearch, FaFileCsv, FaFilePdf, FaChartBar } from "react-icons/fa";
 import * as api from "../../api/reports";
+import { usePaged, Paginator } from "../../components/admin/Paginator";
 
 const fmt = (n) =>
   `₹${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -207,6 +208,10 @@ export default function Reports() {
     }
   }
 
+  // Paginate long reports (e.g. Card Audit / Fraud Summary) at 50 rows/page.
+  const paged = usePaged(projected?.rows || [], 50);
+  const onLastPage = paged.page >= paged.pageCount - 1;
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
       <div className="max-w-7xl mx-auto">
@@ -317,8 +322,8 @@ export default function Reports() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {projected.rows.map((r, i) => (
-                    <tr key={i} className="hover:bg-slate-700/30 transition">
+                  {paged.pageItems.map((r, i) => (
+                    <tr key={paged.page * 50 + i} className="hover:bg-slate-700/30 transition">
                       {r.map((c, j) => (
                         <td key={j} className="px-4 py-2.5 text-slate-200 whitespace-nowrap">
                           {c == null ? "—" : String(c)}
@@ -326,7 +331,7 @@ export default function Reports() {
                       ))}
                     </tr>
                   ))}
-                  {projected.totals && (
+                  {projected.totals && onLastPage && (
                     <tr className="bg-[#E5C07B]/10 font-bold text-[#FCD34D] border-t border-[#E5C07B]/30">
                       {projected.totals.map((c, j) => (
                         <td key={j} className="px-4 py-3 whitespace-nowrap">{c == null ? "" : String(c)}</td>
@@ -335,6 +340,7 @@ export default function Reports() {
                   )}
                 </tbody>
               </table>
+              <Paginator {...paged} />
             </div>
           )}
         </div>
