@@ -18,7 +18,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import TravelAgent, AgentRate, AgentPayment, RoomType, Booking, Guest
 from schemas import (TravelAgentCreate, TravelAgentUpdate, TravelAgentToggle,
-                     AgentRateCreate, AgentRateUpdate, AgentPaymentCreate)
+                     AgentRateCreate, AgentRateUpdate, AgentPaymentCreate, AgentBulkPayment)
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
 
@@ -344,6 +344,37 @@ def list_agent_payments(agent_id: int, db: Session = Depends(get_db)):
         "id": p.id, "amount": float(p.amount), "paid_on": str(p.paid_on),
         "mode": p.mode, "reference": p.reference, "note": p.note,
     } for p in rows]
+
+
+@router.post("/payments/bulk", dependencies=[Depends(require_admin)])
+def record_bulk_agent_payments(data: AgentBulkPayment, user=Depends(require_admin),
+                               db: Session = Depends(get_db)):
+    """Record a commission payout to each of several agents at once (bulk-settle outstanding
+    balances). Skips unknown agents; audited per agent like the single payout."""
+    recorded, total = 0, 0.0
+    uid = _resolve_user_id(db, user)
+    try:
+        for item in data.items:
+            agent = db.query(TravelAgent).filter(TravelAgent.id == item.agent_id).first()
+            if agent is None or item.amount <= 0:
+                continue
+            payment = AgentPayment(
+                agent_id=item.agent_id, amount=item.amount, paid_on=data.paid_on,
+                mode=data.mode, reference=data.reference, note=data.note, created_by=uid,
+            )
+            db.add(payment)
+            db.commit()
+            write_audit(db, user, "agent.payout", "travel_agent", item.agent_id,
+                        after={"amount": float(item.amount), "mode": data.mode,
+                               "paid_on": str(data.paid_on), "bulk": True},
+                        client="web", commit=True)
+            recorded += 1
+            total += float(item.amount)
+        return {"recorded": recorded, "total": round(total, 2)}
+    except Exception as e:
+        logger.error(f"record_bulk_agent_payments failed: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Bulk payout failed")
 
 
 @router.post("/{agent_id}/payments", dependencies=[Depends(require_admin)])

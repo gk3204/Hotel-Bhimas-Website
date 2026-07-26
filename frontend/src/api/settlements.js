@@ -58,3 +58,13 @@ export async function recordPayout(agentId, data) {
   });
   return handle(res);
 }
+
+// Settle several agents' outstanding balances at once. data = { items:[{agent_id, amount}], paid_on, mode }
+export async function recordBulkPayouts(data) {
+  const res = await fetch(`${BASE_URL}/agents/payments/bulk`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify(data),
+  });
+  return handle(res);
+}

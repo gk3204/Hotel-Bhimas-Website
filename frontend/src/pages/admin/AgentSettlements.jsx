@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { PageShell } from "../../components/admin/BackofficeUI";
-import { getSettlement, getAgentSettlement, recordPayout } from "../../api/settlements";
+import { useConfirm } from "../../components/ConfirmDialog";
+import { getSettlement, getAgentSettlement, recordPayout, recordBulkPayouts } from "../../api/settlements";
 import { FaMoneyBillWave, FaEye, FaSearch } from "react-icons/fa";
 
 const fmt = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -17,6 +18,12 @@ const AgentSettlements = () => {
   const [payoutFor, setPayoutFor] = useState(null);
   const [payout, setPayout] = useState({ amount: "", paid_on: "", mode: "bank", reference: "", note: "" });
 
+  const { confirm } = useConfirm();
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const [bulkDate, setBulkDate] = useState(new Date().toISOString().slice(0, 10));
+  const [bulkMode, setBulkMode] = useState("bank");
+
   useEffect(() => { load(); }, []);
 
   const showToast = (message, type = "success") => {
@@ -28,10 +35,43 @@ const AgentSettlements = () => {
     setLoading(true);
     try {
       setReport(await getSettlement(range.from || undefined, range.to || undefined));
+      setSelected(new Set()); // clear selection on reload
     } catch (e) {
       showToast(e.message, "error");
     }
     setLoading(false);
+  };
+
+  const outstandingAgents = (report?.agents || []).filter((r) => r.outstanding > 0);
+  const toggle = (id) =>
+    setSelected((s) => { const n = new Set(s); if (n.has(id)) n.delete(id); else n.add(id); return n; });
+  const allSel = outstandingAgents.length > 0 && outstandingAgents.every((r) => selected.has(r.agent_id));
+  const toggleAll = () =>
+    setSelected(() => (allSel ? new Set() : new Set(outstandingAgents.map((r) => r.agent_id))));
+  const selectedRows = outstandingAgents.filter((r) => selected.has(r.agent_id));
+  const selectedTotal = selectedRows.reduce((s, r) => s + r.outstanding, 0);
+
+  const bulkSettle = async () => {
+    if (selectedRows.length === 0) return;
+    if (!bulkDate) { showToast("Pick a payout date", "error"); return; }
+    if (!(await confirm({
+      title: `Settle ${selectedRows.length} agent(s)?`,
+      message: `Records a ${bulkMode} payout for each selected agent's full outstanding (total ${fmt(selectedTotal)}).`,
+      confirmText: "Settle",
+    }))) return;
+    setBulkBusy(true);
+    try {
+      const res = await recordBulkPayouts({
+        items: selectedRows.map((r) => ({ agent_id: r.agent_id, amount: r.outstanding })),
+        paid_on: bulkDate, mode: bulkMode,
+      });
+      showToast(`${res.recorded ?? 0} payout(s) recorded — ${fmt(res.total ?? 0)}`);
+      load();
+    } catch (e) {
+      showToast(e.message, "error");
+    } finally {
+      setBulkBusy(false);
+    }
   };
 
   const openDetail = async (row) => {
@@ -105,7 +145,24 @@ const AgentSettlements = () => {
 
         {/* Table */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl shadow-xl overflow-hidden backdrop-blur">
-          <div className="p-6 border-b border-slate-700"><h2 className="text-2xl font-bold">📊 Agents</h2></div>
+          <div className="p-6 border-b border-slate-700 flex flex-wrap items-center gap-4">
+            <h2 className="text-2xl font-bold">📊 Agents</h2>
+            {selected.size > 0 && (
+              <div className="flex flex-wrap items-center gap-3 ml-auto">
+                <span className="text-[#FCD34D] text-sm font-semibold">{selected.size} selected · {fmt(selectedTotal)}</span>
+                <input type="date" value={bulkDate} onChange={(e) => setBulkDate(e.target.value)} className={inputCls} />
+                <select value={bulkMode} onChange={(e) => setBulkMode(e.target.value)} className={inputCls}>
+                  <option value="bank">Bank</option><option value="upi">UPI</option>
+                  <option value="cash">Cash</option><option value="adjustment">Adjustment</option>
+                </select>
+                <button onClick={bulkSettle} disabled={bulkBusy}
+                  className="bg-green-700 hover:bg-green-800 disabled:opacity-50 px-5 py-2 rounded-lg text-white font-bold transition flex items-center gap-2">
+                  <FaMoneyBillWave size={13} /> {bulkBusy ? "Settling…" : "Settle selected"}
+                </button>
+                <button onClick={() => setSelected(new Set())} className="text-slate-400 hover:text-white text-sm">Clear</button>
+              </div>
+            )}
+          </div>
           {loading ? (
             <div className="p-12 flex items-center justify-center">
               <div className="animate-spin inline-block"><div className="h-12 w-12 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full"></div></div>
@@ -117,6 +174,7 @@ const AgentSettlements = () => {
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 border-b border-slate-700">
                   <tr>
+                    <th className="px-6 py-4"><input type="checkbox" checked={allSel} onChange={toggleAll} aria-label="Select all with outstanding" /></th>
                     <th className="px-6 py-4 font-semibold text-sm">Agent</th>
                     <th className="px-6 py-4 font-semibold text-sm">Comm %</th>
                     <th className="px-6 py-4 font-semibold text-sm">Bookings</th>
@@ -130,6 +188,9 @@ const AgentSettlements = () => {
                 <tbody className="divide-y divide-slate-700">
                   {report.agents.map((r) => (
                     <tr key={r.agent_id} className="hover:bg-slate-700/30 transition">
+                      <td className="px-6 py-4">
+                        {r.outstanding > 0 && <input type="checkbox" checked={selected.has(r.agent_id)} onChange={() => toggle(r.agent_id)} aria-label={`Select ${r.agent_name}`} />}
+                      </td>
                       <td className="px-6 py-4 font-medium">{r.agent_name}</td>
                       <td className="px-6 py-4 text-slate-300">{r.commission_percent}%</td>
                       <td className="px-6 py-4 text-slate-300">{r.bookings}</td>

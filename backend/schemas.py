@@ -450,6 +450,20 @@ class AgentPaymentCreate(BaseModel):
     note: Optional[str] = Field(None, max_length=200)
 
 
+class AgentBulkPaymentItem(BaseModel):
+    agent_id: int
+    amount: float = Field(..., gt=0, le=100_000_000)
+
+
+class AgentBulkPayment(BaseModel):
+    """Record a payout to several agents at once (settle the selected outstanding balances)."""
+    items: List[AgentBulkPaymentItem] = Field(..., min_length=1, max_length=200)
+    paid_on: date
+    mode: str = Field("bank", pattern="^(cash|upi|bank|adjustment)$")
+    reference: Optional[str] = Field(None, max_length=100)
+    note: Optional[str] = Field(None, max_length=200)
+
+
 # =====================================================================
 # ANTI-FRAUD / INTERNAL CONTROLS (prompt 11)
 # =====================================================================
