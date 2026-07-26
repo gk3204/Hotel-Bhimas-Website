@@ -3,6 +3,7 @@ import { NavLink, useNavigate, useLocation } from "react-router-dom";
 import { FaSearch, FaSignOutAlt, FaBars, FaTimes, FaChevronDown } from "react-icons/fa";
 import logo from "../../assets/logo-gold.svg";
 import { NAV_GROUPS, NAV_ITEMS } from "./adminNav";
+import NotificationsBell from "./NotificationsBell";
 
 // Grouped, searchable admin sidebar. Fixed left column on md+, slide-in drawer on mobile.
 // Replaces the old 29-link horizontal AdminHeader.
@@ -55,13 +56,16 @@ export default function AdminSidebar() {
           <div className="text-[#E5C07B] font-bold leading-tight">Hotel Bhimas</div>
           <div className="text-slate-500 text-xs">Admin Console</div>
         </div>
-        <button
-          onClick={closeDrawer}
-          className="md:hidden ml-auto text-slate-400 hover:text-white"
-          aria-label="Close menu"
-        >
-          <FaTimes size={18} />
-        </button>
+        <div className="ml-auto flex items-center gap-1">
+          <NotificationsBell />
+          <button
+            onClick={closeDrawer}
+            className="md:hidden text-slate-400 hover:text-white p-2"
+            aria-label="Close menu"
+          >
+            <FaTimes size={18} />
+          </button>
+        </div>
       </div>
 
       {/* Quick-jump search */}
