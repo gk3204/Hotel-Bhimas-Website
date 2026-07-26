@@ -4,10 +4,15 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { FaBell, FaCheck, FaGift, FaReply, FaSearch } from "react-icons/fa";
 import * as api from "../../api/complaints";
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Stat, Tabs, fmtDate, inputCls, money, useToast,
 } from "../../components/admin/BackofficeUI";
+
+// Complaints already resolved/verified/closed can't be bulk-resolved again.
+const DONE_STATUSES = ["resolved", "verified", "closed"];
+const isResolvable = (c) => !DONE_STATUSES.includes(c.status);
 
 const TABS = [
   ["open", "Open complaints"],
@@ -60,6 +65,9 @@ function ListTab({ mode, showToast }) {
   const [priority, setPriority] = useState("");
   const [detail, setDetail] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [selected, setSelected] = useState(() => new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
+  const { confirm } = useConfirm();
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -70,12 +78,45 @@ function ListTab({ mode, showToast }) {
       if (mode === "breached") params.breached = true;
       const res = await api.listComplaints(params);
       setRows(res.data || []);
+      setSelected(new Set()); // clear selection on any reload
     } catch (e) {
       setError(e.message || "Failed to load complaints");
     } finally {
       setLoading(false);
     }
   }, [mode, priority]);
+
+  const toggle = (id) =>
+    setSelected((s) => {
+      const next = new Set(s);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+
+  const selectableIds = rows.filter(isResolvable).map((c) => c.id);
+  const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
+  const toggleAll = () =>
+    setSelected(() => (allSelected ? new Set() : new Set(selectableIds)));
+
+  const bulkResolve = async () => {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    if (!(await confirm({
+      title: `Resolve ${ids.length} complaint(s)?`,
+      message: "Marks them resolved and stops SLA escalation. Already-closed ones are skipped.",
+      confirmText: "Resolve",
+    }))) return;
+    setBulkBusy(true);
+    try {
+      const res = await api.bulkResolveComplaints({ ids });
+      showToast(`${res.resolved ?? 0} resolved${res.skipped ? `, ${res.skipped} skipped` : ""}`);
+      load();
+    } catch (e) {
+      showToast(e.message || "Bulk resolve failed");
+    } finally {
+      setBulkBusy(false);
+    }
+  };
 
   useEffect(() => { load(); /* eslint-disable-next-line */ }, [priority]);
 
@@ -106,9 +147,21 @@ function ListTab({ mode, showToast }) {
         </div>
       </Card>
 
-      <Card title="Complaints" right={<span className="text-slate-400 text-sm">{rows.length}</span>}>
+      <Card title="Complaints" right={
+        <span className="text-slate-400 text-sm">{selected.size > 0 ? `${selected.size} selected` : rows.length}</span>
+      }>
+        {selected.size > 0 && (
+          <div className="flex items-center gap-3 px-5 py-3 bg-[#E5C07B]/10 border-b border-[#E5C07B]/30">
+            <span className="text-[#FCD34D] text-sm font-semibold">{selected.size} selected</span>
+            <PrimaryButton onClick={bulkResolve} disabled={bulkBusy}>
+              <FaCheck size={13} /> {bulkBusy ? "Resolving…" : "Resolve selected"}
+            </PrimaryButton>
+            <button onClick={() => setSelected(new Set())} className="text-slate-400 hover:text-white text-sm">Clear</button>
+          </div>
+        )}
         <DataTable
           columns={[
+            { label: <input type="checkbox" checked={allSelected} onChange={toggleAll} aria-label="Select all resolvable" /> },
             { label: "#", sort: (c) => c.id },
             { label: "Guest / room", sort: (c) => c.guest_name || "" },
             "Issue",
@@ -122,6 +175,9 @@ function ListTab({ mode, showToast }) {
           rows={rows} loading={loading} error={error}
           empty={mode === "breached" ? "No SLA breaches. Everything is on track." : "No complaints here."}
           renderRow={(c) => [
+            isResolvable(c)
+              ? <input key="cb" type="checkbox" checked={selected.has(c.id)} onChange={() => toggle(c.id)} aria-label={`Select complaint ${c.id}`} />
+              : <span key="cb" className="text-slate-600">—</span>,
             `#${c.id}`,
             <div key="g">
               <span className="text-slate-100">{c.guest_name || "—"}</span>

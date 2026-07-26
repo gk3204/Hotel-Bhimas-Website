@@ -22,8 +22,8 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import Booking, Folio, FolioCharge, MaintenanceTicket, Room, TicketEscalation
-from schemas import (ComplaintCompensate, ComplaintConfigUpdate, ComplaintCreate,
-                     ComplaintEscalate, ComplaintResolve, ComplaintRespond)
+from schemas import (ComplaintBulkResolve, ComplaintCompensate, ComplaintConfigUpdate,
+                     ComplaintCreate, ComplaintEscalate, ComplaintResolve, ComplaintRespond)
 from utils import settings as app_settings
 from utils.audit import _resolve_user_id, write_audit
 from utils.auth_utils import require_admin, require_reception_or_admin
@@ -324,6 +324,38 @@ def resolve_complaint(complaint_id: int, data: ComplaintResolve, db: Session = D
         logger.error(f"resolve_complaint failed: {e}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to resolve the complaint")
+
+
+@router.post("/bulk-resolve")
+def bulk_resolve_complaints(data: ComplaintBulkResolve, db: Session = Depends(get_db),
+                            user=Depends(require_reception_or_admin)):
+    """Resolve several guest complaints at once (clear a backlog). Skips any that aren't guest
+    complaints or are already resolved/verified/closed. Audited per ticket, same as single resolve."""
+    resolved, skipped = 0, 0
+    try:
+        for cid in data.ids:
+            t = db.query(MaintenanceTicket).filter(
+                MaintenanceTicket.id == cid, MaintenanceTicket.source == "guest").first()
+            if t is None or t.status in ("resolved", "verified", "closed"):
+                skipped += 1
+                continue
+            t.status = "resolved"
+            t.resolved_at = datetime.utcnow()
+            if t.first_responded_at is None:
+                t.first_responded_at = datetime.utcnow()
+            if data.resolution_notes:
+                t.resolution_notes = (
+                    f"{t.resolution_notes + chr(10) if t.resolution_notes else ''}{data.resolution_notes}")
+            db.commit()
+            write_audit(db, user, "complaint.resolve", "maintenance_ticket", t.id,
+                        after={"resolution_notes": data.resolution_notes, "bulk": True},
+                        client="web", commit=True)
+            resolved += 1
+        return {"resolved": resolved, "skipped": skipped}
+    except Exception as e:
+        logger.error(f"bulk_resolve_complaints failed: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Bulk resolve failed")
 
 
 @router.post("/{complaint_id}/compensate", dependencies=[Depends(require_admin)])

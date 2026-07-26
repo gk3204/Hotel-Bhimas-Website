@@ -1034,6 +1034,12 @@ class ComplaintResolve(BaseModel):
     resolution_notes: Optional[str] = Field(None, max_length=500)
 
 
+class ComplaintBulkResolve(BaseModel):
+    """Resolve several complaints at once (clear a backlog). Already-closed ones are skipped."""
+    ids: List[int] = Field(..., min_length=1, max_length=200)
+    resolution_notes: Optional[str] = Field(None, max_length=500)
+
+
 class ComplaintCompensate(BaseModel):
     """Admin logs a goodwill credit to the guest's folio (reason required, audited)."""
     amount: float = Field(..., gt=0, le=1_000_000)

@@ -49,6 +49,7 @@ export const createComplaint = (body) => req("/complaints/", { method: "POST", b
 export const respondComplaint = (id, body) => req(`/complaints/${id}/respond`, { method: "POST", body });
 export const escalateComplaint = (id, body) => req(`/complaints/${id}/escalate`, { method: "POST", body });
 export const resolveComplaint = (id, body) => req(`/complaints/${id}/resolve`, { method: "POST", body });
+export const bulkResolveComplaints = (body) => req("/complaints/bulk-resolve", { method: "POST", body });
 export const compensateComplaint = (id, body) => req(`/complaints/${id}/compensate`, { method: "POST", body });
 
 export const runEscalations = () => req("/complaints/escalations/run", { method: "POST" });
