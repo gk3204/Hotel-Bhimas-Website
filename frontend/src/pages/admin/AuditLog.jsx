@@ -1,10 +1,11 @@
 // Append-only audit-log viewer (admin). Read-only surface over GET /audit-logs with filters,
 // server-side pagination, and a before/after diff drawer. On the shared BackofficeUI kit.
 import React, { useCallback, useEffect, useState } from "react";
-import { FaSearch, FaHistory } from "react-icons/fa";
+import { FaSearch, FaHistory, FaFileCsv } from "react-icons/fa";
 import { getAuditLogs } from "../../api/audit";
+import { exportCsv } from "../../utils/exportCsv";
 import {
-  Card, Chip, DataTable, Field, Modal, PageShell, PrimaryButton, SelectField, inputCls, useToast,
+  Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField, inputCls, useToast,
 } from "../../components/admin/BackofficeUI";
 
 const PAGE = 50;
@@ -66,6 +67,19 @@ export default function AuditLog() {
     else setPage(0); // resets → effect reloads
   };
 
+  const onExport = () => {
+    if (!rows.length) { showToast("Nothing to export"); return; }
+    exportCsv(`audit-log_${filters.from}_to_${filters.to}_p${page + 1}.csv`, rows, [
+      { header: "When", value: (r) => when(r.when) },
+      { header: "Actor", value: (r) => r.actor },
+      { header: "Action", value: (r) => r.action },
+      { header: "Entity type", value: (r) => r.entity_type || "" },
+      { header: "Entity id", value: (r) => r.entity_id || "" },
+      { header: "Source", value: (r) => r.client || "" },
+      { header: "IP", value: (r) => r.ip || "" },
+    ]);
+  };
+
   const pageCount = Math.max(1, Math.ceil(total / PAGE));
   const from = total === 0 ? 0 : page * PAGE + 1;
   const to = Math.min(total, (page + 1) * PAGE);
@@ -95,7 +109,12 @@ export default function AuditLog() {
 
       <Card
         title="Entries"
-        right={<span className="text-slate-400 text-sm flex items-center gap-2"><FaHistory /> {total} total</span>}
+        right={
+          <div className="flex items-center gap-3">
+            <span className="text-slate-400 text-sm flex items-center gap-2"><FaHistory /> {total} total</span>
+            <GhostButton onClick={onExport}><FaFileCsv size={13} /> Export page</GhostButton>
+          </div>
+        }
       >
         <DataTable
           columns={["When", "Actor", "Action", "Entity", "Source", "IP", ""]}

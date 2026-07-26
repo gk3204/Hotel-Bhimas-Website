@@ -8,9 +8,10 @@ import {
   setVip,
   setBlacklist,
 } from "../../api/crm";
-import { FaSearch, FaStar, FaBan, FaEdit, FaGift } from "react-icons/fa";
+import { FaSearch, FaStar, FaBan, FaEdit, FaGift, FaFileCsv } from "react-icons/fa";
 import { usePaged, Paginator } from "../../components/admin/Paginator";
 import { PageShell } from "../../components/admin/BackofficeUI";
+import { exportCsv } from "../../utils/exportCsv";
 
 const SEGMENTS = [
   { key: "all", label: "All guests" },
@@ -155,6 +156,23 @@ const GuestDirectory = () => {
                 </button>
               ))}
             </div>
+            <button
+              onClick={() => {
+                if (!guests.length) { showToast("Nothing to export", "error"); return; }
+                exportCsv("guest-directory.csv", guests, [
+                  { header: "Name", value: (g) => g.name },
+                  { header: "Phone", value: (g) => g.phone },
+                  { header: "Stays", value: (g) => g.stay_count },
+                  { header: "Total spend", value: (g) => g.total_spend || 0 },
+                  { header: "Last stay", value: (g) => g.last_stay || "" },
+                  { header: "VIP", value: (g) => (g.profile?.vip ? "yes" : "") },
+                  { header: "Blacklist", value: (g) => (g.profile?.blacklist ? "yes" : "") },
+                ]);
+              }}
+              className="px-4 py-2 rounded-lg text-sm font-semibold border border-slate-600 text-slate-300 bg-slate-900/40 hover:border-slate-500 transition flex items-center gap-2"
+            >
+              <FaFileCsv size={13} /> Export CSV
+            </button>
           </div>
         </div>
 
