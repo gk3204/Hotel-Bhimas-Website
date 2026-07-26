@@ -35,6 +35,8 @@ from routers import companies, vendors, roster
 from routers import stock, complaints
 # --- PMS round-2 batch C part 1 (prompt 18d slice 10: guest extras / in-room QR portal) ---
 from routers import portal
+# --- Admin audit-log viewer (read-only surface over the append-only audit trail) ---
+from routers import audit
 
 # Load environment variables
 load_dotenv()
@@ -343,6 +345,7 @@ app.include_router(roster.router)
 app.include_router(stock.router)
 app.include_router(complaints.router)
 app.include_router(portal.router)
+app.include_router(audit.router)
 
 # -------------------------
 # Health Check

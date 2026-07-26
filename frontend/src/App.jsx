@@ -51,6 +51,7 @@ import OwnerDashboard from "./pages/admin/OwnerDashboard";
 import Reports from "./pages/admin/Reports";
 import OtaChannels from "./pages/admin/OtaChannels";
 import Compliance from "./pages/admin/Compliance";
+import AuditLog from "./pages/admin/AuditLog";
 import Reviews from "./pages/admin/Reviews";
 import Companies from "./pages/admin/Companies";
 import Vendors from "./pages/admin/Vendors";
@@ -133,6 +134,7 @@ function App() {
         <Route path="/admin/user-check" element={<UserSecurityCheck />} />
         <Route path="/admin/users" element={<UserManagement />} />
         <Route path="/admin/compliance" element={<Compliance />} />
+        <Route path="/admin/audit-log" element={<AuditLog />} />
         <Route path="/admin/reviews" element={<Reviews />} />
         <Route path="/admin/companies" element={<Companies />} />
         <Route path="/admin/vendors" element={<Vendors />} />

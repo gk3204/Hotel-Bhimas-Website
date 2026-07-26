@@ -5,7 +5,7 @@ import {
   FaUsers, FaEnvelopeOpenText, FaWhatsapp, FaStar, FaMobileAlt, FaBullhorn,
   FaTags, FaPercent, FaUserTie, FaHandshake, FaGlobe,
   FaMoneyBillWave, FaCashRegister, FaChartBar,
-  FaShieldAlt, FaClipboardCheck, FaExclamationTriangle,
+  FaShieldAlt, FaClipboardCheck, FaExclamationTriangle, FaHistory,
   FaBuilding, FaTruck, FaBoxes,
   FaUserShield, FaUserCog, FaUserCheck, FaKey,
 } from "react-icons/fa";
@@ -57,6 +57,7 @@ export const NAV_GROUPS = [
     items: [
       { to: "/admin/fraud", label: "Fraud", icon: FaExclamationTriangle },
       { to: "/admin/compliance", label: "Compliance", icon: FaClipboardCheck },
+      { to: "/admin/audit-log", label: "Audit Log", icon: FaHistory },
     ],
   },
   {
