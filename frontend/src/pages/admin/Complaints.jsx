@@ -108,7 +108,17 @@ function ListTab({ mode, showToast }) {
 
       <Card title="Complaints" right={<span className="text-slate-400 text-sm">{rows.length}</span>}>
         <DataTable
-          columns={["#", "Guest / room", "Issue", "Priority", "Status", "SLA", "Escalation", "Logged", ""]}
+          columns={[
+            { label: "#", sort: (c) => c.id },
+            { label: "Guest / room", sort: (c) => c.guest_name || "" },
+            "Issue",
+            { label: "Priority", sort: (c) => c.priority },
+            "Status",
+            "SLA",
+            { label: "Escalation", sort: (c) => c.escalation_level || 0 },
+            { label: "Logged", sort: (c) => c.created_at },
+            "",
+          ]}
           rows={rows} loading={loading} error={error}
           empty={mode === "breached" ? "No SLA breaches. Everything is on track." : "No complaints here."}
           renderRow={(c) => [

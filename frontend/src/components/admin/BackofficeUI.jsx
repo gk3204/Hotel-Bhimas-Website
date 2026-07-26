@@ -146,13 +146,37 @@ export function Stat({ label, value, tone = "" }) {
 }
 
 /** Table with the loading / error / empty states the guidelines require (never optional). */
+// Generic comparator: numbers numerically, everything else as natural strings; nulls sort last.
+const cmpValues = (a, b) => {
+  if (a == null && b == null) return 0;
+  if (a == null) return 1;
+  if (b == null) return -1;
+  if (typeof a === "number" && typeof b === "number") return a - b;
+  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
+};
+
 // Paginates client-side (rows are already fully loaded on these screens). Defaults to 25 rows/page;
 // tables shorter than that show no footer. Pass `pageSize={0}` to disable and render every row.
+// A column may be a string (not sortable) or an object { label, sort } where `sort` is a row-key
+// string or an accessor (row) => comparableValue; clicking a sortable header cycles asc → desc → off.
 export function DataTable({ columns, rows, renderRow, loading, error, empty = "No records.", pageSize = 25 }) {
-  const total = rows?.length || 0;
+  const cols = columns.map((c) => (typeof c === "string" ? { label: c } : c));
+  const [sort, setSort] = useState({ idx: null, dir: "asc" });
+  const [page, setPage] = useState(0);
+
+  const sorted = useMemo(() => {
+    const base = rows || [];
+    const col = sort.idx == null ? null : cols[sort.idx];
+    if (!col?.sort) return base;
+    const acc = typeof col.sort === "function" ? col.sort : (r) => r[col.sort];
+    const factor = sort.dir === "asc" ? 1 : -1;
+    return [...base].sort((a, b) => cmpValues(acc(a), acc(b)) * factor);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, sort]);
+
+  const total = sorted.length;
   const paginated = pageSize && total > pageSize;
   const pageCount = paginated ? Math.ceil(total / pageSize) : 1;
-  const [page, setPage] = useState(0);
 
   // Keep the page in range when the row set shrinks (e.g. a filter/search narrows results).
   useEffect(() => {
@@ -160,10 +184,17 @@ export function DataTable({ columns, rows, renderRow, loading, error, empty = "N
   }, [page, pageCount]);
 
   const view = useMemo(() => {
-    if (!paginated) return rows || [];
+    if (!paginated) return sorted;
     const start = page * pageSize;
-    return (rows || []).slice(start, start + pageSize);
-  }, [rows, paginated, page, pageSize]);
+    return sorted.slice(start, start + pageSize);
+  }, [sorted, paginated, page, pageSize]);
+
+  const toggleSort = (idx) =>
+    setSort((s) => {
+      if (s.idx !== idx) return { idx, dir: "asc" };
+      if (s.dir === "asc") return { idx, dir: "desc" };
+      return { idx: null, dir: "asc" };
+    });
 
   if (loading) return <Spinner className="p-12" />;
   if (error) return <div className="p-8 text-center text-red-300">{error}</div>;
@@ -184,9 +215,24 @@ export function DataTable({ columns, rows, renderRow, loading, error, empty = "N
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-900/80 border-b border-slate-700">
             <tr>
-              {columns.map((c) => (
-                <th key={c} className="px-4 py-3 font-semibold whitespace-nowrap">{c}</th>
-              ))}
+              {cols.map((c, ci) => {
+                const active = sort.idx === ci;
+                return (
+                  <th key={ci} className="px-4 py-3 font-semibold whitespace-nowrap">
+                    {c.sort ? (
+                      <button
+                        onClick={() => toggleSort(ci)}
+                        className={`inline-flex items-center gap-1 hover:text-[#E5C07B] transition ${active ? "text-[#E5C07B]" : ""}`}
+                      >
+                        {c.label}
+                        <span className="text-[10px] opacity-70">{active ? (sort.dir === "asc" ? "▲" : "▼") : "↕"}</span>
+                      </button>
+                    ) : (
+                      c.label
+                    )}
+                  </th>
+                );
+              })}
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-700">

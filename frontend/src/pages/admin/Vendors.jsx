@@ -132,7 +132,16 @@ function VendorsTab({ vendors, loading, error, reload, search, setSearch, catego
 
       <Card title="Vendors" right={<span className="text-slate-400 text-sm">{vendors.length} vendor(s)</span>}>
         <DataTable
-          columns={["Vendor", "Category", "Contact", "Contracts", "Renewals due", "Total spend", "Status", ""]}
+          columns={[
+            { label: "Vendor", sort: (v) => v.name },
+            { label: "Category", sort: (v) => CATEGORY_LABEL[v.category] || v.category },
+            "Contact",
+            "Contracts",
+            { label: "Renewals due", sort: (v) => v.renewals_due },
+            { label: "Total spend", sort: (v) => v.total_spend },
+            { label: "Status", sort: (v) => (v.is_active ? 1 : 0) },
+            "",
+          ]}
           rows={vendors} loading={loading} error={error}
           empty="No vendors yet. Add your laundry, lock-AMC and linen suppliers here."
           renderRow={(v) => [

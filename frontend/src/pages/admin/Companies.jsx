@@ -138,7 +138,16 @@ function CompaniesTab({ companies, loading, error, search, setSearch, reload, sh
 
       <Card title="Companies" right={<span className="text-slate-400 text-sm">{companies.length} account(s)</span>}>
         <DataTable
-          columns={["Company", "GSTIN", "Contact", "Credit limit", "Outstanding", "Position", "Status", ""]}
+          columns={[
+            { label: "Company", sort: (c) => c.name },
+            "GSTIN",
+            "Contact",
+            { label: "Credit limit", sort: (c) => c.credit_limit },
+            { label: "Outstanding", sort: (c) => c.outstanding },
+            "Position",
+            { label: "Status", sort: (c) => (c.is_active ? 1 : 0) },
+            "",
+          ]}
           rows={companies} loading={loading} error={error}
           empty="No corporate accounts yet. Add one to start billing employers directly."
           renderRow={(c) => [

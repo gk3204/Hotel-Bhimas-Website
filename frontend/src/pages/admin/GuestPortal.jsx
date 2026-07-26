@@ -239,7 +239,14 @@ function MenuTab({ showToast }) {
       </Card>
       <Card title="Room-service menu" right={<span className="text-slate-400 text-sm">{rows.length}</span>}>
         <DataTable
-          columns={["Item", "Category", "Price", "GST %", "Available", ""]}
+          columns={[
+            { label: "Item", sort: (m) => m.name },
+            { label: "Category", sort: (m) => m.category },
+            { label: "Price", sort: (m) => m.price },
+            { label: "GST %", sort: (m) => m.gst_percent },
+            { label: "Available", sort: (m) => (m.is_available ? 1 : 0) },
+            "",
+          ]}
           rows={rows} loading={loading} error={error}
           empty="No menu items yet. Add dishes and drinks guests can order from their room."
           renderRow={(m) => [

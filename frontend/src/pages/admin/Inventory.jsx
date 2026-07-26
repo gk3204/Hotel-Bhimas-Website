@@ -115,7 +115,16 @@ function ItemsTab({ showToast }) {
 
       <Card title="Stock items" right={<span className="text-slate-400 text-sm">{items.length} item(s)</span>}>
         <DataTable
-          columns={["Item", "Category", "Unit", "In stock", "Reorder at", "Sale ₹", "Status", ""]}
+          columns={[
+            { label: "Item", sort: (it) => it.name },
+            { label: "Category", sort: (it) => it.category },
+            "Unit",
+            "In stock",
+            { label: "Reorder at", sort: (it) => it.effective_threshold },
+            { label: "Sale ₹", sort: (it) => it.sale_price },
+            { label: "Status", sort: (it) => (it.is_active ? 1 : 0) },
+            "",
+          ]}
           rows={items} loading={loading} error={error}
           empty="No stock items yet. Add minibar drinks, toiletries and supplies here."
           renderRow={(it) => [
