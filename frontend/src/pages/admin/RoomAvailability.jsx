@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { getRoomTypes } from "../../api/roomTypes";
 import { jwtDecode } from "jwt-decode";
 import { useConfirm } from "../../components/ConfirmDialog";
+import { PageShell } from "../../components/admin/BackofficeUI";
 import {
   getBlockedDates,
   blockDate,
@@ -68,10 +69,11 @@ const RoomAvailability = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0F172A] text-[#E5C07B] p-6">
-      <h1 className="text-2xl font-bold mb-6">
-        Room Availability Management
-      </h1>
+    <PageShell
+      icon="📆"
+      title="Room Availability Management"
+      subtitle="Block dates so a room type can't be sold; unblock to reopen it."
+    >
 
       {/* Room Selector */}
       <div className="bg-[#111827] p-6 rounded-xl mb-6">
@@ -156,7 +158,7 @@ const RoomAvailability = () => {
           )}
         </div>
       )}
-    </div>
+    </PageShell>
   );
 };
 
