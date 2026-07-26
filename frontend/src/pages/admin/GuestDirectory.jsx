@@ -1,4 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import {
   listGuests,
   getGuest,
@@ -18,9 +19,10 @@ const SEGMENTS = [
 ];
 
 const GuestDirectory = () => {
+  const [searchParams] = useSearchParams();
   const [guests, setGuests] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(searchParams.get("q") || "");
   const [segment, setSegment] = useState("all");
   const [selected, setSelected] = useState(null); // {guest, history}
   const [toast, setToast] = useState(null);

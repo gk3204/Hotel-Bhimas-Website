@@ -57,6 +57,14 @@ export default function AdminSidebar() {
           <div className="text-slate-500 text-xs">Admin Console</div>
         </div>
         <div className="ml-auto flex items-center gap-1">
+          <button
+            onClick={() => window.dispatchEvent(new Event("admin:open-search"))}
+            className="p-2 rounded-lg text-slate-300 hover:text-white hover:bg-slate-800/70 transition"
+            aria-label="Search guests (Ctrl+K)"
+            title="Search guests (Ctrl+K)"
+          >
+            <FaSearch size={15} />
+          </button>
           <NotificationsBell />
           <button
             onClick={closeDrawer}

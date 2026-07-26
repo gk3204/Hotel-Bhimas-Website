@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
 import AdminSidebar from "../components/admin/AdminSidebar";
+import GlobalSearch from "../components/admin/GlobalSearch";
 import RouteErrorBoundary from "../components/RouteErrorBoundary";
 import { NAV_ITEMS } from "../components/admin/adminNav";
 import { getComplianceConfig } from "../api/compliance";
@@ -58,6 +59,7 @@ const AdminLayout = () => {
   return (
     <div className="min-h-screen bg-[#0F172A] text-white">
       <AdminSidebar />
+      <GlobalSearch />
       {/* Content sits to the right of the fixed sidebar on md+, full-width on mobile. */}
       <div className="md:ml-64 min-w-0">
         <RouteErrorBoundary key={location.pathname}>
