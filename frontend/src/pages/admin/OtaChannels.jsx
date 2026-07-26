@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { FaGlobe, FaSyncAlt, FaSave, FaEnvelopeOpenText, FaBalanceScale, FaListUl } from "react-icons/fa";
+import { PageShell } from "../../components/admin/BackofficeUI";
 import {
   getChannels, updateChannel, getOtaBookings, getReconciliation,
   getSettlements, createSettlement, getDrafts, confirmDraft, dismissDraft, pollMailbox,
@@ -29,17 +30,11 @@ const OtaChannels = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-6">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-3">
-            <FaGlobe /> OTA Tracking
-          </h1>
-          <p className="text-slate-400">
-            Track MakeMyTrip / Goibibo / Booking.com / Agoda business inside the PMS — commission, net payout,
-            payout reconciliation, and email-parsed booking drafts. (Two-way channel-manager sync is a later phase.)
-          </p>
-        </div>
+    <PageShell
+      icon="🌐"
+      title="OTA Tracking"
+      subtitle="Track MakeMyTrip / Goibibo / Booking.com / Agoda business inside the PMS — commission, net payout, payout reconciliation, and email-parsed booking drafts. (Two-way channel-manager sync is a later phase.)"
+    >
 
         <div className="flex flex-wrap gap-2 mb-6">
           {[
@@ -74,8 +69,7 @@ const OtaChannels = () => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 };
 

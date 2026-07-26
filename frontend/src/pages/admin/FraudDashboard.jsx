@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { PageShell } from "../../components/admin/BackofficeUI";
 import {
   getAlerts, reviewAlert, runReconcile, getReconciliationReport,
   getDigest, getOtps, getConfig,
@@ -98,14 +99,11 @@ const FraudDashboard = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        <div className="mb-6">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            🛡️ Anti-Fraud &amp; Controls
-          </h1>
-          <p className="text-slate-400">Detection alerts, owner approvals, and card reconciliation. Run a sweep to re-check against the latest data.</p>
-        </div>
+    <PageShell
+      icon="🛡️"
+      title="Anti-Fraud & Controls"
+      subtitle="Detection alerts, owner approvals, and card reconciliation. Run a sweep to re-check against the latest data."
+    >
 
         {/* Stat tiles */}
         {summary && (
@@ -345,8 +343,7 @@ const FraudDashboard = () => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 };
 

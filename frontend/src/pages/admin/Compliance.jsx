@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { FaSearch, FaFileCsv, FaFilePdf, FaFileCode, FaPrint, FaSync, FaSave } from "react-icons/fa";
 import * as api from "../../api/compliance";
+import { PageShell } from "../../components/admin/BackofficeUI";
 
 const today = () => new Date().toISOString().slice(0, 10);
 const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
@@ -79,20 +80,12 @@ export default function Compliance() {
   const rows = data?.rows || [];
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        {toast && (
-          <div className="fixed top-6 right-6 z-50 bg-slate-800 border border-[#E5C07B]/40 text-white px-5 py-3 rounded-xl shadow-2xl">
-            {toast}
-          </div>
-        )}
-
-        <div className="mb-6">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            🛡️ Compliance & Tally
-          </h1>
-          <p className="text-slate-400">GST accounting export, police / FRRO registers, live evacuation list and ID-access audit.</p>
-        </div>
+    <PageShell
+      icon="🛡️"
+      title="Compliance & Tally"
+      subtitle="GST accounting export, police / FRRO registers, live evacuation list and ID-access audit."
+      toast={toast}
+    >
 
         {/* Tabs */}
         <div className="flex flex-wrap gap-2 mb-6">
@@ -181,8 +174,7 @@ export default function Compliance() {
                   loading={loading} error={error} count={data?.count} />}
           </>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 }
 
