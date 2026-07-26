@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from "react";
 import { FaSearch, FaFileCsv, FaFilePdf, FaChartBar } from "react-icons/fa";
 import * as api from "../../api/reports";
 import { usePaged, Paginator } from "../../components/admin/Paginator";
+import { PageShell } from "../../components/admin/BackofficeUI";
 
 const fmt = (n) =>
   `₹${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -213,20 +214,12 @@ export default function Reports() {
   const onLastPage = paged.page >= paged.pageCount - 1;
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        {toast && (
-          <div className="fixed top-6 right-6 z-50 bg-slate-800 border border-[#E5C07B]/40 text-white px-5 py-3 rounded-xl shadow-2xl">
-            {toast}
-          </div>
-        )}
-
-        <div className="mb-6">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            📊 Reports
-          </h1>
-          <p className="text-slate-400">Operational & financial reports — filter by date and export to CSV / PDF.</p>
-        </div>
+    <PageShell
+      icon="📊"
+      title="Reports"
+      subtitle="Operational & financial reports — filter by date and export to CSV / PDF."
+      toast={toast}
+    >
 
         {/* Tabs */}
         <div className="flex flex-wrap gap-2 mb-6">
@@ -344,8 +337,7 @@ export default function Reports() {
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </PageShell>
   );
 }
 

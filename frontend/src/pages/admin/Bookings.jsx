@@ -1,4 +1,5 @@
 import React, { useEffect, useState } from "react";
+import { PageShell } from "../../components/admin/BackofficeUI";
 import {
   getBookings,
   getBookingById,
@@ -200,16 +201,7 @@ const Bookings = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            📋 Bookings Management
-          </h1>
-          <p className="text-slate-400">Manage and track all hotel bookings</p>
-        </div>
+    <PageShell icon="📋" title="Bookings Management" subtitle="Manage and track all hotel bookings">
 
         {/* Filter Section */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-8 backdrop-blur">
@@ -720,8 +712,7 @@ const Bookings = () => {
           </div>
         )}
 
-      </div>
-    </div>
+    </PageShell>
   );
 };
 

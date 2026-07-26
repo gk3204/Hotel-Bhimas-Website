@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { getAllPayments } from "../../api/payments";
 import { FaSync } from "react-icons/fa";
 import { usePaged, Paginator } from "../../components/admin/Paginator";
+import { PageShell } from "../../components/admin/BackofficeUI";
 
 const Payments = () => {
   const [payments, setPayments] = useState([]);
@@ -69,15 +70,7 @@ const Payments = () => {
     .reduce((sum, p) => sum + parseFloat(p.amount || 0), 0);
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            💰 Payments Management
-          </h1>
-          <p className="text-slate-400">Track all payment transactions</p>
-        </div>
+    <PageShell icon="💰" title="Payments Management" subtitle="Track all payment transactions">
 
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -220,8 +213,7 @@ const Payments = () => {
             <Paginator {...paged} />
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 };
 

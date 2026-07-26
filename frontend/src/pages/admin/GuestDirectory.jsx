@@ -9,6 +9,7 @@ import {
 } from "../../api/crm";
 import { FaSearch, FaStar, FaBan, FaEdit, FaGift } from "react-icons/fa";
 import { usePaged, Paginator } from "../../components/admin/Paginator";
+import { PageShell } from "../../components/admin/BackofficeUI";
 
 const SEGMENTS = [
   { key: "all", label: "All guests" },
@@ -116,15 +117,7 @@ const GuestDirectory = () => {
   };
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-900 via-slate-800 to-slate-900 text-white p-6">
-      <div className="max-w-7xl mx-auto">
-        {/* Header */}
-        <div className="mb-8">
-          <h1 className="text-4xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
-            👤 Guest Directory
-          </h1>
-          <p className="text-slate-400">Recognized customers — profiles, VIP, blacklist and loyalty</p>
-        </div>
+    <PageShell icon="👤" title="Guest Directory" subtitle="Recognized customers — profiles, VIP, blacklist and loyalty">
 
         {/* Controls */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl p-5 mb-6 backdrop-blur">
@@ -376,8 +369,7 @@ const GuestDirectory = () => {
             </div>
           </div>
         )}
-      </div>
-    </div>
+    </PageShell>
   );
 };
 
