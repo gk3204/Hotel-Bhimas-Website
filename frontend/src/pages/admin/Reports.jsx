@@ -147,6 +147,15 @@ const REPORTS = {
 
 const TAB_ORDER = Object.keys(REPORTS);
 
+// Saved report views — the owner's recurring reports (tab + date range + grouping) kept in the browser.
+const VIEWS_KEY = "admin.reports.views";
+const loadViews = () => {
+  try { return JSON.parse(localStorage.getItem(VIEWS_KEY)) || []; } catch { return []; }
+};
+const persistViews = (v) => {
+  try { localStorage.setItem(VIEWS_KEY, JSON.stringify(v)); } catch { /* ignore quota */ }
+};
+
 export default function Reports() {
   const [tab, setTab] = useState("occupancy");
   const [range, setRange] = useState({ from: daysAgo(29), to: today() });
@@ -155,11 +164,36 @@ export default function Reports() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
+  const [views, setViews] = useState(loadViews);
+  const [viewName, setViewName] = useState("");
 
   const cfg = REPORTS[tab];
   const showToast = (m) => {
     setToast(m);
     setTimeout(() => setToast(""), 3500);
+  };
+
+  const saveCurrentView = () => {
+    const name = viewName.trim();
+    if (!name) return;
+    const v = { name, tab, from: range.from, to: range.to, groupBy };
+    const next = [...views.filter((x) => x.name !== name), v];
+    setViews(next);
+    persistViews(next);
+    setViewName("");
+    showToast(`Saved view “${name}”`);
+  };
+  const applyView = (v) => {
+    setData(null);
+    setError("");
+    setTab(v.tab);
+    setRange({ from: v.from, to: v.to });
+    if (v.groupBy) setGroupBy(v.groupBy);
+  };
+  const deleteView = (name) => {
+    const next = views.filter((x) => x.name !== name);
+    setViews(next);
+    persistViews(next);
   };
 
   const params = useMemo(() => {
@@ -242,6 +276,31 @@ export default function Reports() {
               {REPORTS[k].label}
             </button>
           ))}
+        </div>
+
+        {/* Saved views */}
+        <div className="flex flex-wrap items-center gap-2 mb-6">
+          {views.map((v) => (
+            <span key={v.name}
+              className="inline-flex items-center gap-1 bg-slate-800/60 border border-slate-700 rounded-lg pl-3 pr-1 py-1 text-sm">
+              <button onClick={() => applyView(v)} className="text-slate-200 hover:text-[#FCD34D] font-medium">{v.name}</button>
+              <button onClick={() => deleteView(v.name)} aria-label={`Delete ${v.name}`}
+                className="text-slate-500 hover:text-red-400 px-1 leading-none">×</button>
+            </span>
+          ))}
+          <span className="inline-flex items-center gap-1">
+            <input
+              value={viewName}
+              onChange={(e) => setViewName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && saveCurrentView()}
+              placeholder="Save current view as…"
+              className="px-3 py-1.5 text-sm bg-slate-900/50 border border-slate-600 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-[#E5C07B] w-44"
+            />
+            <button onClick={saveCurrentView} disabled={!viewName.trim()}
+              className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 disabled:opacity-40 text-white text-sm font-semibold transition">
+              Save view
+            </button>
+          </span>
         </div>
 
         {/* Filter card */}
