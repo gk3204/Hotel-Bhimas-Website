@@ -336,6 +336,20 @@ export function Modal({ title, onClose, children, wide = false }) {
   );
 }
 
+// Small ⓘ with a CSS-only hover tooltip — for explaining owner-facing jargon (GST, RevPAR, outstanding…).
+export function InfoTip({ text, className = "" }) {
+  return (
+    <span className={`relative inline-flex items-center group align-middle ml-1 ${className}`}>
+      <span className="cursor-help text-slate-400 group-hover:text-[#E5C07B] w-4 h-4 inline-flex items-center justify-center rounded-full border border-slate-500 text-[10px] font-bold leading-none transition">
+        i
+      </span>
+      <span className="pointer-events-none absolute left-1/2 -translate-x-1/2 bottom-full mb-2 w-56 z-[60] opacity-0 group-hover:opacity-100 transition bg-slate-900 border border-slate-600 text-slate-200 text-xs rounded-lg px-3 py-2 shadow-2xl normal-case font-normal text-left">
+        {text}
+      </span>
+    </span>
+  );
+}
+
 export function Toast({ message }) {
   if (!message) return null;
   return (

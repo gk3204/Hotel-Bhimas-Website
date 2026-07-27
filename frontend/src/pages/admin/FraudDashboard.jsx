@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell, InfoTip } from "../../components/admin/BackofficeUI";
 import {
   getAlerts, reviewAlert, runReconcile, getReconciliationReport,
   getDigest, getOtps, getConfig,
@@ -108,10 +108,13 @@ const FraudDashboard = () => {
         {/* Stat tiles */}
         {summary && (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-6">
-            <Stat label="Open Alerts" value={summary.open} highlight={summary.open > 0} />
+            <Stat label="Open Alerts" value={summary.open} highlight={summary.open > 0}
+              tip="Detected control breaches not yet reviewed — e.g. a card cut without a matching payment." />
             <Stat label="High Severity" value={summary.high_severity} />
-            <Stat label="Cleaning Too Long" value={summary.cleaning_too_long} />
-            <Stat label="Pending Approvals" value={summary.pending_otp} />
+            <Stat label="Cleaning Too Long" value={summary.cleaning_too_long}
+              tip="Rooms stuck in 'cleaning' beyond the configured limit — a sign a room may be used off-book." />
+            <Stat label="Pending Approvals" value={summary.pending_otp}
+              tip="Sensitive actions (voids, refunds, discounts) awaiting an owner OTP approval." />
           </div>
         )}
 
@@ -366,9 +369,9 @@ const Select = ({ label, options, ...props }) => (
   </div>
 );
 
-const Stat = ({ label, value, sub, highlight }) => (
+const Stat = ({ label, value, sub, highlight, tip }) => (
   <div className={`rounded-2xl border p-5 ${highlight ? "bg-[#E5C07B]/10 border-[#E5C07B]/40" : "bg-slate-800/50 border-slate-700"}`}>
-    <p className="text-slate-400 text-sm mb-1">{label}</p>
+    <p className="text-slate-400 text-sm mb-1">{label}{tip && <InfoTip text={tip} />}</p>
     <p className={`text-2xl font-bold ${highlight ? "text-[#FCD34D]" : "text-white"}`}>{value}</p>
     {sub && <p className="text-slate-500 text-xs mt-1">{sub}</p>}
   </div>

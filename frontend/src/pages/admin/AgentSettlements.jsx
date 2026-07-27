@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell, InfoTip } from "../../components/admin/BackofficeUI";
 import { useConfirm } from "../../components/ConfirmDialog";
 import { getSettlement, getAgentSettlement, recordPayout, recordBulkPayouts } from "../../api/settlements";
 import { FaMoneyBillWave, FaEye, FaSearch } from "react-icons/fa";
@@ -137,9 +137,12 @@ const AgentSettlements = () => {
         {totals && (
           <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
             <Stat label="Room Revenue" value={fmt(totals.room_revenue)} />
-            <Stat label="Commission Accrued" value={fmt(totals.commission_accrued)} />
-            <Stat label="Commission Paid" value={fmt(totals.commission_paid)} />
-            <Stat label="Outstanding" value={fmt(totals.outstanding)} highlight />
+            <Stat label="Commission Accrued" value={fmt(totals.commission_accrued)}
+              tip="Total commission earned by agents on their bookings in this period." />
+            <Stat label="Commission Paid" value={fmt(totals.commission_paid)}
+              tip="Payouts already recorded to agents in this period." />
+            <Stat label="Outstanding" value={fmt(totals.outstanding)} highlight
+              tip="What you still owe agents: commission accrued minus commission already paid." />
           </div>
         )}
 
@@ -328,9 +331,9 @@ const Field = ({ label, ...props }) => (
   </div>
 );
 
-const Stat = ({ label, value, highlight }) => (
+const Stat = ({ label, value, highlight, tip }) => (
   <div className={`rounded-2xl border p-5 ${highlight ? "bg-[#E5C07B]/10 border-[#E5C07B]/40" : "bg-slate-800/50 border-slate-700"}`}>
-    <p className="text-slate-400 text-sm mb-1">{label}</p>
+    <p className="text-slate-400 text-sm mb-1">{label}{tip && <InfoTip text={tip} />}</p>
     <p className={`text-2xl font-bold ${highlight ? "text-[#FCD34D]" : "text-white"}`}>{value}</p>
   </div>
 );
