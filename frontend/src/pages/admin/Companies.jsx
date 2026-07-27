@@ -148,7 +148,7 @@ function CompaniesTab({ companies, loading, error, search, setSearch, reload, sh
             { label: "Status", sort: (c) => (c.is_active ? 1 : 0) },
             "",
           ]}
-          rows={companies} loading={loading} error={error}
+          rows={companies} loading={loading} error={error} onRetry={reload}
           empty="No corporate accounts yet. Add one to start billing employers directly."
           renderRow={(c) => [
             <button key="n" onClick={() => onOpenLedger(c.company_id)}

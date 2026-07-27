@@ -125,7 +125,7 @@ function ItemsTab({ showToast }) {
             { label: "Status", sort: (it) => (it.is_active ? 1 : 0) },
             "",
           ]}
-          rows={items} loading={loading} error={error}
+          rows={items} loading={loading} error={error} onRetry={load}
           empty="No stock items yet. Add minibar drinks, toiletries and supplies here."
           renderRow={(it) => [
             <div key="n">

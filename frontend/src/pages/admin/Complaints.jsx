@@ -172,7 +172,7 @@ function ListTab({ mode, showToast }) {
             { label: "Logged", sort: (c) => c.created_at },
             "",
           ]}
-          rows={rows} loading={loading} error={error}
+          rows={rows} loading={loading} error={error} onRetry={load}
           empty={mode === "breached" ? "No SLA breaches. Everything is on track." : "No complaints here."}
           renderRow={(c) => [
             isResolvable(c)

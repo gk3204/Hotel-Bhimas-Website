@@ -142,7 +142,7 @@ function VendorsTab({ vendors, loading, error, reload, search, setSearch, catego
             { label: "Status", sort: (v) => (v.is_active ? 1 : 0) },
             "",
           ]}
-          rows={vendors} loading={loading} error={error}
+          rows={vendors} loading={loading} error={error} onRetry={reload}
           empty="No vendors yet. Add your laundry, lock-AMC and linen suppliers here."
           renderRow={(v) => [
             <span key="n" className="font-semibold text-slate-100">{v.name}</span>,
