@@ -274,10 +274,18 @@ function MenuTab({ showToast }) {
 function MenuForm({ value, onClose, onSaved, showToast }) {
   const [form, setForm] = useState(value);
   const [saving, setSaving] = useState(false);
+  const [errors, setErrors] = useState({});
   const isEdit = !!value.id;
+  const set = (patch, clearKey) => {
+    setForm((f) => ({ ...f, ...patch }));
+    if (clearKey) setErrors((er) => ({ ...er, [clearKey]: undefined }));
+  };
   const save = async () => {
-    if (!form.name || form.name.trim().length < 2) { showToast("A name is required"); return; }
-    if (form.price === "" || Number(form.price) < 0) { showToast("Enter a price"); return; }
+    const errs = {};
+    if (!form.name || form.name.trim().length < 2) errs.name = "Enter a name (at least 2 characters).";
+    if (form.price === "" || form.price == null || Number(form.price) < 0) errs.price = "Enter a valid price.";
+    setErrors(errs);
+    if (Object.keys(errs).length) return;
     setSaving(true);
     try {
       const payload = {
@@ -296,11 +304,12 @@ function MenuForm({ value, onClose, onSaved, showToast }) {
   return (
     <Modal title={isEdit ? `Edit ${value.name}` : "New menu item"} onClose={onClose} wide>
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <Field label="Name *" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+        <Field label="Name *" value={form.name} error={errors.name}
+          onChange={(e) => set({ name: e.target.value }, "name")} />
         <SelectField label="Category" value={form.category}
           onChange={(e) => setForm({ ...form, category: e.target.value })} options={MENU_CATEGORIES} />
-        <Field label="Price ₹ *" type="number" value={form.price}
-          onChange={(e) => setForm({ ...form, price: e.target.value })} />
+        <Field label="Price ₹ *" type="number" value={form.price} error={errors.price}
+          onChange={(e) => set({ price: e.target.value }, "price")} />
         <Field label="GST %" type="number" value={form.gst_percent ?? ""}
           onChange={(e) => setForm({ ...form, gst_percent: e.target.value })} />
         <Field label="Sort order" type="number" value={form.sort_order}

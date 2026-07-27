@@ -25,20 +25,27 @@ export const fmtDate = (iso) => {
   return d.length === 3 ? `${d[2]}-${d[1]}-${d[0]}` : String(iso);
 };
 
-export function Field({ label, hint, children, ...props }) {
+// Red-border + red focus-ring override for an invalid field (`!` forces it over inputCls's defaults).
+const errorCls = `${inputCls} !border-red-500 focus:!border-red-500 focus:!ring-red-500/20`;
+
+export function Field({ label, hint, error, children, ...props }) {
   return (
     <div className="flex flex-col">
-      <label className="mb-2 text-sm font-semibold text-slate-300">{label}</label>
-      {children || <input {...props} className={inputCls} />}
-      {hint && <span className="mt-1 text-xs text-slate-500">{hint}</span>}
+      {label && <label className="mb-2 text-sm font-semibold text-slate-300">{label}</label>}
+      {children || <input {...props} className={error ? errorCls : inputCls} />}
+      {error ? (
+        <span className="mt-1 text-xs text-red-400">{error}</span>
+      ) : (
+        hint && <span className="mt-1 text-xs text-slate-500">{hint}</span>
+      )}
     </div>
   );
 }
 
-export function SelectField({ label, options, hint, ...props }) {
+export function SelectField({ label, options, hint, error, ...props }) {
   return (
-    <Field label={label} hint={hint}>
-      <select {...props} className={inputCls}>
+    <Field label={label} hint={hint} error={error}>
+      <select {...props} className={error ? errorCls : inputCls}>
         {options.map((o) =>
           typeof o === "string" ? (
             <option key={o} value={o}>{o}</option>
