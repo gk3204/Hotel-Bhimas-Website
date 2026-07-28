@@ -113,6 +113,19 @@ export default function OwnerDashboard() {
           </div>
         ) : (
           <>
+            {/* Overdue alert: in-house guests past their checkout date */}
+            {dash?.overdue_count > 0 && (
+              <div className="bg-red-500/15 border border-red-500/40 text-red-200 px-5 py-3 rounded-xl mb-6">
+                <span className="font-semibold">⚠ {dash.overdue_count} guest(s) past checkout still in-house</span>
+                {dash.overdue?.length > 0 && (
+                  <span className="text-red-300/80 text-sm ml-2">
+                    — {dash.overdue.slice(0, 5).map((o) => `${o.guest_name || "?"} (out ${o.check_out})`).join(", ")}
+                    {dash.overdue.length > 5 ? "…" : ""}
+                  </span>
+                )}
+              </div>
+            )}
+
             {/* KPI tiles */}
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">
               <Kpi icon={<FaBed />} label="Occupancy"

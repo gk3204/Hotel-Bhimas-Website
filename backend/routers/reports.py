@@ -760,6 +760,14 @@ def owner_dashboard(db: Session = Depends(get_db)):
         open_alerts.append({"id": a.id, "type": a.type, "severity": a.severity,
                             "detected_at": a.detected_at.isoformat() if a.detected_at else None})
 
+    # Overdue = still checked in but the check-out date has already passed (should have left).
+    overdue = []
+    for b in (db.query(Booking).filter(Booking.status == "checked_in", Booking.check_out < today)
+              .order_by(Booking.check_out).all()):
+        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
+        overdue.append({"booking_id": b.booking_id, "guest_name": guest.name if guest else None,
+                        "check_out": str(b.check_out)})
+
     return {
         "date": str(today),
         "occupancy": digest["occupancy"],
@@ -769,6 +777,8 @@ def owner_dashboard(db: Session = Depends(get_db)):
         "arrivals": digest["arrivals"],
         "departures": digest["departures"],
         "pending_arrivals": pending,
+        "overdue": overdue,
+        "overdue_count": len(overdue),
         "open_alerts_count": digest["open_alerts"],
         "high_severity_alerts": digest["high_severity_alerts"],
         "open_alerts": open_alerts,
