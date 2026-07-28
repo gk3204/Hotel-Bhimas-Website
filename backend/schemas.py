@@ -2,6 +2,11 @@ from typing import List, Optional
 from pydantic import BaseModel, Field, EmailStr, field_validator
 from datetime import date, time, datetime
 
+# Editable category families (F-A) accept any lowercase slug here; the fixed enum-regexes
+# were replaced by this permissive shape so admins can add options, and membership is
+# enforced against the configured list at the endpoint (utils.settings.validate_category).
+CATEGORY_SLUG_RE = "^[a-z0-9_]{2,40}$"
+
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8, max_length=100)
@@ -503,7 +508,7 @@ class ExpenseCreate(BaseModel):
     """Log a petty-cash expense against the station's open shift."""
     station_id: Optional[str] = Field(None, max_length=50)
     amount: float = Field(..., gt=0)
-    category: str = Field(..., pattern="^(supplies|staff|vendor|misc)$")
+    category: str = Field(..., pattern=CATEGORY_SLUG_RE)   # membership checked against the editable list at the endpoint
     description: str = Field(..., min_length=2, max_length=200)
     receipt_ref: Optional[str] = Field(None, max_length=200)   # text reference only (photo -> prompt 14)
     client_ref: Optional[str] = Field(None, max_length=80)     # idempotency for double-submit
@@ -566,7 +571,7 @@ class MaintenanceTicketCreate(BaseModel):
     """Raise a maintenance ticket. room_id optional (common areas); source derived from role."""
     room_id: Optional[int] = None
     area: Optional[str] = Field(None, max_length=100)
-    category: str = Field(default="other", pattern="^(electrical|plumbing|carpentry|appliance|lock|other)$")
+    category: str = Field(default="other", pattern=CATEGORY_SLUG_RE)   # membership checked at the endpoint
     issue: str = Field(..., min_length=3, max_length=500)
     priority: str = Field(default="normal", pattern="^(low|normal|high|urgent)$")
     booking_id: Optional[int] = None
@@ -1020,7 +1025,7 @@ class StockConfigUpdate(BaseModel):
 # =====================================================================
 # GUEST COMPLAINTS (prompt 18c, slice 11) — a view over source='guest' tickets
 # =====================================================================
-COMPLAINT_CATEGORY_RE = "^(cleanliness|noise|maintenance|service|billing|amenities|staff|other)$"
+COMPLAINT_CATEGORY_RE = CATEGORY_SLUG_RE   # editable list (F-A); membership checked at the endpoint
 COMPLAINT_PRIORITY_RE = "^(low|normal|high|urgent)$"
 
 
@@ -1077,7 +1082,7 @@ class ComplaintConfigUpdate(BaseModel):
 # =====================================================================
 # GUEST EXTRAS / IN-ROOM QR PORTAL (prompt 18d, slice 10)
 # =====================================================================
-MENU_CATEGORY_RE = "^(food|beverage|snack|service)$"
+MENU_CATEGORY_RE = CATEGORY_SLUG_RE   # editable list (F-A); membership checked at the endpoint
 
 
 class RoomServiceLine(BaseModel):

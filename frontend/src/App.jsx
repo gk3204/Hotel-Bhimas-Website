@@ -60,6 +60,7 @@ import Inventory from "./pages/admin/Inventory";
 import Complaints from "./pages/admin/Complaints";
 import GuestPortalAdmin from "./pages/admin/GuestPortal";
 import TwoFactorSettings from "./pages/admin/TwoFactorSettings";
+import Settings from "./pages/admin/Settings";
 
 //Reception Pages
 import ReceptionDashboard from "./pages/reception/ReceptionDashboard";
@@ -143,6 +144,7 @@ function App() {
         <Route path="/admin/complaints" element={<Complaints />} />
         <Route path="/admin/guest-portal" element={<GuestPortalAdmin />} />
         <Route path="/admin/security-2fa" element={<TwoFactorSettings />} />
+        <Route path="/admin/settings" element={<Settings />} />
       </Route>
 
       {/* Reception LAYOUT (Protected) */}

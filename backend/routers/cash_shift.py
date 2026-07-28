@@ -33,7 +33,7 @@ from models import CashShift, Expense, Payment, User, FraudAlert
 from schemas import ShiftOpenRequest, ExpenseCreate, ShiftCloseRequest, CashConfigUpdate
 from utils.auth_utils import require_reception_or_admin, require_admin
 from utils.audit import write_audit, _resolve_user_id
-from utils.settings import (get_cash_config, set_setting,
+from utils.settings import (get_cash_config, set_setting, validate_category,
                             CASH_CYCLE_KEY, CASH_VARIANCE_THRESHOLD_KEY, CASH_VARIANCE_ALERT_KEY)
 from utils.pdf_generator import generate_shift_report_pdf
 
@@ -241,13 +241,14 @@ def add_expense(data: ExpenseCreate, db: Session = Depends(get_db),
             shift = db.query(CashShift).filter(CashShift.id == existing.shift_id).first()
             return {"expense_id": existing.id, "duplicate": True,
                     "shift": _serialize(db, shift) if shift else None}
+    category = validate_category(db, "expense", data.category)   # against the editable list (F-A)
     shift = _open_shift(db, data.station_id)
     if not shift:
         raise HTTPException(status_code=409,
                             detail="No cash shift is open — open a shift before logging an expense.")
     exp = Expense(
         shift_id=shift.id,
-        category=data.category,
+        category=category,
         description=data.description,
         amount=Decimal(str(round(data.amount, 2))),
         receipt_url=data.receipt_ref,

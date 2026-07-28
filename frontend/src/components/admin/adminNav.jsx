@@ -7,7 +7,7 @@ import {
   FaMoneyBillWave, FaCashRegister, FaChartBar,
   FaShieldAlt, FaClipboardCheck, FaExclamationTriangle, FaHistory,
   FaBuilding, FaTruck, FaBoxes,
-  FaUserShield, FaUserCog, FaUserCheck, FaKey,
+  FaUserShield, FaUserCog, FaUserCheck, FaKey, FaCog,
 } from "react-icons/fa";
 
 export const NAV_GROUPS = [
@@ -75,6 +75,7 @@ export const NAV_GROUPS = [
       { to: "/admin/users", label: "Users", icon: FaUserCog },
       { to: "/admin/user-check", label: "User Check", icon: FaUserCheck },
       { to: "/admin/security-2fa", label: "2FA Security", icon: FaKey },
+      { to: "/admin/settings", label: "Settings", icon: FaCog },
     ],
   },
 ];

@@ -38,6 +38,9 @@ from routers import portal
 # --- Admin audit-log viewer (read-only surface over the append-only audit trail) ---
 from routers import audit
 
+# --- Editable operational settings: category lists + reg-slip rules (F-A backbone) ---
+from routers import opsettings
+
 # Load environment variables
 load_dotenv()
 
@@ -346,6 +349,7 @@ app.include_router(stock.router)
 app.include_router(complaints.router)
 app.include_router(portal.router)
 app.include_router(audit.router)
+app.include_router(opsettings.router)
 
 # -------------------------
 # Health Check

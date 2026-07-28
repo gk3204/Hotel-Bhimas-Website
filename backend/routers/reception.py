@@ -1113,6 +1113,15 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
 
 
 # ---- Registration slip (printed at check-in, guest signs it) ----
+def _reg_rules(db) -> str:
+    """Admin-editable rules/terms text for the reg-slip (F-A). Defensive: never fails the slip."""
+    try:
+        from utils.settings import get_registration_rules
+        return get_registration_rules(db)
+    except Exception:
+        return ""
+
+
 @router.get("/checkin/{booking_id}/slip")
 def registration_slip(booking_id: int, db: Session = Depends(get_db),
                       user=Depends(require_reception_or_admin)):
@@ -1148,6 +1157,8 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
         "grand_total": float(booking.grand_total or 0),
         "paid_total": total_paid(db, booking_id),
         "balance": float(folio.balance or 0) if folio else None,
+        # Admin-editable rules/terms printed on the slip (FE-2 / F-A settings backbone).
+        "registration_rules": _reg_rules(db),
     }
     try:
         pdf_path = generate_registration_slip_pdf(slip_data)

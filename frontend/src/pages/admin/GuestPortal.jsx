@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { FaCheck, FaPlus, FaSave, FaSearch, FaTimes } from "react-icons/fa";
 import * as api from "../../api/portal";
+import { getCategories } from "../../api/settings";
 import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
@@ -275,6 +276,13 @@ function MenuForm({ value, onClose, onSaved, showToast }) {
   const [form, setForm] = useState(value);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState({});
+  // Categories are admin-editable (F-A) — load the configured list, fall back to the shipped defaults.
+  const [categories, setCategories] = useState(MENU_CATEGORIES);
+  useEffect(() => {
+    getCategories()
+      .then((d) => { if (d?.families?.menu?.length) setCategories(d.families.menu); })
+      .catch(() => { /* keep defaults */ });
+  }, []);
   const isEdit = !!value.id;
   const set = (patch, clearKey) => {
     setForm((f) => ({ ...f, ...patch }));
@@ -307,7 +315,7 @@ function MenuForm({ value, onClose, onSaved, showToast }) {
         <Field label="Name *" value={form.name} error={errors.name}
           onChange={(e) => set({ name: e.target.value }, "name")} />
         <SelectField label="Category" value={form.category}
-          onChange={(e) => setForm({ ...form, category: e.target.value })} options={MENU_CATEGORIES} />
+          onChange={(e) => setForm({ ...form, category: e.target.value })} options={categories} />
         <Field label="Price ₹ *" type="number" value={form.price} error={errors.price}
           onChange={(e) => set({ price: e.target.value }, "price")} />
         <Field label="GST %" type="number" value={form.gst_percent ?? ""}

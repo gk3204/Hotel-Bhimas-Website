@@ -683,9 +683,21 @@ def generate_registration_slip_pdf(slip_data):
 
     terms_style = ParagraphStyle(name="SlipTerms", parent=styles["Normal"],
                                  fontSize=8, textColor=colors.grey)
+    # Admin-editable rules/terms (FE-2). The caller passes the current text from
+    # utils.settings.get_registration_rules(); fall back to a sensible default line.
+    rules_text = (slip_data.get("registration_rules") or "").strip()
+    if rules_text:
+        rules_style = ParagraphStyle(name="SlipRules", parent=styles["Normal"],
+                                     fontSize=7.5, textColor=colors.grey, leading=10)
+        elements.append(Paragraph("<b>Terms of stay</b>", terms_style))
+        for line in rules_text.splitlines():
+            line = line.strip()
+            if line:
+                elements.append(Paragraph(line.replace("&", "&amp;"), rules_style))
+        elements.append(Spacer(1, 0.12 * inch))
     elements.append(Paragraph(
-        "I confirm the above details are correct. I agree to the hotel's terms of stay: "
-        f"checkout by the hotel's checkout time on {_d(slip_data.get('check_out'))}; "
+        "I confirm the above details are correct and agree to the terms of stay above. "
+        f"Checkout by the hotel's checkout time on {_d(slip_data.get('check_out'))}; "
         "key cards remain hotel property; charges signed to the room are payable at checkout.",
         terms_style))
     elements.append(Spacer(1, 0.6 * inch))

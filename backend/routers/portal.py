@@ -383,7 +383,9 @@ def list_menu(available_only: bool = Query(False), db: Session = Depends(get_db)
 @router.post("/menu-items", dependencies=[Depends(require_admin)])
 def create_menu_item(data: MenuItemCreate, db: Session = Depends(get_db), user=Depends(require_admin)):
     try:
-        item = MenuItem(**data.model_dump(), created_by=_resolve_user_id(db, user))
+        payload = data.model_dump()
+        payload["category"] = app_settings.validate_category(db, "menu", data.category)   # editable list (F-A)
+        item = MenuItem(**payload, created_by=_resolve_user_id(db, user))
         db.add(item)
         db.commit()
         db.refresh(item)
@@ -406,6 +408,8 @@ def update_menu_item(item_id: int, data: MenuItemUpdate, db: Session = Depends(g
         if not item:
             raise HTTPException(status_code=404, detail="Menu item not found")
         changes = data.model_dump(exclude_unset=True)
+        if "category" in changes and changes["category"] is not None:
+            changes["category"] = app_settings.validate_category(db, "menu", changes["category"])
         for k, v in changes.items():
             setattr(item, k, v)
         item.updated_by = _resolve_user_id(db, user)

@@ -157,6 +157,7 @@ def create_complaint(data: ComplaintCreate, db: Session = Depends(get_db),
     stamps its SLA due-times. Idempotent on client_ref (via create_guest_ticket)."""
     try:
         from routers.maintenance import create_guest_ticket
+        category = app_settings.validate_category(db, "complaint", data.category)   # editable list (F-A)
         if data.room_id is not None and not db.query(Room).filter(Room.room_id == data.room_id).first():
             raise HTTPException(status_code=404, detail="Room not found")
         if data.booking_id is not None and not db.query(Booking).filter(

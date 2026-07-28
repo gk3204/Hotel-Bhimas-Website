@@ -11,7 +11,9 @@ Values are stored as text and typed by the accessor. Defaults are returned when 
 This also unblocks prompt 11's deferred "live-editable thresholds" follow-up — future prompts can
 migrate more env flags here.
 """
+import json
 import logging
+import re
 from datetime import datetime
 
 from models import AppSetting
@@ -530,3 +532,90 @@ def get_portal_config(db) -> dict:
         "wifi_ssid": (get_setting(db, WIFI_SSID_KEY, "") or "").strip(),
         "wifi_voucher_mode": mode,
     }
+
+
+# =====================================================================
+# Editable option-lists / taxonomies + printed text (F-A settings backbone).
+# The owner-facing category families below were hard-coded as Pydantic regexes in
+# schemas.py. They now live here as JSON lists so an admin can add/rename options
+# WITHOUT a redeploy. The schemas were loosened to a slug pattern; list membership
+# is enforced in the create endpoints via validate_category(). Defaults mirror the
+# original regex values, so a fresh DB behaves exactly as before.
+# =====================================================================
+CATEGORY_FAMILIES = {
+    "expense":     ["supplies", "staff", "vendor", "misc"],
+    "maintenance": ["electrical", "plumbing", "carpentry", "appliance", "lock", "other"],
+    "complaint":   ["cleanliness", "noise", "maintenance", "service", "billing", "amenities", "staff", "other"],
+    "menu":        ["food", "beverage", "snack", "service"],
+}
+_CATEGORY_KEY_PREFIX = "categories_"     # + family; stored as a JSON array of slugs
+_SLUG_RE = re.compile(r"^[a-z0-9_]{2,40}$")
+
+# Registration-slip rules/terms printed on the guest reg-slip (FE-2). Admin-editable text.
+REGISTRATION_RULES_KEY = "registration_rules_text"
+_REGISTRATION_RULES_DEFAULT = (
+    "1. Check-out time is 24 hours from the time of check-in unless otherwise agreed.\n"
+    "2. The room key-card must be returned at check-out; a lost/unreturned card is chargeable.\n"
+    "3. A valid government photo ID is mandatory for every guest staying in the room.\n"
+    "4. The hotel is not responsible for cash/valuables not deposited at the reception.\n"
+    "5. Guests are liable for any damage to hotel property during their stay."
+)
+
+
+def _clean_slug(v) -> str | None:
+    """Normalise a user-supplied category to a safe slug, or None if unusable."""
+    s = str(v or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return s if _SLUG_RE.match(s) else None
+
+
+def get_category_list(db, family: str) -> list:
+    """Configured option-list for a category family, else its seed default. Always non-empty."""
+    default = CATEGORY_FAMILIES.get(family, [])
+    raw = get_setting(db, _CATEGORY_KEY_PREFIX + family)
+    if raw:
+        try:
+            items = [c for c in (json.loads(raw) or []) if isinstance(c, str) and _SLUG_RE.match(c)]
+            if items:
+                return items
+        except (ValueError, TypeError):
+            pass
+    return list(default)
+
+
+def get_all_category_lists(db) -> dict:
+    """{family: [slugs]} for every editable family (current value or default)."""
+    return {fam: get_category_list(db, fam) for fam in CATEGORY_FAMILIES}
+
+
+def set_category_list(db, family: str, items, user=None, commit=False) -> list:
+    """Replace a family's option-list. Slugs are cleaned/deduped and must stay non-empty."""
+    if family not in CATEGORY_FAMILIES:
+        raise ValueError(f"Unknown category family: {family}")
+    cleaned, seen = [], set()
+    for it in (items or []):
+        s = _clean_slug(it)
+        if s and s not in seen:
+            seen.add(s)
+            cleaned.append(s)
+    if not cleaned:
+        raise ValueError("A category list cannot be empty.")
+    set_setting(db, _CATEGORY_KEY_PREFIX + family, json.dumps(cleaned), user=user, commit=commit)
+    return cleaned
+
+
+def validate_category(db, family: str, value: str) -> str:
+    """Return the normalised value if it's in the family's configured list, else raise 422.
+    Called by create endpoints after their schema loosened its regex to a plain slug."""
+    from fastapi import HTTPException
+    allowed = get_category_list(db, family)
+    v = (value or "").strip().lower()
+    if v in allowed:
+        return v
+    raise HTTPException(
+        status_code=422,
+        detail=f"'{value}' is not a valid {family} category. Allowed: {', '.join(allowed)}")
+
+
+def get_registration_rules(db) -> str:
+    """Admin-editable rules/terms text printed on the guest registration slip (FE-2)."""
+    return (get_setting(db, REGISTRATION_RULES_KEY, _REGISTRATION_RULES_DEFAULT) or "").strip()

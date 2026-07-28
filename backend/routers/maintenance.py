@@ -25,6 +25,7 @@ from schemas import (MaintenanceTicketCreate, TicketAssignRequest, TicketItemCre
 from utils.auth_utils import (get_current_user, require_admin, require_maintenance_or_admin,
                               require_roles)
 from utils.audit import write_audit, _resolve_user_id
+from utils.settings import validate_category
 from routers.cash_shift import _open_shift
 
 logger = logging.getLogger(__name__)
@@ -148,9 +149,10 @@ def create_ticket(data: MaintenanceTicketCreate,
     if data.room_id is not None:
         if not db.query(Room).filter(Room.room_id == data.room_id).first():
             raise HTTPException(status_code=404, detail="Room not found")
+    category = validate_category(db, "maintenance", data.category)   # against the editable list (F-A)
 
     t = MaintenanceTicket(
-        room_id=data.room_id, area=data.area, category=data.category, issue=data.issue,
+        room_id=data.room_id, area=data.area, category=category, issue=data.issue,
         priority=data.priority, status="open", booking_id=data.booking_id,
         source=_ROLE_SOURCE.get(user.get("role"), "reception"),
         photo_url=data.photo_ref, raised_by=_resolve_user_id(db, user),
