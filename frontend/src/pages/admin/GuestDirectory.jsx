@@ -275,31 +275,44 @@ const GuestDirectory = () => {
                 </div>
               )}
 
-              {/* edit form */}
-              <div className="px-6 pb-2 grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <Field label="Name" value={selected.form.name} onChange={(v) => setForm(setSelected, "name", v)} />
-                <Field label="Phone" value={selected.form.phone} onChange={(v) => setForm(setSelected, "phone", v)} />
-                <Field label="Email" value={selected.form.email} onChange={(v) => setForm(setSelected, "email", v)} />
-                <Field label="Date of birth" type="date" value={selected.form.dob} onChange={(v) => setForm(setSelected, "dob", v)} />
-                <Field label="Address" value={selected.form.address} onChange={(v) => setForm(setSelected, "address", v)} />
-                <Field label="GSTIN" value={selected.form.gstin} onChange={(v) => setForm(setSelected, "gstin", v)} />
-                <div className="sm:col-span-2">
-                  <label className="mb-2 text-sm font-semibold text-slate-300 block">Notes</label>
-                  <textarea
-                    value={selected.form.notes}
-                    onChange={(e) => setForm(setSelected, "notes", e.target.value)}
-                    rows={2}
-                    className="w-full px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
-                  />
-                </div>
-                <label className="flex items-center gap-2 text-slate-300 text-sm">
-                  <input
-                    type="checkbox"
-                    checked={selected.form.marketing_optin}
-                    onChange={(e) => setForm(setSelected, "marketing_optin", e.target.checked)}
-                  />
-                  Marketing opt-in
-                </label>
+              {/* edit form — grouped into sections */}
+              <div className="px-6 pb-2 space-y-5">
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Contact</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <Field label="Name" value={selected.form.name} onChange={(v) => setForm(setSelected, "name", v)} />
+                    <Field label="Phone" value={selected.form.phone} onChange={(v) => setForm(setSelected, "phone", v)} />
+                    <Field label="Email" value={selected.form.email} onChange={(v) => setForm(setSelected, "email", v)} />
+                    <Field label="Address" value={selected.form.address} onChange={(v) => setForm(setSelected, "address", v)} />
+                  </div>
+                </section>
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Identity &amp; billing</h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <Field label="Date of birth" type="date" value={selected.form.dob} onChange={(v) => setForm(setSelected, "dob", v)} />
+                    <Field label="GSTIN" value={selected.form.gstin} onChange={(v) => setForm(setSelected, "gstin", v)} />
+                  </div>
+                </section>
+                <section>
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Preferences</h3>
+                  <div>
+                    <label className="mb-2 text-sm font-semibold text-slate-300 block">Notes</label>
+                    <textarea
+                      value={selected.form.notes}
+                      onChange={(e) => setForm(setSelected, "notes", e.target.value)}
+                      rows={2}
+                      className="w-full px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+                    />
+                  </div>
+                  <label className="flex items-center gap-2 text-slate-300 text-sm mt-3">
+                    <input
+                      type="checkbox"
+                      checked={selected.form.marketing_optin}
+                      onChange={(e) => setForm(setSelected, "marketing_optin", e.target.checked)}
+                    />
+                    Marketing opt-in
+                  </label>
+                </section>
               </div>
 
               {/* history + complaints */}
