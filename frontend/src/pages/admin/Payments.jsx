@@ -1,16 +1,31 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useMemo, useState } from "react";
 import { getAllPayments } from "../../api/payments";
 import { FaSync } from "react-icons/fa";
 import { usePaged, Paginator } from "../../components/admin/Paginator";
 import { PageShell } from "../../components/admin/BackofficeUI";
 
+const filterInputCls =
+  "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
+
 const Payments = () => {
   const [payments, setPayments] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
-  const [sortField, setSortField] = useState("created_at");
-  const [sortOrder, setSortOrder] = useState("desc");
-  const paged = usePaged(payments, 25);
+  const [statusFilter, setStatusFilter] = useState("");
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
+
+  const filtered = useMemo(
+    () =>
+      payments.filter((p) => {
+        if (statusFilter && p.status !== statusFilter) return false;
+        if (dateFrom && new Date(p.created_at) < new Date(`${dateFrom}T00:00:00`)) return false;
+        if (dateTo && new Date(p.created_at) > new Date(`${dateTo}T23:59:59`)) return false;
+        return true;
+      }),
+    [payments, statusFilter, dateFrom, dateTo]
+  );
+  const paged = usePaged(filtered, 25);
 
   useEffect(() => {
     fetchPayments();
@@ -88,6 +103,37 @@ const Payments = () => {
           </div>
         </div>
 
+        {/* Filters */}
+        <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-5 rounded-2xl mb-6 backdrop-blur">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+            <div className="flex flex-col">
+              <label className="mb-2 text-sm font-semibold text-slate-300">Status</label>
+              <select value={statusFilter} onChange={(e) => setStatusFilter(e.target.value)} className={filterInputCls}>
+                <option value="">All statuses</option>
+                <option value="paid">Paid</option>
+                <option value="pending">Pending</option>
+                <option value="failed">Failed</option>
+                <option value="refunded">Refunded</option>
+              </select>
+            </div>
+            <div className="flex flex-col">
+              <label className="mb-2 text-sm font-semibold text-slate-300">From</label>
+              <input type="date" value={dateFrom} onChange={(e) => setDateFrom(e.target.value)} className={filterInputCls} />
+            </div>
+            <div className="flex flex-col">
+              <label className="mb-2 text-sm font-semibold text-slate-300">To</label>
+              <input type="date" value={dateTo} onChange={(e) => setDateTo(e.target.value)} className={filterInputCls} />
+            </div>
+            <button
+              onClick={() => { setStatusFilter(""); setDateFrom(""); setDateTo(""); }}
+              className="bg-slate-700 hover:bg-slate-600 text-white font-semibold px-4 py-2.5 rounded-lg transition"
+            >
+              Clear filters
+            </button>
+          </div>
+          <p className="text-slate-500 text-xs mt-3">Showing {filtered.length} of {payments.length} transactions.</p>
+        </div>
+
         {/* Error State */}
         {error && (
           <div className="bg-red-500/20 border border-red-500/50 text-red-300 px-6 py-4 rounded-xl mb-8 flex items-center justify-between">
@@ -148,6 +194,9 @@ const Payments = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
+                  {paged.pageItems.length === 0 && (
+                    <tr><td colSpan={9} className="px-6 py-10 text-center text-slate-400">No payments match these filters.</td></tr>
+                  )}
                   {paged.pageItems.map((payment) => (
                     <tr key={payment.payment_id} className="hover:bg-slate-700/30 transition">
                       <td className="px-6 py-4 text-sm font-mono text-[#FCD34D]">
