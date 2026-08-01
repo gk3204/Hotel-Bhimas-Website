@@ -9,9 +9,10 @@ import {
 import { FaPlus, FaEdit, FaTrash } from "react-icons/fa";
 import { useConfirm } from "../../components/ConfirmDialog";
 
-// Role chip styles + labels (matches the backend role vocab: admin|reception|housekeeper|maintenance).
+// Role chip styles + labels (matches the backend role vocab: admin|reception|housekeeper|maintenance|supervisor).
 const ROLE_META = {
   admin: { label: "⚙️ Admin", chip: "bg-red-500/20 text-red-300 border-red-500/30" },
+  supervisor: { label: "🛡️ Supervisor", chip: "bg-purple-500/20 text-purple-300 border-purple-500/30" },
   reception: { label: "🏨 Reception", chip: "bg-blue-500/20 text-blue-300 border-blue-500/30" },
   housekeeper: { label: "🧹 Housekeeper", chip: "bg-amber-500/20 text-amber-300 border-amber-500/30" },
   maintenance: { label: "🔧 Maintenance", chip: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30" },
@@ -157,6 +158,7 @@ const UserManagement = () => {
               >
                 <option value="reception">🏨 Reception</option>
                 <option value="admin">⚙️ Admin</option>
+                <option value="supervisor">🛡️ Supervisor</option>
                 <option value="housekeeper">🧹 Housekeeper</option>
                 <option value="maintenance">🔧 Maintenance</option>
               </select>

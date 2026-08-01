@@ -19,6 +19,7 @@ const AdminLogin = () => {
     localStorage.setItem("adminToken", token);
     const decoded = jwtDecode(token);
     if (decoded.role === "admin") navigate("/admin");
+    else if (decoded.role === "supervisor") navigate("/admin/housekeeping");
     else if (decoded.role === "reception") navigate("/reception");
     else if (decoded.role === "housekeeper" || decoded.role === "maintenance") navigate("/staff");
     else setError("Unauthorized role");

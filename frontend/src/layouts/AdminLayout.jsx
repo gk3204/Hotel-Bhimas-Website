@@ -1,9 +1,10 @@
 import React, { useEffect, useRef } from "react";
 import { Outlet, useNavigate, useLocation } from "react-router-dom";
+import { jwtDecode } from "jwt-decode";
 import AdminSidebar from "../components/admin/AdminSidebar";
 import GlobalSearch from "../components/admin/GlobalSearch";
 import RouteErrorBoundary from "../components/RouteErrorBoundary";
-import { NAV_ITEMS } from "../components/admin/adminNav";
+import { NAV_ITEMS, SUPERVISOR_PATHS } from "../components/admin/adminNav";
 import { getComplianceConfig } from "../api/compliance";
 
 const AdminLayout = () => {
@@ -11,6 +12,16 @@ const AdminLayout = () => {
   const location = useLocation();
   const timerRef = useRef(null);
   const minutesRef = useRef(15); // default; refined from compliance config
+
+  // F-B: a supervisor is a web-only oversight role — keep it inside its allowed screens.
+  // Backend deps are the real gate; this is UX so a typed/landing URL doesn't 403 a supervisor.
+  useEffect(() => {
+    let role = null;
+    try { role = jwtDecode(localStorage.getItem("adminToken")).role; } catch { role = null; }
+    if (role === "supervisor" && !SUPERVISOR_PATHS.includes(location.pathname)) {
+      navigate("/admin/housekeeping", { replace: true });
+    }
+  }, [location.pathname, navigate]);
 
   useEffect(() => {
     let cancelled = false;

@@ -41,6 +41,15 @@ def require_housekeeper_or_admin(user=Depends(get_current_user)):
     return user
 
 
+def require_supervisor_or_admin(user=Depends(get_current_user)):
+    """Supervisor oversight actions (F-B): housekeeping inspect, maintenance assign/verify.
+    Supervisor is a WEB-ONLY oversight role — it is deliberately NOT added to the front-desk
+    (`require_reception_or_admin`) or status-write (`require_housekeeper_or_admin`) gates."""
+    if user.get("role") not in ["admin", "supervisor"]:
+        raise HTTPException(status_code=403, detail="Supervisor or admin access required")
+    return user
+
+
 def require_maintenance_or_admin(user=Depends(get_current_user)):
     if user.get("role") not in ["admin", "maintenance"]:
         raise HTTPException(status_code=403, detail="Access denied")

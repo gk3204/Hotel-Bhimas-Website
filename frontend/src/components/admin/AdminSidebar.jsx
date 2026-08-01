@@ -1,8 +1,9 @@
 import React, { useMemo, useState } from "react";
 import { NavLink, useNavigate, useLocation } from "react-router-dom";
+import { jwtDecode } from "jwt-decode";
 import { FaSearch, FaSignOutAlt, FaBars, FaTimes, FaChevronDown } from "react-icons/fa";
 import logo from "../../assets/logo-gold.svg";
-import { NAV_GROUPS, NAV_ITEMS } from "./adminNav";
+import { navGroupsForRole } from "./adminNav";
 import NotificationsBell from "./NotificationsBell";
 
 // Grouped, searchable admin sidebar. Fixed left column on md+, slide-in drawer on mobile.
@@ -14,13 +15,23 @@ export default function AdminSidebar() {
   const navigate = useNavigate();
   const location = useLocation();
 
+  // Role-scoped nav (F-B): a supervisor sees only its tagged groups/items.
+  const role = useMemo(() => {
+    try { return jwtDecode(localStorage.getItem("adminToken")).role; } catch { return null; }
+  }, []);
+  const groups = useMemo(() => navGroupsForRole(role), [role]);
+  const visibleItems = useMemo(
+    () => groups.flatMap((g) => g.items.map((it) => ({ ...it, group: g.label }))),
+    [groups]
+  );
+
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return null;
-    return NAV_ITEMS.filter(
+    return visibleItems.filter(
       (it) => it.label.toLowerCase().includes(q) || it.group.toLowerCase().includes(q)
     );
-  }, [query]);
+  }, [query, visibleItems]);
 
   const logout = () => {
     localStorage.removeItem("adminToken");
@@ -100,7 +111,7 @@ export default function AdminSidebar() {
             )}
           </div>
         ) : (
-          NAV_GROUPS.map((group) => (
+          groups.map((group) => (
             <div key={group.label}>
               <button
                 onClick={() => toggleGroup(group.label)}

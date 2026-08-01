@@ -26,11 +26,15 @@ from schemas import (ComplaintBulkResolve, ComplaintCompensate, ComplaintConfigU
                      ComplaintCreate, ComplaintEscalate, ComplaintResolve, ComplaintRespond)
 from utils import settings as app_settings
 from utils.audit import _resolve_user_id, write_audit
-from utils.auth_utils import require_admin, require_reception_or_admin
+from utils.auth_utils import require_admin, require_roles
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/complaints", tags=["Complaints"])
+
+# Complaint handling is a front-desk (reception) AND supervisor-oversight (F-B) activity; admin too.
+# Config / compensation / escalation-run stay admin-only below.
+staff = require_roles("admin", "reception", "supervisor")
 
 # Statuses at which a complaint is still "open" and its SLA clock runs.
 OPEN_STATUSES = ("open", "assigned", "in_progress", "awaiting_parts")
@@ -44,7 +48,7 @@ def get_db():
         db.close()
 
 
-@router.get("/health", dependencies=[Depends(require_reception_or_admin)])
+@router.get("/health", dependencies=[Depends(staff)])
 def health():
     return {"status": "ok", "module": "complaints"}
 
@@ -152,7 +156,7 @@ def escalate_ticket(db: Session, ticket: MaintenanceTicket, reason: str, *,
 
 @router.post("/")
 def create_complaint(data: ComplaintCreate, db: Session = Depends(get_db),
-                     user=Depends(require_reception_or_admin)):
+                     user=Depends(staff)):
     """Front desk logs a guest's complaint against a stay. Creates a source='guest' ticket and
     stamps its SLA due-times. Idempotent on client_ref (via create_guest_ticket)."""
     try:
@@ -199,7 +203,7 @@ def create_complaint(data: ComplaintCreate, db: Session = Depends(get_db),
 def list_complaints(status: str | None = Query(None), priority: str | None = Query(None),
                     source: str | None = Query(None), breached: bool = Query(False),
                     open_only: bool = Query(False), q: str | None = Query(None),
-                    db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
+                    db: Session = Depends(get_db), user=Depends(staff)):
     """Guest complaints (source='guest' by default) with SLA + escalation state. Reception can see
     them to follow up at the desk; admin manages them on the Complaints screen."""
     query = db.query(MaintenanceTicket).filter(MaintenanceTicket.source == (source or "guest"))
@@ -220,7 +224,7 @@ def list_complaints(status: str | None = Query(None), priority: str | None = Que
 
 
 @router.get("/config")
-def get_config(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
+def get_config(db: Session = Depends(get_db), user=Depends(staff)):
     return app_settings.get_complaints_config(db)
 
 
@@ -251,7 +255,7 @@ def run_escalations(db: Session = Depends(get_db), user=Depends(require_admin)):
 
 @router.get("/{complaint_id}")
 def get_complaint(complaint_id: int, db: Session = Depends(get_db),
-                  user=Depends(require_reception_or_admin)):
+                  user=Depends(staff)):
     t = _get_complaint(db, complaint_id)
     return _complaint_dict(db, t, with_trail=True)
 
@@ -260,7 +264,7 @@ def get_complaint(complaint_id: int, db: Session = Depends(get_db),
 
 @router.post("/{complaint_id}/respond")
 def respond_complaint(complaint_id: int, data: ComplaintRespond, db: Session = Depends(get_db),
-                      user=Depends(require_reception_or_admin)):
+                      user=Depends(staff)):
     """Acknowledge the complaint to the guest — stamps first response (stops the response-SLA
     clock) and moves an untouched complaint to in_progress."""
     try:
@@ -285,7 +289,7 @@ def respond_complaint(complaint_id: int, data: ComplaintRespond, db: Session = D
 
 @router.post("/{complaint_id}/escalate")
 def escalate_complaint(complaint_id: int, data: ComplaintEscalate, db: Session = Depends(get_db),
-                       user=Depends(require_reception_or_admin)):
+                       user=Depends(staff)):
     """Manually escalate a complaint (bumps the level + alerts the owner)."""
     try:
         t = _get_complaint(db, complaint_id)
@@ -305,7 +309,7 @@ def escalate_complaint(complaint_id: int, data: ComplaintEscalate, db: Session =
 
 @router.post("/{complaint_id}/resolve")
 def resolve_complaint(complaint_id: int, data: ComplaintResolve, db: Session = Depends(get_db),
-                      user=Depends(require_reception_or_admin)):
+                      user=Depends(staff)):
     """Mark the complaint resolved."""
     try:
         t = _get_complaint(db, complaint_id)
@@ -329,7 +333,7 @@ def resolve_complaint(complaint_id: int, data: ComplaintResolve, db: Session = D
 
 @router.post("/bulk-resolve")
 def bulk_resolve_complaints(data: ComplaintBulkResolve, db: Session = Depends(get_db),
-                            user=Depends(require_reception_or_admin)):
+                            user=Depends(staff)):
     """Resolve several guest complaints at once (clear a backlog). Skips any that aren't guest
     complaints or are already resolved/verified/closed. Audited per ticket, same as single resolve."""
     resolved, skipped = 0, 0

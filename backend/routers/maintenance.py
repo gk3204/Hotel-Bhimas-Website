@@ -23,7 +23,7 @@ from models import Expense, MaintenanceTicket, Room, TicketItem, User
 from schemas import (MaintenanceTicketCreate, TicketAssignRequest, TicketItemCreate,
                      TicketItemPurchase, TicketStatusUpdate, TicketVerifyRequest)
 from utils.auth_utils import (get_current_user, require_admin, require_maintenance_or_admin,
-                              require_roles)
+                              require_supervisor_or_admin, require_roles)
 from utils.audit import write_audit, _resolve_user_id
 from utils.settings import validate_category
 from routers.cash_shift import _open_shift
@@ -140,7 +140,7 @@ def create_guest_ticket(db: Session, issue: str, booking_id=None, room_id=None,
 @router.post("/tickets")
 def create_ticket(data: MaintenanceTicketCreate,
                   db: Session = Depends(get_db),
-                  user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance"))):
+                  user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance", "supervisor"))):
     """Raise a ticket. Source is derived from the caller's role."""
     if data.client_ref:
         dup = db.query(MaintenanceTicket).filter(MaintenanceTicket.client_ref == data.client_ref).first()
@@ -172,7 +172,7 @@ def create_ticket(data: MaintenanceTicketCreate,
 def list_tickets(status: str = Query(None), category: str = Query(None),
                  assignee: int = Query(None), overdue: bool = Query(False),
                  db: Session = Depends(get_db),
-                 user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance"))):
+                 user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance", "supervisor"))):
     """List tickets with filters. A `maintenance` user sees only their own assigned tickets."""
     q = db.query(MaintenanceTicket)
     if user.get("role") == "maintenance":
@@ -197,7 +197,7 @@ def list_tickets(status: str = Query(None), category: str = Query(None),
 
 @router.get("/tickets/{ticket_id}")
 def get_ticket(ticket_id: int, db: Session = Depends(get_db),
-               user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance"))):
+               user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance", "supervisor"))):
     t = _get_ticket(db, ticket_id)
     if user.get("role") == "maintenance" and t.assignee != _resolve_user_id(db, user):
         raise HTTPException(status_code=403, detail="Not your ticket")
@@ -208,7 +208,7 @@ def get_ticket(ticket_id: int, db: Session = Depends(get_db),
 
 @router.post("/tickets/{ticket_id}/assign")
 def assign_ticket(ticket_id: int, data: TicketAssignRequest, db: Session = Depends(get_db),
-                  user=Depends(require_admin)):
+                  user=Depends(require_supervisor_or_admin)):
     """Admin assigns a ticket to a maintenance user (open|assigned -> assigned)."""
     t = _get_ticket(db, ticket_id)
     if t.status in TERMINAL_STATUSES:
@@ -270,7 +270,7 @@ def update_status(ticket_id: int, data: TicketStatusUpdate, db: Session = Depend
 
 @router.post("/tickets/{ticket_id}/verify")
 def verify_ticket(ticket_id: int, data: TicketVerifyRequest, db: Session = Depends(get_db),
-                  user=Depends(require_admin)):
+                  user=Depends(require_supervisor_or_admin)):
     """Supervisor/admin verifies a resolved ticket -> verified (terminal/closed)."""
     t = _get_ticket(db, ticket_id)
     if t.status != "resolved":

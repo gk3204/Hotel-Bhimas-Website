@@ -26,7 +26,11 @@ from models import (Booking, BookingItem, Folio, FolioCharge, HousekeepingStatus
                     HousekeepingTask, Room, User)
 from schemas import (HousekeepingConfigUpdate, HousekeepingStatusUpdate, InspectRequest,
                      MinibarRestockRequest, TaskCompleteRequest)
-from utils.auth_utils import require_admin, require_housekeeper_or_admin
+from utils.auth_utils import (require_admin, require_housekeeper_or_admin,
+                              require_supervisor_or_admin, require_roles)
+
+# Housekeeping board is readable by the housekeeper who works it, plus admin/supervisor oversight (F-B).
+_board_viewer = require_roles("admin", "housekeeper", "supervisor")
 from utils.audit import write_audit, _resolve_user_id
 from utils.housekeeping import set_hk_status
 from utils.settings import HK_AUTO_INSPECT_KEY, get_housekeeping_config, set_setting
@@ -89,7 +93,7 @@ def _get_task(db: Session, task_id: int) -> HousekeepingTask:
 
 @router.get("/rooms")
 def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
-               user=Depends(require_housekeeper_or_admin)):
+               user=Depends(_board_viewer)):
     """All active rooms + housekeeping status + the room's open cleaning task (if any).
     `mine=true` limits to rooms whose open task is unassigned or assigned to the caller
     (the housekeeper 'my rooms' view)."""
@@ -133,7 +137,7 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
 
 @router.get("/tasks")
 def list_tasks(status: str = Query(None), mine: bool = Query(False),
-               db: Session = Depends(get_db), user=Depends(require_housekeeper_or_admin)):
+               db: Session = Depends(get_db), user=Depends(_board_viewer)):
     """Cleaning tasks (filter by status; `mine=true` = unassigned or mine)."""
     me = _resolve_user_id(db, user)
     q = db.query(HousekeepingTask)
@@ -240,7 +244,7 @@ def set_room_status(room_id: int, data: HousekeepingStatusUpdate, db: Session = 
 
 @router.post("/rooms/{room_id}/inspect")
 def inspect_room(room_id: int, data: InspectRequest, db: Session = Depends(get_db),
-                 user=Depends(require_admin)):
+                 user=Depends(require_supervisor_or_admin)):
     """Supervisor/admin marks a cleaned room INSPECTED -> re-sellable (Room.status=vacant).
     This is the anti-fraud gate: reception/housekeepers cannot make a room re-sellable."""
     room = db.query(Room).filter(Room.room_id == room_id).first()
