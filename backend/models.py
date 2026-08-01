@@ -129,6 +129,24 @@ class BookingItem(Base):
     room = relationship("Room")
     booking = relationship("Booking", back_populates="booking_items")
 
+
+class BookingGuest(Base):
+    """Per-occupant KYC for a booking (FE-3). One row per guest staying in the room — the lead
+    (is_primary=True) plus each companion. ID numbers are stored MASKED only (raw never persisted,
+    like Guest.id_number_masked); the ID scan image is stored ENCRYPTED via utils.secure_id_store
+    and referenced by `id_scan_ref` (never a public URL — served by an authed decrypt-on-read route)."""
+    __tablename__ = "booking_guests"
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=False, index=True)
+    name = Column(String(100), nullable=False)
+    id_type = Column(String(20), nullable=True)            # aadhaar|passport|driving_licence|voter_id|other
+    id_number_masked = Column(String(30), nullable=True)   # masked "****1234" — raw never stored
+    id_scan_ref = Column(String(120), nullable=True)       # encrypted-file ref: booking_<id>/<uuid>.enc
+    id_scan_mime = Column(String(40), nullable=True)       # content type, for the decrypt-on-read stream
+    is_primary = Column(Boolean, nullable=False, default=False, index=True)
+    created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+
+
 class Payment(Base):
     __tablename__ = "payments"
     payment_id = Column(Integer, primary_key=True)

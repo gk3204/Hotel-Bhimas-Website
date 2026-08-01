@@ -268,11 +268,26 @@ class CheckinAssignment(BaseModel):
     room_ids: list[int] = Field(..., min_length=1, max_length=10)
 
 
+class GuestKycEntry(BaseModel):
+    """One occupant's KYC captured at check-in (FE-3). `id_number` is masked server-side (raw
+    never persisted). `id_scan_ref` is the encrypted-scan reference returned by the scan-upload
+    endpoint (never a public URL)."""
+    name: str = Field(..., min_length=1, max_length=100)
+    id_type: str = Field(..., pattern="^(aadhaar|passport|driving_licence|voter_id|other)$")
+    id_number: str = Field(..., min_length=4, max_length=30)   # stored masked; raw never persisted
+    id_scan_ref: Optional[str] = Field(None, max_length=120)
+    id_scan_mime: Optional[str] = Field(None, max_length=40)
+    is_primary: bool = False
+
+
 class CheckinRequest(BaseModel):
     booking_id: int = Field(..., gt=0)
     assignments: list[CheckinAssignment] = Field(..., min_length=1, max_length=10)
     id_type: str = Field(..., pattern="^(aadhaar|passport|driving_licence|voter_id|other)$")
     id_number: str = Field(..., min_length=4, max_length=30)  # stored masked; raw value never persisted
+    # FE-3: full occupant roster (lead + companions), each with masked ID + optional encrypted scan.
+    # Backward-compatible: empty ⇒ old single-guest behaviour (lead from id_type/id_number above).
+    additional_guests: list[GuestKycEntry] = Field(default_factory=list, max_length=20)
     client_ref: Optional[str] = Field(None, max_length=64)
 
 

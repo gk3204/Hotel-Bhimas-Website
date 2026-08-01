@@ -663,6 +663,32 @@ def generate_registration_slip_pdf(slip_data):
     elements.append(meta_table)
     elements.append(Spacer(1, 0.25 * inch))
 
+    # Occupant roster (FE-3): list every guest with masked ID when there is more than the lead.
+    guests = slip_data.get("guests") or []
+    if len(guests) > 1:
+        elements.append(Paragraph("<b>Guests in the room</b>", styles["Normal"]))
+        elements.append(Spacer(1, 0.06 * inch))
+        g_rows = [["#", "Name", "ID Type", "ID Number", "ID on file"]]
+        for i, g in enumerate(guests, start=1):
+            g_rows.append([
+                str(i),
+                (g.get("name") or "") + ("  (primary)" if g.get("is_primary") else ""),
+                (g.get("id_type") or "").replace("_", " ").title() or "—",
+                g.get("id_number_masked") or "—",
+                "Yes" if g.get("has_scan") else "—",
+            ])
+        g_table = Table(g_rows, colWidths=[24, 190, 90, 100, 60])
+        g_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f5f5f5")),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        elements.append(g_table)
+        elements.append(Spacer(1, 0.25 * inch))
+
     totals_rows = [
         ["Stay total", f"Rs. {slip_data.get('grand_total', 0):,.2f}"],
         ["Paid", f"Rs. {slip_data.get('paid_total', 0):,.2f}"],

@@ -9,18 +9,20 @@ superseded, new-room card-encode payload returned).
 Anti-fraud rule enforced here + in routers/cards.py: a key card is only issued against a
 booking WITH a recorded payment (see routers/payments.py total_paid).
 """
+import io
 import logging
 import os
 from datetime import date, datetime, time, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
 from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, BookingItem, \
-    Folio, FolioCharge, CardIssuance, TravelAgent, Company
+    Folio, FolioCharge, CardIssuance, TravelAgent, Company, BookingGuest
+from utils import secure_id_store
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, FolioOpenRequest, \
     RoomShiftRequest
 from utils.auth_utils import require_reception_or_admin
@@ -573,6 +575,31 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         booking.guest.id_type = data.id_type
         booking.guest.id_number_masked = "****" + data.id_number[-4:]
 
+        # Per-occupant KYC roster (FE-3): rebuild booking_guests (lead + companions). The desk sends
+        # the full roster in `additional_guests` (each row incl. the primary); an empty list keeps the
+        # old single-guest behaviour. ID numbers masked here; scans were uploaded encrypted beforehand.
+        db.query(BookingGuest).filter(BookingGuest.booking_id == booking.booking_id).delete()
+        roster = list(data.additional_guests or [])
+        if roster:
+            for g in roster:
+                db.add(BookingGuest(
+                    booking_id=booking.booking_id,
+                    name=(g.name or "").strip() or (booking.guest.name if booking.guest else ""),
+                    id_type=g.id_type,
+                    id_number_masked=("****" + g.id_number[-4:]) if g.id_number else None,
+                    id_scan_ref=g.id_scan_ref,
+                    id_scan_mime=g.id_scan_mime,
+                    is_primary=g.is_primary,
+                ))
+        else:
+            db.add(BookingGuest(
+                booking_id=booking.booking_id,
+                name=booking.guest.name if booking.guest else "",
+                id_type=data.id_type,
+                id_number_masked=booking.guest.id_number_masked,
+                is_primary=True,
+            ))
+
         booking.status = "checked_in"
         booking.checked_in_at = datetime.now()
         for room in rooms_by_id.values():
@@ -1124,6 +1151,65 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "vacant_rooms": vacant_rooms, "rooms": rooms_hk}
 
 
+# ==========================================================================
+# Per-occupant guest KYC (FE-3): all guests' ID + an ENCRYPTED ID scan.
+# Scans are encrypted at rest under booking_<id>/ and only ever streamed back
+# (decrypted) to an authed reception/admin caller — never a public URL.
+# ==========================================================================
+
+@router.get("/bookings/{booking_id}/guests")
+def list_booking_guests(booking_id: int, db: Session = Depends(get_db),
+                        user=Depends(require_reception_or_admin)):
+    """The occupant roster for a booking (masked IDs + whether an ID scan is on file)."""
+    rows = (db.query(BookingGuest).filter(BookingGuest.booking_id == booking_id)
+            .order_by(BookingGuest.is_primary.desc(), BookingGuest.id).all())
+    return {"booking_id": booking_id, "guests": [{
+        "id": g.id, "name": g.name, "id_type": g.id_type,
+        "id_number_masked": g.id_number_masked, "is_primary": g.is_primary,
+        "has_scan": bool(g.id_scan_ref),
+    } for g in rows]}
+
+
+@router.post("/bookings/{booking_id}/guests/scan")
+async def upload_guest_scan(booking_id: int, file: UploadFile = File(...),
+                            db: Session = Depends(get_db),
+                            user=Depends(require_reception_or_admin)):
+    """Upload a guest ID scan for a booking. Stored ENCRYPTED under booking_<id>/; returns the
+    ref (kept on the check-in payload). 503 when encryption isn't configured — no plaintext write."""
+    if not db.query(Booking).filter(Booking.booking_id == booking_id).first():
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if not secure_id_store.allowed_mime(file.content_type):
+        raise HTTPException(status_code=400, detail="Unsupported file type (use JPG/PNG/WEBP/PDF)")
+    data = await file.read()
+    try:
+        ref = secure_id_store.save_scan(booking_id, data, file.content_type)
+    except RuntimeError:
+        raise HTTPException(status_code=503,
+                            detail="ID-scan encryption is not configured on the server")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    write_audit(db, user, "reception.guest_scan_upload", "booking", booking_id,
+                after={"mime": file.content_type}, client="desktop", commit=True)
+    return {"ref": ref, "mime": file.content_type}
+
+
+@router.get("/bookings/{booking_id}/guests/{guest_id}/scan")
+def get_guest_scan(booking_id: int, guest_id: int, db: Session = Depends(get_db),
+                   user=Depends(require_reception_or_admin)):
+    """Stream the DECRYPTED ID scan for one guest (authed reception/admin only)."""
+    g = (db.query(BookingGuest)
+         .filter(BookingGuest.id == guest_id, BookingGuest.booking_id == booking_id).first())
+    if not g or not g.id_scan_ref:
+        raise HTTPException(status_code=404, detail="No ID scan on file")
+    try:
+        data = secure_id_store.read_scan(g.id_scan_ref)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="ID scan not found")
+    except RuntimeError:
+        raise HTTPException(status_code=503, detail="ID scan cannot be decrypted (key not configured)")
+    return StreamingResponse(io.BytesIO(data), media_type=g.id_scan_mime or "application/octet-stream")
+
+
 # ---- Registration slip (printed at check-in, guest signs it) ----
 def _reg_rules(db) -> str:
     """Admin-editable rules/terms text for the reg-slip (F-A). Defensive: never fails the slip."""
@@ -1154,6 +1240,17 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
             if room:
                 rooms.append(room.room_number)
 
+    # All occupants (FE-3): the reg-slip lists every guest (name + masked ID + "ID on file"),
+    # falling back to the lead Guest when no roster exists.
+    guest_rows = (db.query(BookingGuest).filter(BookingGuest.booking_id == booking_id)
+                  .order_by(BookingGuest.is_primary.desc(), BookingGuest.id).all())
+    guests = [{"name": g.name, "id_type": g.id_type, "id_number_masked": g.id_number_masked,
+               "has_scan": bool(g.id_scan_ref), "is_primary": g.is_primary} for g in guest_rows]
+    if not guests and booking.guest:
+        guests = [{"name": booking.guest.name, "id_type": booking.guest.id_type,
+                   "id_number_masked": booking.guest.id_number_masked, "has_scan": False,
+                   "is_primary": True}]
+
     slip_data = {
         "booking_id": booking.booking_id,
         "guest_name": booking.guest.name if booking.guest else "",
@@ -1171,6 +1268,8 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
         "balance": float(folio.balance or 0) if folio else None,
         # Admin-editable rules/terms printed on the slip (FE-2 / F-A settings backbone).
         "registration_rules": _reg_rules(db),
+        # All occupants with masked IDs (FE-3).
+        "guests": guests,
     }
     try:
         pdf_path = generate_registration_slip_pdf(slip_data)

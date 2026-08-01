@@ -8,6 +8,7 @@ python-multipart==0.0.6
 jinja2==3.1.6
 python-dotenv==1.0.0
 python-jose[cryptography]==3.3.0
+cryptography==42.0.8      # Fernet encryption for guest ID scans at rest (FE-3; already pulled in by python-jose)
 reportlab==4.0.7
 email-validator==2.3.0
 pydantic==2.12.5
