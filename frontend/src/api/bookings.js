@@ -10,16 +10,16 @@ function getAuthHeader() {
 }
  // change if deployed
 
-// Get all bookings
-export const getBookings = async (page = 1, fromDate = "") => {
+// Get all bookings (paginated + optional check-in date range and status filter — ALT-10)
+export const getBookings = async (page = 1, fromDate = "", toDate = "", status = "") => {
   const limit = 15;
   const skip = (page - 1) * limit;
 
   let url = `${BASE_URL}/bookings/?skip=${skip}&limit=${limit}`;
 
-  if (fromDate) {
-    url += `&from_date=${fromDate}`;
-  }
+  if (fromDate) url += `&from_date=${fromDate}`;
+  if (toDate) url += `&to_date=${toDate}`;
+  if (status) url += `&status=${encodeURIComponent(status)}`;
 
   const res = await fetch(url, {
     headers: getAuthHeader(),

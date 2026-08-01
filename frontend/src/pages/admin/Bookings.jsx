@@ -14,6 +14,8 @@ const Bookings = () => {
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(1);
   const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [loading, setLoading] = useState(false);
   const [role, setRole] = useState(null);
   const [selectedBooking, setSelectedBooking] = useState(null);
@@ -34,12 +36,12 @@ const Bookings = () => {
 
   useEffect(() => {
     loadBookings();
-  }, [page, fromDate]);
+  }, [page, fromDate, toDate, statusFilter]);
 
   const loadBookings = async () => {
     try {
       setLoading(true);
-      const res = await getBookings(page, fromDate);
+      const res = await getBookings(page, fromDate, toDate, statusFilter);
       let sortedBookings = [...res.data];
 
       sortedBookings.sort((a, b) => {
@@ -206,26 +208,47 @@ const Bookings = () => {
         {/* Filter Section */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-8 backdrop-blur">
           <h2 className="text-xl font-semibold mb-4 text-[#E5C07B]">
-            🔍 Filter by Check-In Date
+            🔍 Filter bookings
           </h2>
-          <div className="flex gap-4 flex-wrap">
-            <input
-              type="date"
-              className="px-4 py-3 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] transition"
-              value={fromDate}
-              onChange={(e) => {
-                setPage(1);
-                setFromDate(e.target.value);
-              }}
-            />
+          <div className="flex gap-4 flex-wrap items-end">
+            <div className="flex flex-col">
+              <label className="text-xs text-slate-400 mb-1">Check-in from</label>
+              <input
+                type="date"
+                className="px-4 py-3 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] transition"
+                value={fromDate}
+                onChange={(e) => { setPage(1); setFromDate(e.target.value); }}
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-xs text-slate-400 mb-1">Check-in to</label>
+              <input
+                type="date"
+                className="px-4 py-3 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] transition"
+                value={toDate}
+                onChange={(e) => { setPage(1); setToDate(e.target.value); }}
+              />
+            </div>
+            <div className="flex flex-col">
+              <label className="text-xs text-slate-400 mb-1">Status</label>
+              <select
+                className="px-4 py-3 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] transition"
+                value={statusFilter}
+                onChange={(e) => { setPage(1); setStatusFilter(e.target.value); }}
+              >
+                <option value="">All statuses</option>
+                <option value="pending">Pending</option>
+                <option value="confirmed">Confirmed</option>
+                <option value="checked_in">Checked in</option>
+                <option value="checked_out">Checked out</option>
+                <option value="cancelled">Cancelled</option>
+              </select>
+            </div>
             <button
-              onClick={() => {
-                setFromDate("");
-                setPage(1);
-              }}
+              onClick={() => { setFromDate(""); setToDate(""); setStatusFilter(""); setPage(1); }}
               className="bg-slate-700 hover:bg-slate-600 px-6 py-3 rounded-lg text-white font-medium transition"
             >
-              Reset Filter
+              Reset Filters
             </button>
           </div>
         </div>

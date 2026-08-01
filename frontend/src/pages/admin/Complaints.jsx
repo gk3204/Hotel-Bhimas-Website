@@ -63,6 +63,8 @@ function ListTab({ mode, showToast }) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [priority, setPriority] = useState("");
+  const [dateFrom, setDateFrom] = useState("");   // ALT-10: client-side "logged" date range
+  const [dateTo, setDateTo] = useState("");
   const [detail, setDetail] = useState(null);
   const [busy, setBusy] = useState(false);
   const [selected, setSelected] = useState(() => new Set());
@@ -93,7 +95,14 @@ function ListTab({ mode, showToast }) {
       return next;
     });
 
-  const selectableIds = rows.filter(isResolvable).map((c) => c.id);
+  const visibleRows = rows.filter((c) => {
+    const d = (c.created_at || "").slice(0, 10);
+    if (dateFrom && (!d || d < dateFrom)) return false;
+    if (dateTo && (!d || d > dateTo)) return false;
+    return true;
+  });
+
+  const selectableIds = visibleRows.filter(isResolvable).map((c) => c.id);
   const allSelected = selectableIds.length > 0 && selectableIds.every((id) => selected.has(id));
   const toggleAll = () =>
     setSelected(() => (allSelected ? new Set() : new Set(selectableIds)));
@@ -136,10 +145,14 @@ function ListTab({ mode, showToast }) {
   return (
     <>
       <Card className="mb-6">
-        <div className="p-5 grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
+        <div className="p-5 grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
           <SelectField label="Priority" value={priority} onChange={(e) => setPriority(e.target.value)}
             options={[{ value: "", label: "All priorities" },
               ...["urgent", "high", "normal", "low"].map((p) => ({ value: p, label: p }))]} />
+          <Field label="Logged from"><input className={inputCls} type="date" value={dateFrom}
+            onChange={(e) => setDateFrom(e.target.value)} /></Field>
+          <Field label="Logged to"><input className={inputCls} type="date" value={dateTo}
+            onChange={(e) => setDateTo(e.target.value)} /></Field>
           <PrimaryButton onClick={load}><FaSearch size={14} /> Refresh</PrimaryButton>
           <GhostButton onClick={runSweep} disabled={busy}>
             <FaBell size={14} /> {busy ? "Running…" : "Run SLA escalation now"}
@@ -172,7 +185,7 @@ function ListTab({ mode, showToast }) {
             { label: "Logged", sort: (c) => c.created_at },
             "",
           ]}
-          rows={rows} loading={loading} error={error} onRetry={load}
+          rows={visibleRows} loading={loading} error={error} onRetry={load}
           empty={mode === "breached" ? "No SLA breaches. Everything is on track." : "No complaints here."}
           renderRow={(c) => [
             isResolvable(c)

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   FaWhatsapp, FaSave, FaSyncAlt, FaPlay, FaPaperPlane, FaTrash, FaBan, FaListUl, FaSlidersH,
 } from "react-icons/fa";
@@ -55,6 +55,16 @@ export default function WhatsAppMessaging() {
   const [templates, setTemplates] = useState([]);
   const [messages, setMessages] = useState([]);
   const [msgStatus, setMsgStatus] = useState("");
+  const [msgFrom, setMsgFrom] = useState("");   // ALT-10: client-side date range on the loaded log
+  const [msgTo, setMsgTo] = useState("");
+
+  const shownMessages = useMemo(() => messages.filter((m) => {
+    const d = (m.created_at || "").slice(0, 10);
+    if (!d) return true;
+    if (msgFrom && d < msgFrom) return false;
+    if (msgTo && d > msgTo) return false;
+    return true;
+  }), [messages, msgFrom, msgTo]);
   const [optOuts, setOptOuts] = useState([]);
   const [newOptOut, setNewOptOut] = useState({ phone: "", reason: "" });
   const [test, setTest] = useState({ to: "", template: "checkout_reminder" });
@@ -318,7 +328,7 @@ export default function WhatsAppMessaging() {
           <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl shadow-xl overflow-hidden backdrop-blur">
             <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between gap-4 flex-wrap">
               <h2 className="text-lg font-bold text-white">Message log</h2>
-              <div className="flex items-center gap-3">
+              <div className="flex items-center gap-3 flex-wrap">
                 <select value={msgStatus} onChange={(e) => setMsgStatus(e.target.value)} className={inputCls}>
                   <option value="">All statuses</option>
                   <option value="sent">Sent</option>
@@ -327,13 +337,21 @@ export default function WhatsAppMessaging() {
                   <option value="failed">Failed</option>
                   <option value="received">Received (inbound)</option>
                 </select>
+                <input type="date" value={msgFrom} onChange={(e) => setMsgFrom(e.target.value)}
+                  title="From date" className={inputCls} />
+                <input type="date" value={msgTo} onChange={(e) => setMsgTo(e.target.value)}
+                  title="To date" className={inputCls} />
+                {(msgFrom || msgTo) && (
+                  <button onClick={() => { setMsgFrom(""); setMsgTo(""); }}
+                    className="text-slate-400 hover:text-white text-sm">Clear dates</button>
+                )}
                 <button onClick={loadMessages} className="bg-slate-700 hover:bg-slate-600 font-semibold px-4 py-2 rounded-lg transition flex items-center gap-2">
                   <FaSyncAlt size={12} /> Refresh
                 </button>
               </div>
             </div>
-            {messages.length === 0 ? (
-              <div className="p-12 text-center text-slate-400"><div className="text-5xl mb-4">💬</div><p>No messages yet.</p></div>
+            {shownMessages.length === 0 ? (
+              <div className="p-12 text-center text-slate-400"><div className="text-5xl mb-4">💬</div><p>No messages match.</p></div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
@@ -349,7 +367,7 @@ export default function WhatsAppMessaging() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700">
-                    {messages.map((m) => (
+                    {shownMessages.map((m) => (
                       <tr key={m.id} className="hover:bg-slate-700/30 transition align-top">
                         <td className="px-5 py-4 text-slate-400">{m.id}</td>
                         <td className="px-5 py-4 text-slate-300 text-sm">{m.direction === "in" ? "⬅ in" : "➡ out"}</td>

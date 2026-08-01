@@ -282,18 +282,25 @@ def cancel_booking(
 @router.get("/",dependencies=[Depends(require_reception_or_admin)])
 def read_all_bookings(
     from_date: date | None = None,
+    to_date: date | None = None,
+    status: str | None = None,
     skip: int = 0,
     limit: int = 15,
     db: Session = Depends(get_db)
 ):
     # 🔒 Clean up expired bookings before fetching
     expire_pending_bookings(db)
-    
+
     query = db.query(Booking).join(Guest, Booking.guest_id == Guest.guest_id)
 
-    # ✅ Filter by from_date only
+    # Filters (ALT-10): check-in date range + booking status. Applied server-side so they
+    # work across pagination.
     if from_date:
         query = query.filter(Booking.check_in >= from_date)
+    if to_date:
+        query = query.filter(Booking.check_in <= to_date)
+    if status:
+        query = query.filter(Booking.status == status)
 
     total_count = query.count()
 
