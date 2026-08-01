@@ -591,6 +591,50 @@ def transfer_to_company(folio_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=500, detail="Failed to transfer to the company account")
 
 
+def ensure_invoice(db: Session, folio: Folio, user, client: str = "desktop"):
+    """Idempotently allocate a sequential GST invoice for a folio and snapshot its totals.
+    Returns (invoice, created). Returns (None, False) when the folio has nothing billable.
+    Commits its own work. Shared by the desk endpoint AND the auto-invoice at checkout (ALT-3)."""
+    existing = _get_invoice(db, folio.id)
+    if existing:
+        return existing, False
+
+    charges = _active_charges(db, folio.id)
+    if not any(c.type not in ("payment",) for c in charges):
+        return None, False
+
+    totals = _invoice_totals(charges)
+    today = date.today()
+    fy = _fy_label(today)
+    seq = _allocate_invoice_seq(db, fy)
+    invoice = Invoice(
+        folio_id=folio.id,
+        booking_id=folio.booking_id,
+        invoice_no=f"INV/{fy}/{seq:05d}",
+        fy_label=fy,
+        seq=seq,
+        invoice_date=today,
+        taxable_total=totals["taxable_total"],
+        cgst_total=totals["cgst_total"],
+        sgst_total=totals["sgst_total"],
+        grand_total=totals["grand_total"],
+        balance_due=totals["balance_due"],
+        gst_breakup=json.dumps(totals["gst_rows"]),
+        company_id=folio.company_id,   # picked up by the consolidated company bill (slice 7)
+        created_by=_resolve_user_id(db, user),
+    )
+    db.add(invoice)
+    db.commit()
+    db.refresh(invoice)
+
+    write_audit(db, user, "folio.invoice_create", "folio", folio.id,
+                after={"invoice_no": invoice.invoice_no,
+                       "grand_total": totals["grand_total"],
+                       "balance_due": totals["balance_due"]},
+                client=client, commit=True)
+    return invoice, True
+
+
 @router.post("/{folio_id}/invoice")
 def create_invoice(folio_id: int, db: Session = Depends(get_db),
                    user=Depends(require_reception_or_admin)):
@@ -598,43 +642,9 @@ def create_invoice(folio_id: int, db: Session = Depends(get_db),
     Does NOT settle the folio, but freezes further charges/voids/discounts."""
     try:
         folio = _get_folio(db, folio_id)
-        existing = _get_invoice(db, folio.id)
-        if existing:
-            return _invoice_summary(existing)
-
-        charges = _active_charges(db, folio.id)
-        if not any(c.type not in ("payment",) for c in charges):
+        invoice, _created = ensure_invoice(db, folio, user)
+        if invoice is None:
             raise HTTPException(status_code=400, detail="Folio has no charges to invoice")
-
-        totals = _invoice_totals(charges)
-        today = date.today()
-        fy = _fy_label(today)
-        seq = _allocate_invoice_seq(db, fy)
-        invoice = Invoice(
-            folio_id=folio.id,
-            booking_id=folio.booking_id,
-            invoice_no=f"INV/{fy}/{seq:05d}",
-            fy_label=fy,
-            seq=seq,
-            invoice_date=today,
-            taxable_total=totals["taxable_total"],
-            cgst_total=totals["cgst_total"],
-            sgst_total=totals["sgst_total"],
-            grand_total=totals["grand_total"],
-            balance_due=totals["balance_due"],
-            gst_breakup=json.dumps(totals["gst_rows"]),
-            company_id=folio.company_id,   # picked up by the consolidated company bill (slice 7)
-            created_by=_resolve_user_id(db, user),
-        )
-        db.add(invoice)
-        db.commit()
-        db.refresh(invoice)
-
-        write_audit(db, user, "folio.invoice_create", "folio", folio.id,
-                    after={"invoice_no": invoice.invoice_no,
-                           "grand_total": totals["grand_total"],
-                           "balance_due": totals["balance_due"]},
-                    client="desktop", commit=True)
         return _invoice_summary(invoice)
     except HTTPException:
         raise

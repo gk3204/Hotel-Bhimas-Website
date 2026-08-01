@@ -742,9 +742,21 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
                            "client_ref": data.client_ref},
                     client="desktop", commit=True)
 
+        # Final GST invoice at checkout (ALT-3): idempotent, best-effort — a stray failure
+        # here must never block a checkout (the desk can still invoice from the folio).
+        invoice_no = None
+        if folio is not None:
+            try:
+                from routers.folio import ensure_invoice
+                inv, _created = ensure_invoice(db, folio, user)
+                invoice_no = inv.invoice_no if inv else None
+            except Exception as e:
+                logger.error(f"auto-invoice at checkout failed for booking {booking.booking_id}: {e}")
+
         resp = _checkout_response(db, booking, folio, override=override_used, already=False)
         resp["loyalty_awarded"] = points_awarded
         resp["company_transfer"] = company_transfer
+        resp["invoice_no"] = invoice_no
         return resp
     except HTTPException:
         db.rollback()
