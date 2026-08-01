@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import Room, RoomType, BookingItem, CardIssuance
+from models import Room, RoomType, Booking, BookingItem, CardIssuance, Guest, MaintenanceTicket
 from schemas import RoomCreate, RoomUpdate, RoomStatusUpdate, RoomActiveToggle
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit
@@ -48,6 +48,70 @@ def list_rooms(db: Session = Depends(get_db)):
 
 
 # CREATE room — admin only
+@router.get("/{room_id}/history", dependencies=[Depends(require_reception_or_admin)])
+def room_history(room_id: int, limit: int = 25, db: Session = Depends(get_db)):
+    """Per-room history (FE-8): recent stays, maintenance tickets, and cards issued for this
+    physical room — the room's timeline for the admin drill-down. `limit` caps each list."""
+    room = db.query(Room).filter(Room.room_id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    limit = max(1, min(200, limit))
+
+    # ---- stays (bookings that included this room), newest arrival first ----
+    stays = []
+    q = (db.query(Booking, Guest)
+         .join(BookingItem, BookingItem.booking_id == Booking.booking_id)
+         .outerjoin(Guest, Guest.guest_id == Booking.guest_id)
+         .filter(BookingItem.room_id == room_id)
+         .order_by(Booking.check_in.desc())
+         .limit(limit))
+    for b, g in q.all():
+        stays.append({
+            "booking_id": b.booking_id,
+            "guest_name": g.name if g else None,
+            "guest_phone": g.phone if g else None,
+            "check_in": str(b.check_in) if b.check_in else None,
+            "check_out": str(b.check_out) if b.check_out else None,
+            "status": b.status,
+            "checked_in_at": b.checked_in_at.isoformat() if b.checked_in_at else None,
+            "checked_out_at": b.checked_out_at.isoformat() if b.checked_out_at else None,
+            "grand_total": float(b.grand_total or 0),
+            "source": b.booking_source,
+        })
+
+    # ---- maintenance tickets raised on this room, newest first ----
+    tickets = []
+    for t in (db.query(MaintenanceTicket)
+              .filter(MaintenanceTicket.room_id == room_id)
+              .order_by(MaintenanceTicket.created_at.desc()).limit(limit).all()):
+        tickets.append({
+            "id": t.id, "category": t.category, "issue": t.issue, "priority": t.priority,
+            "status": t.status, "source": t.source,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
+        })
+
+    # ---- cards issued for this room, newest first ----
+    cards = []
+    for c in (db.query(CardIssuance)
+              .filter(CardIssuance.room_id == room_id)
+              .order_by(CardIssuance.issued_at.desc()).limit(limit).all()):
+        cards.append({
+            "id": c.id, "booking_id": c.booking_id, "card_type": c.card_type,
+            "issue_type": c.issue_type, "status": c.status,
+            "issued_at": c.issued_at.isoformat() if c.issued_at else None,
+            "valid_to": c.valid_to.isoformat() if c.valid_to else None,
+        })
+
+    return {
+        "room": _serialize(room),
+        "stays": stays,
+        "tickets": tickets,
+        "cards": cards,
+        "counts": {"stays": len(stays), "tickets": len(tickets), "cards": len(cards)},
+    }
+
+
 @router.post("/", dependencies=[Depends(require_admin)])
 def create_room(data: RoomCreate, db: Session = Depends(get_db)):
     try:

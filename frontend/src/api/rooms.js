@@ -80,3 +80,13 @@ export async function deleteRoom(id) {
   }
   return res.json();
 }
+
+// Per-room history (FE-8): recent stays, maintenance tickets, and cards issued.
+export async function getRoomHistory(id) {
+  const res = await fetch(`${BASE_URL}/rooms/${id}/history`, { headers: getAuthHeader() });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || "Failed to fetch room history");
+  }
+  return res.json();
+}

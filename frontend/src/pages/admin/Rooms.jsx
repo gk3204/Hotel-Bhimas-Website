@@ -5,11 +5,12 @@ import {
   updateRoom,
   deleteRoom,
   toggleRoomActive,
+  getRoomHistory,
 } from "../../api/rooms";
 import { getRoomTypes } from "../../api/roomTypes";
 import { useConfirm } from "../../components/ConfirmDialog";
 import { PageShell } from "../../components/admin/BackofficeUI";
-import { FaPlus, FaEdit, FaTrash, FaToggleOn, FaToggleOff } from "react-icons/fa";
+import { FaPlus, FaEdit, FaTrash, FaToggleOn, FaToggleOff, FaHistory } from "react-icons/fa";
 
 const STATUSES = ["vacant", "occupied", "cleaning", "inspected", "maintenance", "blocked"];
 
@@ -27,6 +28,24 @@ const Rooms = () => {
   const [roomTypes, setRoomTypes] = useState([]);
   const [editingRoom, setEditingRoom] = useState(null);
   const [toast, setToast] = useState(null);
+  const [historyRoom, setHistoryRoom] = useState(null);
+  const [history, setHistory] = useState(null);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyError, setHistoryError] = useState("");
+
+  const openHistory = async (r) => {
+    setHistoryRoom(r);
+    setHistory(null);
+    setHistoryError("");
+    setHistoryLoading(true);
+    try {
+      setHistory(await getRoomHistory(r.room_id));
+    } catch (e) {
+      setHistoryError(e.message || "Failed to load history.");
+    } finally {
+      setHistoryLoading(false);
+    }
+  };
 
   const [formData, setFormData] = useState({
     room_number: "",
@@ -208,6 +227,9 @@ const Rooms = () => {
                     </button>
                   </td>
                   <td className="px-5 py-3 text-right">
+                    <button onClick={() => openHistory(r)} className="text-slate-300 hover:text-white mr-4" title="History">
+                      <FaHistory />
+                    </button>
                     <button onClick={() => setEditingRoom({ ...r })} className="text-[#E5C07B] hover:text-[#FCD34D] mr-4" title="Edit">
                       <FaEdit />
                     </button>
@@ -220,6 +242,58 @@ const Rooms = () => {
             </tbody>
           </table>
         </div>
+
+        {/* HISTORY MODAL (FE-8) */}
+        {historyRoom && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4" onClick={() => setHistoryRoom(null)}>
+            <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-3xl max-h-[88vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between p-6 border-b border-slate-700 sticky top-0 bg-slate-800">
+                <h2 className="text-2xl font-bold text-[#E5C07B]">Room {historyRoom.room_number} — history</h2>
+                <button onClick={() => setHistoryRoom(null)} className="text-slate-400 hover:text-white text-xl" title="Close">✕</button>
+              </div>
+              <div className="p-6 space-y-6">
+                {historyLoading && <p className="text-slate-400">Loading…</p>}
+                {historyError && <p className="text-red-300">{historyError}</p>}
+                {history && (
+                  <>
+                    <HistorySection title="Stays" count={history.counts?.stays}
+                      empty="No bookings recorded for this room.">
+                      {history.stays.map((s) => (
+                        <div key={s.booking_id} className="flex justify-between gap-3 text-sm bg-slate-900/40 rounded px-3 py-2">
+                          <span className="truncate">
+                            #{s.booking_id} · <span className="text-slate-200">{s.guest_name || "—"}</span>
+                            <span className="text-slate-500"> · {s.check_in} → {s.check_out}</span>
+                          </span>
+                          <span className="text-slate-400 whitespace-nowrap">{s.status} · ₹{(s.grand_total || 0).toLocaleString("en-IN")}</span>
+                        </div>
+                      ))}
+                    </HistorySection>
+
+                    <HistorySection title="Maintenance" count={history.counts?.tickets}
+                      empty="No maintenance tickets for this room.">
+                      {history.tickets.map((t) => (
+                        <div key={t.id} className="flex justify-between gap-3 text-sm bg-slate-900/40 rounded px-3 py-2">
+                          <span className="truncate">#{t.id} · <span className="text-slate-200">{t.category}</span> — {t.issue}</span>
+                          <span className="text-slate-400 whitespace-nowrap">{t.status} · {(t.created_at || "").slice(0, 10)}</span>
+                        </div>
+                      ))}
+                    </HistorySection>
+
+                    <HistorySection title="Cards issued" count={history.counts?.cards}
+                      empty="No cards issued for this room.">
+                      {history.cards.map((c) => (
+                        <div key={c.id} className="flex justify-between gap-3 text-sm bg-slate-900/40 rounded px-3 py-2">
+                          <span className="truncate">#{c.id} · <span className="text-slate-200">{c.issue_type}</span> {c.booking_id ? `· booking #${c.booking_id}` : ""}</span>
+                          <span className="text-slate-400 whitespace-nowrap">{c.status} · {(c.issued_at || "").slice(0, 10)}</span>
+                        </div>
+                      ))}
+                    </HistorySection>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* EDIT MODAL */}
         {editingRoom && (
@@ -293,5 +367,22 @@ const InputField = ({ label, ...props }) => (
     />
   </div>
 );
+
+const HistorySection = ({ title, count, empty, children }) => {
+  const rows = React.Children.toArray(children);
+  return (
+    <div>
+      <div className="flex items-center gap-2 mb-2">
+        <h3 className="text-lg font-bold text-[#E5C07B]">{title}</h3>
+        <span className="text-slate-500 text-xs">({count ?? rows.length})</span>
+      </div>
+      {rows.length === 0 ? (
+        <p className="text-slate-500 text-sm italic">{empty}</p>
+      ) : (
+        <div className="space-y-1">{rows}</div>
+      )}
+    </div>
+  );
+};
 
 export default Rooms;
