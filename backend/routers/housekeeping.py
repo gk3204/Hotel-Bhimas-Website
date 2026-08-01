@@ -98,18 +98,26 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
         HousekeepingStatus, Room.room_id == HousekeepingStatus.room_id,
     ).filter(Room.is_active == True).order_by(Room.room_number).all()  # noqa: E712
 
-    # open task per room (pending/in_progress), newest first
-    open_tasks = {}
-    for t in db.query(HousekeepingTask).filter(
-            HousekeepingTask.status.in_(["pending", "in_progress"])
-    ).order_by(HousekeepingTask.created_at.desc()).all():
-        open_tasks.setdefault(t.room_id, t)
+    # open task per room (pending/in_progress) + most-recent task per room (any status,
+    # for the 'cleaned by' name), both newest-first / first-wins.
+    open_tasks, last_tasks = {}, {}
+    for t in db.query(HousekeepingTask).order_by(HousekeepingTask.created_at.desc()).all():
+        last_tasks.setdefault(t.room_id, t)
+        if t.status in ("pending", "in_progress"):
+            open_tasks.setdefault(t.room_id, t)
+
+    name_cache = {}
+    def _name(uid):
+        if uid not in name_cache:
+            name_cache[uid] = _staff_name(db, uid)
+        return name_cache[uid]
 
     out = []
     for r, hk in rows:
         task = open_tasks.get(r.room_id)
         if mine and task is not None and task.assigned_to not in (None, me):
             continue
+        last = last_tasks.get(r.room_id)
         out.append({
             "room_id": r.room_id,
             "room_number": r.room_number,
@@ -118,6 +126,7 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
             "updated_at": hk.updated_at.isoformat() if hk and hk.updated_at else None,
             "photo_url": hk.photo_url if hk else None,
             "open_task": _task_dict(db, task, r) if task else None,
+            "cleaned_by": _name(last.assigned_to) if last and last.assigned_to else None,  # ALT-7
         })
     return {"rooms": out, "config": get_housekeeping_config(db)}
 
@@ -240,6 +249,15 @@ def inspect_room(room_id: int, data: InspectRequest, db: Session = Depends(get_d
     if room.status == "occupied":
         raise HTTPException(status_code=409, detail="Cannot inspect an occupied room")
 
+    # cleaned-by: the housekeeper on the room's most recent cleaning task (ALT-7). Captured
+    # before we close tasks so the inspection records who actually cleaned the room.
+    last_task = (db.query(HousekeepingTask)
+                 .filter(HousekeepingTask.room_id == room_id)
+                 .order_by(HousekeepingTask.created_at.desc()).first())
+    cleaned_by_id = last_task.assigned_to if last_task else None
+    cleaned_by = _staff_name(db, cleaned_by_id)
+    supervisor = _staff_name(db, _resolve_user_id(db, user))
+
     set_hk_status(db, room_id, "inspected", user=user)
     before = room.status
     if room.status in ("cleaning", "inspected", "maintenance", "blocked"):
@@ -257,9 +275,12 @@ def inspect_room(room_id: int, data: InspectRequest, db: Session = Depends(get_d
     db.commit()
     write_audit(db, user, "housekeeping.inspect", "room", room_id,
                 before={"room_status": before},
-                after={"room_status": room.status, "note": data.note},
+                after={"room_status": room.status, "note": data.note,
+                       "cleaned_by": cleaned_by, "cleaned_by_id": cleaned_by_id,
+                       "supervisor": supervisor},
                 client="web", commit=True)
-    return {"room_id": room_id, "housekeeping_status": "inspected", "room_status": room.status}
+    return {"room_id": room_id, "housekeeping_status": "inspected", "room_status": room.status,
+            "cleaned_by": cleaned_by, "supervisor": supervisor, "note": data.note}
 
 
 # ---------------------------------------------------------------- minibar -> folio

@@ -22,6 +22,8 @@ export default function Housekeeping() {
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState(null);
   const [toast, setToast] = useState(null);
+  const [inspectTarget, setInspectTarget] = useState(null);
+  const [inspectNote, setInspectNote] = useState("");
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -57,11 +59,16 @@ export default function Housekeeping() {
     setSaving(false);
   };
 
-  const doInspect = async (room) => {
+  const confirmInspect = async () => {
+    const room = inspectTarget;
+    if (!room) return;
     setBusyId(room.room_id);
     try {
-      await inspectRoom(room.room_id, {});
+      const note = inspectNote.trim();
+      await inspectRoom(room.room_id, note ? { note } : {});
       showToast(`Room ${room.room_number} inspected — now re-sellable`);
+      setInspectTarget(null);
+      setInspectNote("");
       await load();
     } catch (e) {
       showToast(e.message, "error");
@@ -129,6 +136,7 @@ export default function Housekeeping() {
                     <th className="px-5 py-4 font-semibold text-sm">Room status</th>
                     <th className="px-5 py-4 font-semibold text-sm">Housekeeping</th>
                     <th className="px-5 py-4 font-semibold text-sm">Cleaning task</th>
+                    <th className="px-5 py-4 font-semibold text-sm">Cleaned by</th>
                     <th className="px-5 py-4 font-semibold text-sm">Updated</th>
                     <th className="px-5 py-4 font-semibold text-sm text-right">Action</th>
                   </tr>
@@ -144,12 +152,13 @@ export default function Housekeeping() {
                         </span>
                       </td>
                       <td className="px-5 py-4 text-slate-400 text-sm">{r.open_task ? r.open_task.status : "—"}</td>
+                      <td className="px-5 py-4 text-slate-300 text-sm">{r.cleaned_by || "—"}</td>
                       <td className="px-5 py-4 text-slate-400 text-sm whitespace-nowrap">{(r.updated_at || "").slice(0, 16).replace("T", " ") || "—"}</td>
                       <td className="px-5 py-4 text-right">
                         {r.room_status !== "occupied" && needsInspection(r) && (
                           <button
                             disabled={busyId === r.room_id}
-                            onClick={() => doInspect(r)}
+                            onClick={() => { setInspectTarget(r); setInspectNote(""); }}
                             className="bg-green-700 hover:bg-green-800 px-4 py-1.5 rounded-lg text-sm font-semibold flex items-center gap-2 ml-auto disabled:opacity-50"
                           >
                             <FaCheckDouble /> Inspect
@@ -163,6 +172,40 @@ export default function Housekeeping() {
             </div>
           )}
         </div>
+
+        {/* INSPECT MODAL (ALT-7): supervisor confirms + adds comments; cleaned-by shown */}
+        {inspectTarget && (
+          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4" onClick={() => setInspectTarget(null)}>
+            <div className="bg-slate-800 border border-slate-700 rounded-2xl p-7 w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+              <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">Inspect Room {inspectTarget.room_number}</h2>
+              <p className="text-slate-400 text-sm mb-5">
+                Confirm the room is ready for re-sale. You are signing off as the supervisor; this is recorded.
+              </p>
+              <div className="space-y-2 mb-5 text-sm">
+                <div className="flex justify-between"><span className="text-slate-400">Cleaned by</span><span className="text-slate-200">{inspectTarget.cleaned_by || "—"}</span></div>
+                <div className="flex justify-between"><span className="text-slate-400">Housekeeping status</span><span className="text-slate-200">{inspectTarget.housekeeping_status || "—"}</span></div>
+              </div>
+              <label className="mb-2 text-sm font-semibold text-slate-300 block">Supervisor comments (optional)</label>
+              <textarea
+                value={inspectNote}
+                onChange={(e) => setInspectNote(e.target.value)}
+                rows={3}
+                placeholder="e.g. re-checked bathroom, linen replaced"
+                className="w-full px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+              />
+              <div className="flex justify-end gap-3 mt-6">
+                <button onClick={() => setInspectTarget(null)} className="bg-slate-700 hover:bg-slate-600 px-6 py-2 rounded-lg font-medium transition">Cancel</button>
+                <button
+                  onClick={confirmInspect}
+                  disabled={busyId === inspectTarget.room_id}
+                  className="bg-green-700 hover:bg-green-800 px-6 py-2 rounded-lg font-bold transition flex items-center gap-2 disabled:opacity-50"
+                >
+                  <FaCheckDouble /> {busyId === inspectTarget.room_id ? "Inspecting…" : "Confirm inspection"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         {toast && (
           <div className="fixed top-6 right-6 z-50">
