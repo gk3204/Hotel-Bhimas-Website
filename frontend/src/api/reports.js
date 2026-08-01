@@ -48,6 +48,7 @@ async function getReport(path, params) {
 // ---- report data (JSON) ----
 export const getOccupancy = (p) => getReport("occupancy", p);
 export const getDailySales = (p) => getReport("sales/daily", p);
+export const getPaymentsDaily = (p) => getReport("payments-daily", p);
 export const getArrivalsDepartures = (p) => getReport("arrivals-departures", p);
 export const getInHouse = (p) => getReport("in-house", p);
 export const getTravelAgents = (p) => getReport("travel-agents", p);

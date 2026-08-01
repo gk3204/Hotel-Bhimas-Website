@@ -47,6 +47,19 @@ const REPORTS = {
         fmt(d.totals.gross_sales), fmt(d.totals.taxable), fmt(d.totals.cgst), fmt(d.totals.sgst)],
     }),
   },
+  "payments-daily": {
+    label: "Payments (day-wise)",
+    path: "payments-daily",
+    range: true,
+    fetch: (p) => api.getPaymentsDaily(p),
+    project: (d) => ({
+      columns: ["Date", "Cash", "Card", "UPI", "Bank", "Collected", "Refunds", "Net"],
+      rows: d.rows.map((r) => [r.date, fmt(r.cash), fmt(r.card), fmt(r.upi), fmt(r.bank),
+        fmt(r.collected), fmt(r.refunds), fmt(r.net)]),
+      totals: ["TOTAL", fmt(d.totals.cash), fmt(d.totals.card), fmt(d.totals.upi), fmt(d.totals.bank),
+        fmt(d.totals.collected), fmt(d.totals.refunds), fmt(d.totals.net)],
+    }),
+  },
   "arrivals-departures": {
     label: "Arrivals / Departures",
     path: "arrivals-departures",

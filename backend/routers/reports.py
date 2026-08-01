@@ -223,6 +223,22 @@ def collections_summary(db, dfrom, dto):
             "bank": round(bank, 2), "total_collected": total, "refunds": round(refunds, 2)}
 
 
+def payments_by_day(db, dfrom, dto):
+    """Day-wise collections by method (+ refunds, net) over [dfrom, dto] (ALT-4). Reuses
+    collections_summary per day so the day rows always reconcile with the range totals."""
+    rows = []
+    for day in _days(dfrom, dto):
+        c = collections_summary(db, day, day)
+        rows.append({
+            "date": str(day), "cash": c["cash"], "card": c["card"], "upi": c["upi"],
+            "bank": c["bank"], "collected": c["total_collected"], "refunds": c["refunds"],
+            "net": round(c["total_collected"] - c["refunds"], 2),
+        })
+    keys = ("cash", "card", "upi", "bank", "collected", "refunds", "net")
+    totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
+    return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
+
+
 def gst_data(db, dfrom, dto):
     """GST filing report: taxable value + CGST/SGST per slab over non-void sale charges posted
     in the range."""
@@ -597,6 +613,21 @@ def daily_sales_report(from_: str | None = Query(None, alias="from"), to: str | 
               t["taxable"], t["cgst"], t["sgst"]]
     return _export_or_json(format, data, title="Daily Sales Report", columns=cols, rows=rows,
                            totals_row=totals, meta=_meta(dfrom, dto), filename="daily_sales")
+
+
+@router.get("/payments-daily", dependencies=[Depends(require_admin)])
+def payments_daily_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                          format: str = Query("json"), db: Session = Depends(get_db)):
+    """Day-wise payments collected by method (cash/card/UPI/bank), refunds, and net (ALT-4)."""
+    dfrom, dto = _range(from_, to)
+    data = payments_by_day(db, dfrom, dto)
+    cols = ["Date", "Cash", "Card", "UPI", "Bank", "Collected", "Refunds", "Net"]
+    rows = [[r["date"], r["cash"], r["card"], r["upi"], r["bank"], r["collected"], r["refunds"], r["net"]]
+            for r in data["rows"]]
+    t = data["totals"]
+    totals = ["TOTAL", t["cash"], t["card"], t["upi"], t["bank"], t["collected"], t["refunds"], t["net"]]
+    return _export_or_json(format, data, title="Day-wise Payments & Refunds", columns=cols, rows=rows,
+                           totals_row=totals, meta=_meta(dfrom, dto), filename="payments_daily")
 
 
 @router.get("/arrivals-departures", dependencies=[Depends(require_admin)])
