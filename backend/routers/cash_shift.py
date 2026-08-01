@@ -30,7 +30,7 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import CashShift, Expense, Payment, User, FraudAlert
-from schemas import ShiftOpenRequest, ExpenseCreate, ShiftCloseRequest, CashConfigUpdate
+from schemas import ShiftOpenRequest, ExpenseCreate, FloatTopupRequest, ShiftCloseRequest, CashConfigUpdate
 from utils.auth_utils import require_reception_or_admin, require_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.settings import (get_cash_config, set_setting, validate_category,
@@ -264,6 +264,31 @@ def add_expense(data: ExpenseCreate, db: Session = Depends(get_db),
                 client="desktop", commit=True)
     logger.info(f"✅ Expense ₹{exp.amount} ({exp.category}) on shift #{shift.id}")
     return {"expense_id": exp.id, "duplicate": False, "shift": _serialize(db, shift)}
+
+
+@router.post("/float")
+def add_float(data: FloatTopupRequest, db: Session = Depends(get_db),
+              user=Depends(require_reception_or_admin)):
+    """Add cash to the open drawer mid-shift (ALT-6). Raises the drawer float (and so the
+    expected cash) and audits the top-up. Every top-up is recorded (append-only audit) so the
+    shift reconciliation always accounts for cash added after opening."""
+    shift = _open_shift(db, data.station_id)
+    if not shift:
+        raise HTTPException(status_code=409,
+                            detail="No cash shift is open — open a shift before adding float.")
+    amount = round(data.amount, 2)
+    opening_before = float(shift.opening_balance or 0)
+    shift.opening_balance = Decimal(str(round(opening_before + amount, 2)))
+    db.commit()
+    db.refresh(shift)
+    write_audit(db, user, "shift.float_topup", "cash_shift", shift.id,
+                after={"amount": amount, "note": data.note,
+                       "opening_before": opening_before,
+                       "opening_after": float(shift.opening_balance)},
+                client="desktop", commit=True)
+    logger.info(f"✅ Float top-up ₹{amount} on shift #{shift.id} "
+                f"(float ₹{opening_before} -> ₹{shift.opening_balance})")
+    return {"duplicate": False, "shift": _serialize(db, shift)}
 
 
 @router.post("/close")

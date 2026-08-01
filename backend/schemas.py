@@ -516,6 +516,14 @@ class ExpenseCreate(BaseModel):
     client_ref: Optional[str] = Field(None, max_length=80)     # idempotency for double-submit
 
 
+class FloatTopupRequest(BaseModel):
+    """Add cash to an open drawer mid-shift (ALT-6). Increases the drawer float (and so the
+    expected cash); each top-up is separately audited."""
+    station_id: Optional[str] = Field(None, max_length=50)
+    amount: float = Field(..., gt=0)
+    note: Optional[str] = Field(None, max_length=200)
+
+
 class ShiftCloseRequest(BaseModel):
     """Close the open shift: staff enters the counted cash (and optional note count)."""
     station_id: Optional[str] = Field(None, max_length=50)
