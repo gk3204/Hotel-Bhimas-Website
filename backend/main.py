@@ -41,6 +41,9 @@ from routers import audit
 # --- Editable operational settings: category lists + reg-slip rules (F-A backbone) ---
 from routers import opsettings
 
+# --- Linen / laundry tracking (FE-9) ---
+from routers import linen
+
 # Load environment variables
 load_dotenv()
 
@@ -350,6 +353,7 @@ app.include_router(complaints.router)
 app.include_router(portal.router)
 app.include_router(audit.router)
 app.include_router(opsettings.router)
+app.include_router(linen.router)
 
 # -------------------------
 # Health Check

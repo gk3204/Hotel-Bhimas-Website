@@ -6,7 +6,7 @@ import {
   FaTags, FaPercent, FaUserTie, FaHandshake, FaGlobe,
   FaMoneyBillWave, FaCashRegister, FaChartBar,
   FaShieldAlt, FaClipboardCheck, FaExclamationTriangle, FaHistory,
-  FaBuilding, FaTruck, FaBoxes,
+  FaBuilding, FaTruck, FaBoxes, FaTshirt,
   FaUserShield, FaUserCog, FaUserCheck, FaKey, FaCog,
 } from "react-icons/fa";
 
@@ -66,6 +66,7 @@ export const NAV_GROUPS = [
       { to: "/admin/companies", label: "Companies", icon: FaBuilding },
       { to: "/admin/vendors", label: "Vendors", icon: FaTruck },
       { to: "/admin/inventory", label: "Inventory", icon: FaBoxes },
+      { to: "/admin/linen", label: "Linen & Laundry", icon: FaTshirt },
     ],
   },
   {

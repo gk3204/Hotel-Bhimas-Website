@@ -780,6 +780,14 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
             except Exception as e:
                 logger.error(f"auto-invoice at checkout failed for booking {booking.booking_id}: {e}")
 
+        # Linen (FE-9): send each room's default launderable set clean → dirty. Best-effort —
+        # a failure here must never break a checkout (own commit/rollback inside the service).
+        try:
+            from services import linen_service
+            linen_service.on_checkout(db, booking)
+        except Exception as e:
+            logger.error(f"linen on_checkout hook failed for booking {booking.booking_id}: {e}")
+
         resp = _checkout_response(db, booking, folio, override=override_used, already=False)
         resp["loyalty_awarded"] = points_awarded
         resp["company_transfer"] = company_transfer

@@ -1125,6 +1125,61 @@ class StockMovement(Base):
 
 
 # =====================================================================
+# LINEN / LAUNDRY (FE-9) — hotel-wide stage-count pool per item type.
+# Launderable items cycle clean -> (checkout) dirty -> (send) at_laundry ->
+# (receive) clean. Consumables (launderable=False) use only `clean` as their
+# stock, decremented on issue. Every move is logged in linen_movements.
+# =====================================================================
+class LinenItem(Base):
+    """A linen/amenity item type with hotel-wide stage counts (FE-9)."""
+    __tablename__ = "linen_items"
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), nullable=False)
+    unit = Column(String(20), nullable=False, default="pcs")
+    launderable = Column(Boolean, nullable=False, default=True, index=True)  # False = consumable (soap/toiletries)
+    reorder_threshold = Column(Numeric(10, 2), nullable=False, default=0)    # low-stock hint on `clean`
+    clean = Column(Numeric(10, 2), nullable=False, default=0)        # laundered stock on hand (consumables: stock)
+    dirty = Column(Numeric(10, 2), nullable=False, default=0)        # returned, awaiting laundry pickup
+    at_laundry = Column(Numeric(10, 2), nullable=False, default=0)   # sent out to the laundry
+    is_active = Column(Boolean, nullable=False, default=True, index=True)
+    notes = Column(String(300), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+    updated_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    updated_at = Column(DateTime, nullable=True)
+
+
+class LinenSet(Base):
+    """A room type's default linen/amenity set (one row per item in the set)."""
+    __tablename__ = "linen_sets"
+    id = Column(Integer, primary_key=True, index=True)
+    room_type_id = Column(Integer, ForeignKey("room_types.room_type_id"), nullable=False, index=True)
+    item_id = Column(Integer, ForeignKey("linen_items.id"), nullable=False, index=True)
+    qty = Column(Numeric(10, 2), nullable=False, default=0)
+
+    __table_args__ = (
+        UniqueConstraint("room_type_id", "item_id", name="uq_linen_set_roomtype_item"),
+    )
+
+
+class LinenMovement(Base):
+    """Append-only log of a linen stage move (never updated/deleted). `from_stage`/`to_stage`
+    are one of clean|dirty|at_laundry|out (out = issued/consumed); NULL on external in-flow
+    (replenish). `qty` is always positive."""
+    __tablename__ = "linen_movements"
+    id = Column(Integer, primary_key=True, index=True)
+    item_id = Column(Integer, ForeignKey("linen_items.id"), nullable=False, index=True)
+    from_stage = Column(String(12), nullable=True)   # clean|dirty|at_laundry|out|null(external)
+    to_stage = Column(String(12), nullable=True)     # clean|dirty|at_laundry|out|null
+    qty = Column(Numeric(10, 2), nullable=False, default=0)
+    reason = Column(String(200), nullable=True)      # e.g. "checkout", "replenish", "adjust"
+    room_id = Column(Integer, ForeignKey("rooms.room_id"), nullable=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=True, index=True)
+    created_by = Column(Integer, ForeignKey("users.user_id"), nullable=True, index=True)
+    created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+
+
+# =====================================================================
 # GUEST EXTRAS / IN-ROOM QR PORTAL (prompt 18d, slice 10)
 # =====================================================================
 class GuestPortalSession(Base):

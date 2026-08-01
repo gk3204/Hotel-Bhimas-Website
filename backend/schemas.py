@@ -1047,6 +1047,43 @@ class StockConfigUpdate(BaseModel):
     low_stock_default_threshold: Optional[float] = Field(None, ge=0, le=1_000_000)
 
 
+# ============================================================
+# LINEN / LAUNDRY (FE-9)
+# ============================================================
+class LinenItemCreate(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    unit: str = Field(default="pcs", max_length=20)
+    launderable: bool = True
+    reorder_threshold: float = Field(default=0, ge=0, le=1_000_000)
+    opening_clean: float = Field(default=0, ge=0, le=1_000_000)   # seeds the initial clean/stock count
+    notes: Optional[str] = Field(None, max_length=300)
+
+
+class LinenItemUpdate(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=100)
+    unit: Optional[str] = Field(None, max_length=20)
+    launderable: Optional[bool] = None
+    reorder_threshold: Optional[float] = Field(None, ge=0, le=1_000_000)
+    is_active: Optional[bool] = None
+    notes: Optional[str] = Field(None, max_length=300)
+
+
+class LinenMoveRequest(BaseModel):
+    """A single linen stage move (send-laundry / receive / replenish / issue). Qty is positive."""
+    qty: float = Field(..., gt=0, le=1_000_000)
+    reason: Optional[str] = Field(None, max_length=200)
+
+
+class LinenSetItem(BaseModel):
+    item_id: int = Field(..., gt=0)
+    qty: float = Field(..., ge=0, le=100000)
+
+
+class LinenSetUpdate(BaseModel):
+    """Replace a room type's default linen set (rows with qty 0 are dropped)."""
+    items: list[LinenSetItem] = Field(default_factory=list, max_length=100)
+
+
 # =====================================================================
 # GUEST COMPLAINTS (prompt 18c, slice 11) — a view over source='guest' tickets
 # =====================================================================
