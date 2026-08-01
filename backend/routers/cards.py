@@ -9,6 +9,7 @@ The desktop records every card in its local outbox BEFORE encoding, then posts h
 """
 import json
 import logging
+import os
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import func
@@ -19,7 +20,17 @@ from models import Booking, BookingItem, CardIssuance, FraudAlert, Room
 from schemas import CardIssueRequest
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_reception_or_admin
+from utils.owner_otp import consume_otp
 from routers.payments import total_paid
+
+# Anti-fraud (ALT-1): reissuing a reported-lost card or cutting an EXTRA card beyond the
+# check-in set are the two high-risk desk actions. When CARD_ISSUE_OTP_REQUIRED is on they
+# need an owner approval code — opt-in (default off) so existing behaviour is unchanged.
+_OTP_GATED_ISSUE_TYPES = ("extra", "lost_reissue")
+
+
+def _card_issue_otp_required() -> bool:
+    return os.getenv("CARD_ISSUE_OTP_REQUIRED", "false").strip().lower() not in ("false", "0", "no")
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +121,17 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
                 reasons.append("lost_reissue_mismatch")
             elif old_card.status == "active":
                 old_card.status = "lost"
+
+        # Owner-approval gate for reissue / extra cards (ALT-1). A FAILED/absent approval is
+        # treated like any other validation reason: it hard-rejects a pre-check (encoded=False,
+        # nothing cut yet) but a card that is ALREADY encoded is still recorded and flagged —
+        # a live card is never silently dropped. Consumed here so the code is only spent if the
+        # issuance commits. Opt-in via CARD_ISSUE_OTP_REQUIRED (default off).
+        if data.issue_type in _OTP_GATED_ISSUE_TYPES and _card_issue_otp_required():
+            try:
+                consume_otp(db, data.owner_otp_id, data.owner_otp_code, "card_issue", user)
+            except HTTPException:
+                reasons.append("card_issue_without_approval")
 
         if room and _active_count(db, room.room_id) >= (room.max_cards or 4):
             reasons.append("max_cards_exceeded")

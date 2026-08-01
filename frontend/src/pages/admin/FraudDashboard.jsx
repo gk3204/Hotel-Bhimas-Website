@@ -13,6 +13,7 @@ const ALERT_TYPES = [
   "card_without_booking", "card_without_payment", "cleaning_too_long",
   "off_hours_issuance", "off_station_issuance", "same_id_two_rooms",
   "repeated_refunds", "max_cards_exceeded", "lost_reissue_mismatch",
+  "card_issue_without_approval",
 ];
 
 const sevChip = (s) =>

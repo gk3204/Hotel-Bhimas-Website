@@ -287,6 +287,8 @@ class CardIssueRequest(BaseModel):
     valid_to: datetime
     issue_type: str = Field("checkin", pattern="^(checkin|extra|lost_reissue|shift)$")
     lost_card_id: Optional[int] = Field(None, gt=0)           # issuance to mark "lost" on lost_reissue
+    owner_otp_id: Optional[int] = Field(None, gt=0)           # owner approval for extra/lost_reissue (ALT-1)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     station_id: Optional[str] = Field(None, max_length=50)
     encoded: bool = True      # False = pre-check only (nothing recorded on failure)
     offline: bool = False     # issued while the desktop was offline (evidence for fraud review)
