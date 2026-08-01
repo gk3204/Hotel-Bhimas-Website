@@ -111,6 +111,32 @@ def _get_ticket(db: Session, ticket_id: int) -> MaintenanceTicket:
     return t
 
 
+def raise_ac_on_ticket(db: Session, booking_id, room, commit=False):
+    """Auto-raise a 'turn on AC' maintenance ticket for an AC room at check-in / shift-into-AC
+    (FE-10). source='reception' (NOT 'guest' — that would be a complaint). Idempotent per
+    booking+room. Best-effort: callers wrap this so a failure never blocks the stay flow."""
+    if room is None:
+        return None
+    client_ref = f"ac-on-{booking_id}-{room.room_id}"
+    dup = db.query(MaintenanceTicket).filter(MaintenanceTicket.client_ref == client_ref).first()
+    if dup:
+        return dup
+    t = MaintenanceTicket(
+        room_id=room.room_id, category="appliance",
+        issue=f"Turn on AC — Room {room.room_number}",
+        priority="high", status="open", booking_id=booking_id,
+        source="reception", client_ref=client_ref,
+    )
+    db.add(t)
+    if commit:
+        db.commit()
+        db.refresh(t)
+    else:
+        db.flush()
+    logger.info(f"❄️ AC-on ticket #{t.id} raised for room {room.room_number} (booking={booking_id})")
+    return t
+
+
 def create_guest_ticket(db: Session, issue: str, booking_id=None, room_id=None,
                         category="other", priority="normal", client_ref=None, commit=True) -> MaintenanceTicket:
     """Programmatically raise a guest complaint ticket (source='guest') — used by the

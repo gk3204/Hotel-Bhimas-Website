@@ -41,6 +41,7 @@ def create_room_type(
         gst_percent=data.gst_percent,
         max_occupancy=data.max_occupancy,
         total_rooms=data.total_rooms,
+        is_ac=data.is_ac,
         is_active=True
     )
 

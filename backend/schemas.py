@@ -39,6 +39,7 @@ class RoomTypeCreate(BaseModel):
     gst_percent: float = Field(default=18, ge=0, le=100)
     max_occupancy: int = Field(..., ge=1, le=20)
     total_rooms: int = Field(default=1, ge=1, le=100)
+    is_ac: bool = False   # FE-10: AC vs non-AC room type
 
     @field_validator('price_per_night')
     @classmethod
@@ -58,6 +59,7 @@ class RoomTypeUpdateDetails(BaseModel):
     gst_percent: Optional[float] = Field(None, ge=0, le=100)
     max_occupancy: Optional[int] = Field(None, ge=1, le=20)
     total_rooms: Optional[int] = Field(None, ge=1, le=100)
+    is_ac: Optional[bool] = None   # FE-10
     is_active: Optional[bool] = None
 
     @field_validator('price_per_night')
@@ -328,6 +330,8 @@ class RoomShiftRequest(BaseModel):
     to_room_id: int = Field(..., gt=0)
     applied_adjustment: Optional[float] = Field(None, ge=-10_000_000, le=10_000_000)
     reason: Optional[str] = Field(None, min_length=3, max_length=200)
+    owner_otp_id: Optional[int] = Field(None, gt=0)              # AC→non-AC downgrade approval (FE-10)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     dry_run: bool = False
     client_ref: Optional[str] = Field(None, max_length=64)
 

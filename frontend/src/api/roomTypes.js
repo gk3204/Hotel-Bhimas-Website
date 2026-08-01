@@ -18,6 +18,7 @@ export async function createRoomType(data) {
         gst_percent: parseFloat(data.gst),
         max_occupancy: parseInt(data.occupancy),
         total_rooms: parseInt(data.total_rooms) || 1,
+        is_ac: !!data.is_ac,
       }),
     }
   );

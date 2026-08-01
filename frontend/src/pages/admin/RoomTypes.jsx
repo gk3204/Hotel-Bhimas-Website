@@ -20,6 +20,7 @@ const RoomTypes = () => {
     gst: "",
     occupancy: "",
     total_rooms: "",
+    is_ac: false,
   });
 
   useEffect(() => {
@@ -51,7 +52,7 @@ const RoomTypes = () => {
 
     try {
       await createRoomType(formData);
-      setFormData({ name: "", price: "", gst: "", occupancy: "", total_rooms: "" });
+      setFormData({ name: "", price: "", gst: "", occupancy: "", total_rooms: "", is_ac: false });
       loadRoomTypes();
       showToast("Room type created successfully");
     } catch (err) {
@@ -67,6 +68,7 @@ const RoomTypes = () => {
         gst_percent: editingRoom.gst_percent,
         max_occupancy: editingRoom.max_occupancy,
         total_rooms: editingRoom.total_rooms,
+        is_ac: !!editingRoom.is_ac,
       });
 
       setEditingRoom(null);
@@ -132,6 +134,12 @@ const RoomTypes = () => {
             />
           </div>
 
+          <label className="mt-4 inline-flex items-center gap-2 text-slate-300 cursor-pointer">
+            <input type="checkbox" checked={formData.is_ac}
+              onChange={(e) => setFormData({ ...formData, is_ac: e.target.checked })} />
+            <span>Air-conditioned (AC) room type</span>
+          </label>
+
           <button
             onClick={handleCreate}
             className="mt-6 bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] hover:shadow-xl text-slate-900 font-bold px-8 py-3 rounded-lg transition-all duration-300 hover:scale-105 flex items-center gap-2"
@@ -183,7 +191,14 @@ const RoomTypes = () => {
                       className="hover:bg-slate-700/30 transition"
                     >
                       <td className="px-6 py-4 font-semibold text-[#FCD34D]">#{room.room_type_id}</td>
-                      <td className="px-6 py-4 font-medium">{room.name}</td>
+                      <td className="px-6 py-4 font-medium">
+                        {room.name}
+                        <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                          room.is_ac
+                            ? "bg-sky-500/20 text-sky-300 border-sky-500/30"
+                            : "bg-slate-500/20 text-slate-300 border-slate-500/30"
+                        }`}>{room.is_ac ? "AC" : "Non-AC"}</span>
+                      </td>
                       <td className="px-6 py-4 text-[#E5C07B] font-bold">₹{room.price_per_night}</td>
                       <td className="px-6 py-4 text-slate-300">{room.gst_percent}%</td>
                       <td className="px-6 py-4 text-slate-300">{room.max_occupancy} guests</td>
@@ -300,6 +315,12 @@ const RoomTypes = () => {
                   }
                 />
               </div>
+
+              <label className="mt-4 inline-flex items-center gap-2 text-slate-300 cursor-pointer">
+                <input type="checkbox" checked={!!editingRoom.is_ac}
+                  onChange={(e) => setEditingRoom({ ...editingRoom, is_ac: e.target.checked })} />
+                <span>Air-conditioned (AC) room type</span>
+              </label>
 
               <div className="flex justify-end gap-4 mt-8">
                 <button

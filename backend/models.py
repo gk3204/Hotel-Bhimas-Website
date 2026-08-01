@@ -36,6 +36,7 @@ class RoomType(Base):
     gst_percent = Column(Float, nullable=False)
     max_occupancy = Column(Integer, nullable=False)
     total_rooms = Column(Integer, nullable=False, default=1)  # Total count of rooms available
+    is_ac = Column(Boolean, nullable=False, default=False, index=True)  # FE-10: AC vs non-AC room type
     is_active = Column(Boolean, default=True, index=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
 

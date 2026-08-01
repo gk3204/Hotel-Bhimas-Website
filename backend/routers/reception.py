@@ -607,6 +607,21 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
             room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
         db.commit()
 
+        # FE-10: raise a "turn on AC" maintenance ticket for each assigned AC-type room.
+        # Best-effort — never blocks a check-in. Idempotent per booking+room.
+        try:
+            from routers.maintenance import raise_ac_on_ticket
+            ac_type_ids = {rt_id for rt_id in (r.room_type_id for r in rooms_by_id.values())
+                           if db.query(RoomType).filter(RoomType.room_type_id == rt_id,
+                                                        RoomType.is_ac == True).first()}  # noqa: E712
+            for room in rooms_by_id.values():
+                if room.room_type_id in ac_type_ids:
+                    raise_ac_on_ticket(db, booking.booking_id, room)
+            db.commit()
+        except Exception as e:
+            logger.error(f"AC-on ticket at check-in failed for booking {booking.booking_id}: {e}")
+            db.rollback()
+
         # Folio (idempotent; posts room charges + advance payment credits, own commit).
         open_folio(FolioOpenRequest(booking_id=booking.booking_id), db, user)
         folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
@@ -968,6 +983,13 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             db.rollback()  # release the row locks; nothing was mutated
             return response
 
+        # FE-10: AC → non-AC downgrade (lowers the charge) needs owner approval when enabled
+        # (opt-in via AC_DOWNGRADE_OTP_REQUIRED, default off — same idiom as the refund/card gates).
+        is_ac_downgrade = bool(old_type.is_ac) and not bool(new_type.is_ac)
+        if is_ac_downgrade and os.getenv("AC_DOWNGRADE_OTP_REQUIRED", "false").strip().lower() not in ("false", "0", "no"):
+            from utils.owner_otp import consume_otp
+            consume_otp(db, data.owner_otp_id, data.owner_otp_code, "ac_downgrade", user)
+
         # ---- mutate (single transaction) ----
         before = {"room_id": old_room.room_id, "room_number": old_room.room_number,
                   "room_type_id": item.room_type_id, "room_type": old_type.name,
@@ -1021,6 +1043,15 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
                            "folio_balance": float(folio.balance or 0),
                            "client_ref": data.client_ref},
                     client="desktop", commit=True)
+
+        # FE-10: shifting INTO an AC room raises the "turn on AC" task (best-effort).
+        if new_type.is_ac:
+            try:
+                from routers.maintenance import raise_ac_on_ticket
+                raise_ac_on_ticket(db, booking.booking_id, new_room, commit=True)
+            except Exception as e:
+                logger.error(f"AC-on ticket on shift failed for booking {booking.booking_id}: {e}")
+                db.rollback()
 
         response["superseded_card_ids"] = superseded_ids
         response["folio_balance"] = float(folio.balance or 0)
