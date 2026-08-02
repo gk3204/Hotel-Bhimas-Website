@@ -684,7 +684,23 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
             "unit_price": float(c.unit_price or 0),
             "gst_percent": float(c.gst_percent) if c.gst_percent is not None else None,
             "amount": float(c.amount),
+            "posted_at": c.posted_at,
         }
+
+    # --- Payments & refunds, itemised (backlog v2 TBC-1) -------------------
+    # Payments post NEGATIVE type='payment' lines, refunds POSITIVE ones. The
+    # invoice's GST snapshot is frozen at issue and must never move, so anything
+    # settled AFTER the invoice was raised is listed separately and plainly
+    # labelled rather than folded back into the taxable totals.
+    issued_at = invoice.created_at
+    settlement_lines, post_invoice_lines = [], []
+    for c in charges:
+        if c.type != "payment":
+            continue
+        row = _line(c)
+        row["kind"] = "refund" if float(c.amount) > 0 else "payment"
+        after = bool(issued_at and c.posted_at and c.posted_at > issued_at)
+        (post_invoice_lines if after else settlement_lines).append(row)
 
     nights = (booking.check_out - booking.check_in).days if booking else 0
     einvoice = db.query(EInvoice).filter(EInvoice.invoice_id == invoice.id).first()
@@ -709,7 +725,8 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
         },
         "lines": [_line(c) for c in charges if c.type not in ("payment", "discount")],
         "discount_lines": [_line(c) for c in charges if c.type == "discount"],
-        "payment_lines": [_line(c) for c in charges if c.type == "payment"],
+        "payment_lines": settlement_lines,
+        "post_invoice_lines": post_invoice_lines,
         **totals,
     }
 

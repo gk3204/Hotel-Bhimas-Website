@@ -81,6 +81,15 @@ export async function getOtps(status = "pending") {
   return handle(res);
 }
 
+// Re-deliver a still-live approval code to the owner's WhatsApp (same code, not a new one)
+export async function resendOtp(otpId) {
+  const res = await fetch(`${BASE_URL}/fraud/otp/${otpId}/resend`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handle(res);
+}
+
 // Current detector thresholds / OTP toggles (read-only)
 export async function getConfig() {
   const res = await fetch(`${BASE_URL}/fraud/config`, { headers: authHeaders() });

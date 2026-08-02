@@ -23,6 +23,7 @@ from database import SessionLocal
 from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, BookingItem, \
     Folio, FolioCharge, CardIssuance, TravelAgent, Company, BookingGuest
 from utils import secure_id_store
+from utils import availability
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, FolioOpenRequest, \
     RoomShiftRequest
 from utils.auth_utils import require_reception_or_admin
@@ -42,8 +43,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reception", tags=["Reception"])
 
-# Statuses that reserve room capacity (mirror the online booking + availability logic).
-RESERVED_STATUSES = ["confirmed", "pending_payment", "payment_pending"]
+# Statuses that reserve room capacity + the capacity helpers now live in
+# utils/availability.py so the desk and the public website share one implementation
+# (backlog v2 FE-7). Re-exported here for callers that still import from this module.
+RESERVED_STATUSES = availability.RESERVED_STATUSES
 
 
 def get_db():
@@ -59,25 +62,8 @@ def health():
     return {"status": "ok", "module": "reception"}
 
 
-def _booked_qty(db, room_type_id, check_in, check_out, lock=False):
-    inner = db.query(Booking.booking_id).filter(
-        Booking.status.in_(RESERVED_STATUSES),
-        Booking.check_in < check_out,
-        Booking.check_out > check_in,
-    )
-    if lock:
-        inner = inner.with_for_update()
-    return db.query(func.sum(BookingItem.quantity)).filter(
-        BookingItem.room_type_id == room_type_id,
-        BookingItem.booking_id.in_(inner),
-    ).scalar() or 0
-
-
-def _inactive_count(db, room_type_id):
-    return db.query(func.count(Room.room_id)).filter(
-        Room.room_type_id == room_type_id,
-        Room.is_active == False,  # noqa: E712 (SQLAlchemy needs ==)
-    ).scalar() or 0
+_booked_qty = availability.booked_qty
+_inactive_count = availability.out_of_service_count
 
 
 def _blocked(db, room_type_id, check_in, check_out):
@@ -118,7 +104,10 @@ def desk_availability(
             "gst_percent": float(rt.gst_percent),
             "total_rooms": rt.total_rooms,
             "booked": booked,
+            # `inactive` kept for the existing desk DTO; it now also covers rooms in
+            # maintenance/blocked status, hence the clearer alias alongside it (FE-7).
             "inactive": inactive,
+            "out_of_service": inactive,
             "available": available,
             "blocked": bool(blk),
             "block_reason": blk.reason if blk else None,

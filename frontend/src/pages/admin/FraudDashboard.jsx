@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { PageShell, InfoTip } from "../../components/admin/BackofficeUI";
 import {
   getAlerts, reviewAlert, runReconcile, getReconciliationReport,
-  getDigest, getOtps, getConfig,
+  getDigest, getOtps, getConfig, resendOtp,
 } from "../../api/fraud";
 import { FaSyncAlt, FaCheck, FaTimes, FaShieldAlt, FaKey, FaClipboardList, FaChartLine } from "react-icons/fa";
 
@@ -40,6 +40,7 @@ const FraudDashboard = () => {
   const [reviewForm, setReviewForm] = useState({ status: "reviewed", note: "" });
 
   const [otps, setOtps] = useState([]);
+  const [otpStatus, setOtpStatus] = useState("pending");
   const [report, setReport] = useState(null);
   const [digestDay, setDigestDay] = useState("");
   const [digest, setDigest] = useState(null);
@@ -85,10 +86,32 @@ const FraudDashboard = () => {
     } catch (e) { showToast(e.message, "error"); }
   };
 
+  // Approvals inbox — the status was hard-pinned to "pending" with no way to
+  // reload without leaving the tab (backlog v2 F-C).
+  const loadOtps = async (status = otpStatus) => {
+    setOtpStatus(status);
+    try { setOtps((await getOtps(status)).data); }
+    catch (e) { showToast(e.message, "error"); }
+  };
+
+  const copyCode = async (code) => {
+    try {
+      await navigator.clipboard.writeText(String(code));
+      showToast("Approval code copied");
+    } catch { showToast("Could not copy — read the code out instead", "error"); }
+  };
+
+  const doResendOtp = async (otpId) => {
+    try {
+      const r = await resendOtp(otpId);
+      showToast(r?.delivery?.detail || "Resent", r?.delivery?.ok ? "success" : "error");
+    } catch (e) { showToast(e.message, "error"); }
+  };
+
   const openTab = async (t) => {
     setTab(t);
     try {
-      if (t === "approvals") setOtps((await getOtps("pending")).data);
+      if (t === "approvals") await loadOtps(otpStatus);
       if (t === "report") setReport(await getReconciliationReport());
       if (t === "digest") setDigest(await getDigest(digestDay || undefined));
     } catch (e) { showToast(e.message, "error"); }
@@ -207,11 +230,35 @@ const FraudDashboard = () => {
         {tab === "approvals" && (
           <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl shadow-xl overflow-hidden backdrop-blur">
             <div className="p-6 border-b border-slate-700">
-              <h2 className="text-2xl font-bold">🔐 Owner Approvals</h2>
-              <p className="text-slate-400 text-sm mt-1">Read the code to the receptionist to approve a sensitive action. Codes expire; each is single-use. (WhatsApp delivery arrives in a later release.)</p>
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <h2 className="text-2xl font-bold">🔐 Owner Approvals</h2>
+                <div className="flex items-center gap-2">
+                  <select
+                    className={inputCls + " w-auto"}
+                    value={otpStatus}
+                    onChange={(e) => loadOtps(e.target.value)}
+                  >
+                    <option value="pending">Pending</option>
+                    <option value="used">Used</option>
+                    <option value="expired">Expired</option>
+                    <option value="all">All</option>
+                  </select>
+                  <button
+                    onClick={() => loadOtps(otpStatus)}
+                    className="px-4 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 transition flex items-center gap-2 text-sm"
+                  >
+                    <FaSyncAlt /> Refresh
+                  </button>
+                </div>
+              </div>
+              <p className="text-slate-400 text-sm mt-2">
+                Read the code to the receptionist to approve a sensitive action. Codes expire; each is single-use.
+                When a WhatsApp provider and owner number are configured the code is also sent to the owner
+                automatically — use Resend if it did not arrive.
+              </p>
             </div>
             {otps.length === 0 ? (
-              <div className="p-12 text-center text-slate-400"><div className="text-5xl mb-4">📭</div><p>No pending approval requests.</p></div>
+              <div className="p-12 text-center text-slate-400"><div className="text-5xl mb-4">📭</div><p>No {otpStatus === "all" ? "" : otpStatus} approval requests.</p></div>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-left">
@@ -221,15 +268,47 @@ const FraudDashboard = () => {
                       <th className="px-6 py-4 font-semibold text-sm">Context</th>
                       <th className="px-6 py-4 font-semibold text-sm">Code</th>
                       <th className="px-6 py-4 font-semibold text-sm">Expires</th>
+                      <th className="px-6 py-4 font-semibold text-sm text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700">
                     {otps.map((o) => (
                       <tr key={o.otp_id} className="hover:bg-slate-700/30 transition">
-                        <td className="px-6 py-4 font-medium">{pretty(o.action)}</td>
-                        <td className="px-6 py-4 text-slate-400 text-xs max-w-xs">{JSON.stringify(o.context)}</td>
-                        <td className="px-6 py-4"><span className="font-mono text-2xl font-bold tracking-widest text-[#FCD34D]">{o.code}</span></td>
+                        <td className="px-6 py-4 font-medium whitespace-nowrap">{pretty(o.action)}</td>
+                        <td className="px-6 py-4 max-w-xs">
+                          <div className="flex flex-wrap gap-1">
+                            {Object.entries(o.context || {}).map(([k, v]) => (
+                              <span key={k} className="px-2 py-0.5 rounded border border-slate-600 bg-slate-800/70 text-slate-300 text-xs">
+                                {pretty(k)}: <span className="text-slate-100">{String(v)}</span>
+                              </span>
+                            ))}
+                            {!o.context && <span className="text-slate-500 text-xs">—</span>}
+                          </div>
+                        </td>
+                        <td className="px-6 py-4">
+                          {o.code
+                            ? <span className="font-mono text-2xl font-bold tracking-widest text-[#FCD34D]">{o.code}</span>
+                            : <span className="text-slate-500 text-sm">{o.used ? "used" : "expired"}</span>}
+                        </td>
                         <td className="px-6 py-4 text-slate-400 text-sm whitespace-nowrap">{(o.expires_at || "").slice(0, 16).replace("T", " ")}</td>
+                        <td className="px-6 py-4 text-right whitespace-nowrap">
+                          {o.code && (
+                            <div className="inline-flex gap-2">
+                              <button
+                                onClick={() => copyCode(o.code)}
+                                className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 transition text-xs"
+                              >
+                                Copy
+                              </button>
+                              <button
+                                onClick={() => doResendOtp(o.otp_id)}
+                                className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 transition text-xs"
+                              >
+                                Resend
+                              </button>
+                            </div>
+                          )}
+                        </td>
                       </tr>
                     ))}
                   </tbody>

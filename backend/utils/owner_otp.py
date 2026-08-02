@@ -32,10 +32,48 @@ def _ttl_minutes() -> int:
         return 10
 
 
-def create_otp(db, action: str, context, user, commit: bool = True) -> OwnerOtp:
+def deliver_otp(db, otp, commit: bool = True) -> dict:
+    """Push the code to the owner's WhatsApp and report honestly whether it left the
+    building (backlog v2 F-C).
+
+    The on-screen Approvals inbox + server log are the channel that ALWAYS works. WhatsApp
+    is best-effort on top and must never break the OTP flow, so every failure is swallowed
+    — but the caller gets a truthful `{channel, ok, detail}` back so the desk can tell the
+    receptionist "sent to the owner's WhatsApp" instead of guessing.
+
+    Note the stub driver reports status="sent" while delivering nothing, so a send only
+    counts as real when a provider is actually configured.
+    """
+    logger.info(f"🔐 Owner OTP for action={otp.action} otp_id={otp.id}: code={otp.code} "
+                f"(expires {otp.expires_at.isoformat()})")
+    try:
+        from utils import whatsapp_service
+        if not whatsapp_service.is_configured():
+            return {"channel": "onscreen", "ok": False,
+                    "detail": "WhatsApp is not configured — read the code from the admin Approvals inbox."}
+        row = whatsapp_service.send_owner_otp(db, otp, commit=commit)
+        if row is None:
+            return {"channel": "onscreen", "ok": False,
+                    "detail": "Owner alerts are off or no owner number is set — "
+                              "read the code from the admin Approvals inbox."}
+        if getattr(row, "status", None) == "sent":
+            return {"channel": "whatsapp", "ok": True,
+                    "detail": "Approval code sent to the owner's WhatsApp."}
+        return {"channel": "onscreen", "ok": False,
+                "detail": f"WhatsApp send failed ({getattr(row, 'error', None) or 'unknown'}) — "
+                          f"read the code from the admin Approvals inbox."}
+    except Exception as e:
+        logger.warning(f"owner OTP WhatsApp delivery failed (on-screen still works): {e}")
+        return {"channel": "onscreen", "ok": False,
+                "detail": "WhatsApp delivery failed — read the code from the admin Approvals inbox."}
+
+
+def create_otp(db, action: str, context, user, commit: bool = True, return_delivery: bool = False):
     """Create + persist an owner-approval code for `action`. The code is logged (interim
     delivery) but never returned to the requester — the owner reads it from the admin
-    Approvals inbox. Caller is responsible for the surrounding transaction if commit=False."""
+    Approvals inbox. Caller is responsible for the surrounding transaction if commit=False.
+
+    Returns the `OwnerOtp`, or `(otp, delivery_dict)` when `return_delivery=True`."""
     code = f"{secrets.randbelow(1_000_000):06d}"
     otp = OwnerOtp(
         action=action,
@@ -49,17 +87,8 @@ def create_otp(db, action: str, context, user, commit: bool = True) -> OwnerOtp:
     db.flush()
     if commit:
         db.commit()
-    # Delivery: the owner reads this from the admin dashboard / server log (always works) AND,
-    # when a WhatsApp provider + owner number are configured, via WhatsApp (prompt 15). The
-    # WhatsApp send is best-effort — it must never break the OTP flow.
-    logger.info(f"🔐 Owner OTP for action={action} otp_id={otp.id}: code={code} "
-                f"(expires {otp.expires_at.isoformat()})")
-    try:
-        from utils import whatsapp_service
-        whatsapp_service.send_owner_otp(db, otp, commit=commit)
-    except Exception as e:
-        logger.warning(f"owner OTP WhatsApp delivery failed (on-screen still works): {e}")
-    return otp
+    delivery = deliver_otp(db, otp, commit=commit)
+    return (otp, delivery) if return_delivery else otp
 
 
 def consume_otp(db, otp_id, code, action: str, user=None):

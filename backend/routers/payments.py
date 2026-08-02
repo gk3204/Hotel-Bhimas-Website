@@ -1162,7 +1162,13 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
         consume_otp(db, data.owner_otp_id, data.owner_otp_code, "refund", user)
 
     folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
-    folio_open = bool(folio and folio.status == "open")
+    # Backlog v2 TBC-1: post the credit line to the folio even once the folio is
+    # SETTLED. The common refund happens after checkout, and the old open-folio
+    # guard meant those refunds never touched the folio at all — the ledger and the
+    # folio disagreed forever. The folio is append-only in spirit, and the invoice's
+    # GST snapshot stays frozen, so a late credit line is safe: `_invoice_payload`
+    # lists anything posted after the invoice under its own heading.
+    post_to_folio = bool(folio)
 
     if payment.gateway == "razorpay":
         # Gateway path: helper validates again, calls Razorpay, sets refund_* and COMMITS.
@@ -1184,7 +1190,7 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
 
     folio_posting_failed = False
     try:
-        if folio_open:
+        if post_to_folio:
             db.add(FolioCharge(
                 folio_id=folio.id,
                 type="payment",

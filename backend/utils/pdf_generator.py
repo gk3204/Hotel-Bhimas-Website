@@ -544,6 +544,52 @@ def generate_folio_invoice_pdf(invoice_data):
         f"<b>Amount in words:</b> {_amount_in_words(invoice_data['grand_total'])}", words_style))
     elements.append(Spacer(1, 0.2 * inch))
 
+    # --- Payments & refunds, itemised (backlog v2 TBC-1) --------------------
+    # These lines were always computed and then discarded — the invoice showed a
+    # single "Advance / Payments" figure, so a refund silently shrank that number
+    # with no visible credit line, reason or refund id.
+    def _settlement_table(title, rows, note=None):
+        if not rows:
+            return
+        elements.append(Paragraph(f"<b>{title}</b>", styles["Heading2"]))
+        elements.append(Spacer(1, 0.1 * inch))
+        data = [["Date", "Particulars", "Type", "Amount"]]
+        for r in rows:
+            posted = r.get("posted_at")
+            data.append([
+                posted.strftime("%d-%m-%Y") if hasattr(posted, "strftime") else "",
+                Paragraph(r.get("description") or "", styles["Normal"]),
+                "Refund" if r.get("kind") == "refund" else "Payment",
+                f"Rs. {abs(r['amount']):,.2f}",
+            ])
+        table = Table(data, colWidths=[70, 240, 70, 100])
+        table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
+            ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('ALIGN', (3, 0), (3, -1), 'RIGHT'),
+            ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
+            ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
+            ('VALIGN', (0, 0), (-1, -1), 'TOP'),
+        ]))
+        elements.append(table)
+        if note:
+            elements.append(Spacer(1, 0.08 * inch))
+            elements.append(Paragraph(
+                note, ParagraphStyle(name="SettleNote", parent=styles["Normal"],
+                                     fontSize=8, textColor=colors.grey)))
+        elements.append(Spacer(1, 0.2 * inch))
+
+    _settlement_table("Payments & Refunds", invoice_data.get("payment_lines") or [])
+    _settlement_table(
+        "Refunds issued after this invoice",
+        invoice_data.get("post_invoice_lines") or [],
+        note="Settled after this tax invoice was raised. Shown for reconciliation only — "
+             "the taxable value and GST above are unchanged.",
+    )
+
     # --- GST e-invoice IRN + signed QR (prompt 18, drawn only when an e-invoice exists) ---
     einvoice = invoice_data.get("einvoice")
     if einvoice and einvoice.get("signed_qr"):

@@ -6,6 +6,7 @@ from models import RoomTypeAvailability, RoomType, Booking, BookingItem
 from schemas import AvailabilityBlockCreate
 from utils.auth_utils import require_reception_or_admin
 from utils.booking_cleanup import expire_pending_bookings
+from utils.availability import booked_qty, out_of_service_count
 from datetime import datetime, date
 
 router = APIRouter(
@@ -147,25 +148,22 @@ def check_room_availability(
             "block_reason": blocked_date.reason or "Rooms not available for selected dates"
         }
     
-    # Count booked rooms for overlapping dates (only confirmed & pending_payment & payment_pending bookings)
-    booked_rooms = db.query(func.sum(BookingItem.quantity)).filter(
-        BookingItem.room_type_id == room_type_id,
-        BookingItem.booking_id.in_(
-            db.query(Booking.booking_id).filter(
-                Booking.status.in_(["confirmed", "pending_payment", "payment_pending"]),
-                Booking.check_in < check_out_date,
-                Booking.check_out > check_in_date
-            )
-        )
-    ).scalar() or 0
-    
-    available_rooms = room_type.total_rooms - booked_rooms
-    
+    # Rooms consumed by overlapping bookings — including guests who have already
+    # CHECKED IN. Shared with the desk via utils/availability so the two surfaces
+    # can never disagree about what is sold (backlog v2 FE-7).
+    booked_rooms = int(booked_qty(db, room_type_id, check_in_date, check_out_date))
+
+    # Deactivated + maintenance/blocked rooms of this type can't be sold either.
+    out_of_service = int(out_of_service_count(db, room_type_id))
+
+    available_rooms = room_type.total_rooms - booked_rooms - out_of_service
+
     return {
         "room_type_id": room_type_id,
         "room_type_name": room_type.name,
         "total_rooms": room_type.total_rooms,
-        "booked_rooms": int(booked_rooms),
+        "booked_rooms": booked_rooms,
+        "out_of_service": out_of_service,
         "available_rooms": max(0, int(available_rooms)),
         "is_blocked": False,
         "check_in": check_in_date,

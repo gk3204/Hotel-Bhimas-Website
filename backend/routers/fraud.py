@@ -22,7 +22,7 @@ from schemas import AlertReview, OtpRequest, OtpVerify
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.fraud_detection import run_reconciliation, compute_daily_digest, get_config
-from utils.owner_otp import create_otp, consume_otp
+from utils.owner_otp import create_otp, consume_otp, deliver_otp
 
 logger = logging.getLogger(__name__)
 
@@ -219,12 +219,31 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
     """Create an owner-approval code for a sensitive action. The code is NOT returned here —
     the owner reads it from the admin Approvals inbox (GET /fraud/otp) / server log, then the
     desk re-submits the action with owner_otp_id + code."""
-    otp = create_otp(db, data.action, data.context, user)
+    otp, delivery = create_otp(db, data.action, data.context, user, return_delivery=True)
     write_audit(db, user, "fraud.otp_request", "owner_otp", otp.id,
-                after={"action": data.action}, client="desktop", commit=True)
+                after={"action": data.action, "delivery": delivery.get("channel")},
+                client="desktop", commit=True)
     return {"otp_id": otp.id, "action": otp.action,
             "expires_at": otp.expires_at.isoformat(),
-            "message": "Owner approval requested. Ask the owner for the code from the admin dashboard."}
+            # Backlog v2 F-C: tell the desk which channel actually carried the code, so
+            # the receptionist knows whether to expect a WhatsApp or to phone the owner.
+            "delivery": delivery,
+            "message": delivery.get("detail")
+                       or "Owner approval requested. Ask the owner for the code from the admin dashboard."}
+
+
+@router.post("/otp/{otp_id}/resend", dependencies=[Depends(require_admin)])
+def otp_resend(otp_id: int, db: Session = Depends(get_db)):
+    """Re-deliver a still-live approval code to the owner's WhatsApp (backlog v2 F-C).
+    Does not mint a new code — the same one is pushed again."""
+    otp = db.query(OwnerOtp).filter(OwnerOtp.id == otp_id).first()
+    if not otp:
+        raise HTTPException(status_code=404, detail="OTP not found")
+    if otp.used:
+        raise HTTPException(status_code=409, detail="That approval code has already been used")
+    if otp.expires_at < datetime.utcnow():
+        raise HTTPException(status_code=409, detail="That approval code has expired")
+    return {"otp_id": otp.id, "delivery": deliver_otp(db, otp)}
 
 
 @router.get("/otp", dependencies=[Depends(require_admin)])
