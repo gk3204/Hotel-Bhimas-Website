@@ -310,46 +310,13 @@ def complete_request(request_id: int, data: RequestActionRequest, db: Session = 
 
 
 def _post_room_service_to_folio(db: Session, r: GuestRequest, user):
-    """Post a room-service order's lines to the stay's open folio, one FolioCharge per menu line
-    (correct GST slabs), decrementing linked stock. Reuses the minibar/folio seam."""
-    folio = db.query(Folio).filter(Folio.booking_id == r.booking_id).first()
-    if not folio:
-        raise HTTPException(status_code=409, detail="No folio for this stay")
-    if folio.status != "open":
-        raise HTTPException(status_code=409, detail="Folio is settled — cannot post room service")
-    from routers.folio import _recompute
-    payload = json.loads(r.payload) if r.payload else {}
-    lines = payload.get("items", [])
-    if not lines:
-        raise HTTPException(status_code=409, detail="This order has no items")
-    first_charge_id = None
-    for ln in lines:
-        qty = float(ln.get("qty") or 1)
-        unit = float(ln.get("unit_price") or 0)
-        charge = FolioCharge(
-            folio_id=folio.id, type="food",
-            description=f"Room service — {ln.get('name', 'item')}",
-            qty=qty, unit_price=unit, amount=round(qty * unit, 2),
-            gst_percent=ln.get("gst_percent"), posted_by=_resolve_user_id(db, user),
-        )
-        db.add(charge)
-        db.flush()
-        first_charge_id = first_charge_id or charge.id
-        # decrement linked stock, best-effort (prompt 18c ledger)
-        if ln.get("stock_item_id"):
-            try:
-                from routers.stock import record_movement
-                from models import StockItem
-                item = db.query(StockItem).filter(StockItem.id == ln["stock_item_id"]).first()
-                if item is not None:
-                    record_movement(db, item, "consume", -abs(qty), user=user,
-                                    reason=f"Room service — request #{r.id}",
-                                    folio_charge_id=charge.id,
-                                    client_ref=f"portal_rs:{r.id}:{ln.get('menu_item_id')}", commit=False)
-            except Exception as e:
-                logger.warning(f"room-service stock consume skipped: {e}")
-    _recompute(db, folio)
-    r.folio_charge_id = first_charge_id
+    """Post a room-service order's lines to the stay's open folio.
+
+    The implementation moved to `services/room_service.py` (TBC-4) so this portal path and
+    the new tablet/desk "Deliver" path share ONE charge-posting routine — GST slabs, stock
+    decrement and idempotency can't drift between the two ways an order gets fulfilled."""
+    from services import room_service
+    return room_service.post_to_folio(db, r, user)
 
 
 @router.post("/requests/{request_id}/dismiss")

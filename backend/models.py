@@ -1222,6 +1222,13 @@ class GuestRequest(Base):
     handled_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
     updated_at = Column(DateTime, nullable=True)
+    # --- Room service: KOT + thermal bill (TBC-4, additive) ---
+    # A kitchen docket needs a number staff can call out ("KOT/20260802/007"). Allocated for
+    # every room_service order whether it came from the guest portal or the desk/tablet, so
+    # one sequence covers the lot.
+    kot_no = Column(String(24), nullable=True, index=True)
+    printed_kot_at = Column(DateTime, nullable=True)    # set when the kitchen docket is printed
+    printed_bill_at = Column(DateTime, nullable=True)   # set when the guest bill is printed
 
 
 class MenuItem(Base):

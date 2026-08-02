@@ -10,7 +10,7 @@ CATEGORY_SLUG_RE = "^[a-z0-9_]{2,40}$"
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8, max_length=100)
-    role: str = Field(..., pattern="^(admin|reception|housekeeper|maintenance|supervisor|user)$")
+    role: str = Field(..., pattern="^(admin|reception|housekeeper|maintenance|supervisor|roomservice|user)$")
 
     @field_validator('username')
     @classmethod
@@ -22,7 +22,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     password: Optional[str] = Field(None, min_length=8, max_length=100)
-    role: Optional[str] = Field(None, pattern="^(admin|reception|housekeeper|maintenance|supervisor|user)$")
+    role: Optional[str] = Field(None, pattern="^(admin|reception|housekeeper|maintenance|supervisor|roomservice|user)$")
 
 
 class UserResponse(BaseModel):
@@ -1175,6 +1175,15 @@ class RoomServiceLine(BaseModel):
 class RoomServiceOrder(BaseModel):
     """Guest places a room-service order from the portal. Creates a request; the desk posts the
     folio charge on fulfil (no charge without staff)."""
+    items: List[RoomServiceLine] = Field(..., min_length=1)
+    note: Optional[str] = Field(None, max_length=300)
+    client_ref: Optional[str] = Field(None, max_length=80)
+
+
+class DeskRoomServiceOrder(BaseModel):
+    """Staff take a room-service order on the tablet / desk (TBC-4). Prices are NEVER taken
+    from the client — the server re-reads the menu, exactly as it does for a guest order."""
+    booking_id: int = Field(..., gt=0)
     items: List[RoomServiceLine] = Field(..., min_length=1)
     note: Optional[str] = Field(None, max_length=300)
     client_ref: Optional[str] = Field(None, max_length=80)

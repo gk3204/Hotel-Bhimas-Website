@@ -55,6 +55,12 @@ to_run.append("018_google_reviews.sql")
 to_run.append("019_backoffice.sql")
 to_run.append("020_inventory_complaints.sql")
 to_run.append("021_guest_portal.sql")
+# 022-024 existed but were never appended here, so `python run_migration.py` silently
+# skipped them. All are idempotent, so adding them is safe on an already-migrated DB.
+to_run.append("022_booking_guests.sql")
+to_run.append("023_linen.sql")
+to_run.append("024_room_type_ac.sql")
+to_run.append("025_room_service.sql")
 
 for f in to_run:
     path = os.path.join(BACKEND, "migrations", f)

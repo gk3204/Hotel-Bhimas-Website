@@ -35,6 +35,8 @@ from routers import companies, vendors, roster
 from routers import stock, complaints
 # --- PMS round-2 batch C part 1 (prompt 18d slice 10: guest extras / in-room QR portal) ---
 from routers import portal
+# --- Room service: tablet/desk ordering + KOT + thermal bill (backlog v2 TBC-4) ---
+from routers import roomservice
 # --- Admin audit-log viewer (read-only surface over the append-only audit trail) ---
 from routers import audit
 
@@ -351,6 +353,7 @@ app.include_router(roster.router)
 app.include_router(stock.router)
 app.include_router(complaints.router)
 app.include_router(portal.router)
+app.include_router(roomservice.router)
 app.include_router(audit.router)
 app.include_router(opsettings.router)
 app.include_router(linen.router)

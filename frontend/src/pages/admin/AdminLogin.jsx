@@ -21,7 +21,8 @@ const AdminLogin = () => {
     if (decoded.role === "admin") navigate("/admin");
     else if (decoded.role === "supervisor") navigate("/admin/housekeeping");
     else if (decoded.role === "reception") navigate("/reception");
-    else if (decoded.role === "housekeeper" || decoded.role === "maintenance") navigate("/staff");
+    // roomservice is a tablet role and lives in the same installable staff shell (TBC-4).
+    else if (["housekeeper", "maintenance", "roomservice"].includes(decoded.role)) navigate("/staff");
     else setError("Unauthorized role");
   };
 

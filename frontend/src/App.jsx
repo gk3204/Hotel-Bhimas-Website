@@ -72,6 +72,7 @@ import ReceptionEnquiries from "./pages/reception/Enquiries";
 import StaffHome from "./pages/staff/StaffHome";
 import MyRooms from "./pages/staff/MyRooms";
 import MyTickets from "./pages/staff/MyTickets";
+import RoomService from "./pages/staff/RoomService";
 
 function App() {
   return (
@@ -164,10 +165,10 @@ function App() {
         <Route path="/reception/enquiries" element={<ReceptionEnquiries />} />
       </Route>
 
-      {/* STAFF PWA LAYOUT (housekeeper + maintenance, Protected) */}
+      {/* STAFF PWA LAYOUT (housekeeper + maintenance + room service, Protected) */}
       <Route
         element={
-          <ProtectedRoute allowedRoles={["housekeeper", "maintenance"]}>
+          <ProtectedRoute allowedRoles={["housekeeper", "maintenance", "roomservice", "reception"]}>
             <StaffLayout />
           </ProtectedRoute>
         }
@@ -175,6 +176,8 @@ function App() {
         <Route path="/staff" element={<StaffHome />} />
         <Route path="/staff/rooms" element={<MyRooms />} />
         <Route path="/staff/tickets" element={<MyTickets />} />
+        {/* Room service runs on a tablet in the same installable shell (TBC-4). */}
+        <Route path="/staff/room-service" element={<RoomService />} />
       </Route>
 
     </Routes>

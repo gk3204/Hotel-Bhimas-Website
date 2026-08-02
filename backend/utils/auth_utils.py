@@ -56,6 +56,17 @@ def require_maintenance_or_admin(user=Depends(get_current_user)):
     return user
 
 
+def require_roomservice(user=Depends(get_current_user)):
+    """Room-service ordering (TBC-4). A `roomservice` login is a TABLET role scoped to one
+    job: take an order, print the KOT, mark it delivered. Reception and admin are included
+    because the front desk takes orders too. The role is deliberately NOT added to any
+    money, folio, fraud or config gate — delivering an order posts its charges through the
+    shared service, which is the only way it can touch a bill at all."""
+    if user.get("role") not in ["admin", "reception", "roomservice"]:
+        raise HTTPException(status_code=403, detail="Room-service access required")
+    return user
+
+
 def require_roles(*roles):
     """Generic role gate. Usage: dependencies=[Depends(require_roles('admin', 'reception'))]"""
     allowed = set(roles)
