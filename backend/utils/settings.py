@@ -13,6 +13,7 @@ migrate more env flags here.
 """
 import json
 import logging
+import os
 import re
 from datetime import datetime
 
@@ -48,6 +49,9 @@ WA_REVIEW_KEY = "wa_review_enabled"
 WA_REVIEW_DELAY_HOURS_KEY = "wa_review_delay_hours"
 WA_OWNER_ALERTS_KEY = "wa_owner_alerts_enabled"
 WA_OWNER_NUMBER_KEY = "owner_whatsapp"
+# Owner's email — the fallback when WhatsApp is unavailable (backlog v2 FE-11). There is
+# no email column on User anywhere in the schema, so this setting is the only source.
+OWNER_EMAIL_KEY = "owner_email"
 WA_REVIEW_URL_KEY = "wa_google_review_url"
 WA_JOB_INTERVAL_KEY = "wa_job_interval_minutes"
 WA_DIGEST_HOUR_KEY = "wa_daily_digest_hour"
@@ -275,11 +279,11 @@ def get_housekeeping_config(db) -> dict:
     """Typed housekeeping config: whether marking a room clean also auto-inspects it
     (skipping the supervisor gate). Default off = a supervisor/admin must inspect before
     a room is re-sellable."""
-    import os
     return {
         "auto_inspect": _as_bool(get_setting(db, HK_AUTO_INSPECT_KEY, "false")),
-        # surfaced read-only so the admin UI can show the fraud threshold (env-owned, prompt 11)
-        "cleaning_max_hours": float(os.getenv("CLEANING_MAX_HOURS", "6") or 6),
+        # Surfaced read-only so the admin UI can show the fraud threshold. It is EDITED on
+        # the fraud tab; read it from the same place so the two screens can't disagree (FE-12).
+        "cleaning_max_hours": float(get_fraud_config(db)["cleaning_max_hours"]),
     }
 
 
@@ -330,6 +334,8 @@ def get_whatsapp_config(db) -> dict:
         "review_delay_hours": max(0.0, _as_float(get_setting(db, WA_REVIEW_DELAY_HOURS_KEY), 3.0)),
         "owner_alerts_enabled": _as_bool(get_setting(db, WA_OWNER_ALERTS_KEY, "true")),
         "owner_whatsapp": (get_setting(db, WA_OWNER_NUMBER_KEY, "") or "").strip(),
+        # Fallback address for owner alerts when WhatsApp is unavailable (FE-11).
+        "owner_email": (get_setting(db, OWNER_EMAIL_KEY, "") or "").strip(),
         "google_review_url": (get_setting(db, WA_REVIEW_URL_KEY, "") or "").strip(),
         "job_interval_minutes": max(1, _as_int(get_setting(db, WA_JOB_INTERVAL_KEY), 15)),
         "daily_digest_hour": min(23, max(0, _as_int(get_setting(db, WA_DIGEST_HOUR_KEY), 9))),
@@ -476,6 +482,86 @@ def get_stock_config(db) -> dict:
     }
 
 
+# =====================================================================
+# ANTI-FRAUD THRESHOLDS + OTP GATES (backlog v2 FE-12)
+# =====================================================================
+# These were env-only and READ-ONLY in the admin UI, so turning a gate on meant a
+# redeploy. They are now settings-backed with the ENV VALUE AS THE DEFAULT, which
+# means an untouched install behaves exactly as before; the first admin save takes
+# over. Every enforcement site reads get_fraud_config() so the screen can never
+# claim a gate is on while the code checks something else.
+FRAUD_CLEANING_MAX_HOURS_KEY = "fraud_cleaning_max_hours"
+FRAUD_ALLOWED_ISSUE_HOURS_KEY = "fraud_allowed_issue_hours"
+FRAUD_ALLOWED_STATIONS_KEY = "fraud_allowed_stations"
+FRAUD_REPEAT_REFUND_THRESHOLD_KEY = "fraud_repeat_refund_threshold"
+FRAUD_REFUND_OTP_KEY = "fraud_refund_requires_owner_otp"
+FRAUD_DISCOUNT_OTP_KEY = "fraud_discount_otp_required"
+FRAUD_CARD_ISSUE_OTP_KEY = "fraud_card_issue_otp_required"
+FRAUD_OTP_TTL_MINUTES_KEY = "fraud_owner_otp_ttl_minutes"
+
+FRAUD_EDITABLE_KEYS = (
+    FRAUD_CLEANING_MAX_HOURS_KEY, FRAUD_ALLOWED_ISSUE_HOURS_KEY, FRAUD_ALLOWED_STATIONS_KEY,
+    FRAUD_REPEAT_REFUND_THRESHOLD_KEY, FRAUD_REFUND_OTP_KEY, FRAUD_DISCOUNT_OTP_KEY,
+    FRAUD_CARD_ISSUE_OTP_KEY, FRAUD_OTP_TTL_MINUTES_KEY,
+)
+
+_ALLOWED_HOURS_RE = re.compile(r"^\d{1,2}-\d{1,2}$")
+
+
+def _env_bool(name: str, default: str = "false") -> bool:
+    return (os.getenv(name, default) or default).strip().lower() not in ("false", "0", "no")
+
+
+def _bool_or(v, default: bool) -> bool:
+    """Like _as_bool, but an ABSENT setting falls back to `default` instead of being
+    coerced (plain _as_bool maps None -> True, which would silently arm a gate)."""
+    if v is None or str(v).strip() == "":
+        return default
+    return str(v).strip().lower() not in ("false", "0", "no")
+
+
+def get_fraud_config(db) -> dict:
+    """Typed anti-fraud config. Each value falls back to its historical env var, so an
+    install that has never opened the Settings screen keeps its current behaviour."""
+    raw_stations = get_setting(db, FRAUD_ALLOWED_STATIONS_KEY, os.getenv("ALLOWED_STATIONS", ""))
+    stations = [s.strip() for s in (raw_stations or "").split(",") if s.strip()]
+
+    hours = (get_setting(db, FRAUD_ALLOWED_ISSUE_HOURS_KEY,
+                         os.getenv("ALLOWED_ISSUE_HOURS", "06-23")) or "06-23").strip()
+    if not _ALLOWED_HOURS_RE.match(hours):
+        hours = "06-23"
+
+    return {
+        # 0 disables the cleaning-too-long detector's alerting window.
+        "cleaning_max_hours": max(0, _as_int(get_setting(db, FRAUD_CLEANING_MAX_HOURS_KEY),
+                                             _as_int(os.getenv("CLEANING_MAX_HOURS"), 6))),
+        "allowed_issue_hours": hours,
+        "allowed_stations": stations,
+        "repeat_refund_threshold": max(1, _as_int(get_setting(db, FRAUD_REPEAT_REFUND_THRESHOLD_KEY),
+                                                  _as_int(os.getenv("REPEAT_REFUND_THRESHOLD"), 3))),
+        "refund_requires_owner_otp": _bool_or(get_setting(db, FRAUD_REFUND_OTP_KEY),
+                                              _env_bool("REFUND_REQUIRES_OWNER_OTP")),
+        "discount_otp_required": _bool_or(get_setting(db, FRAUD_DISCOUNT_OTP_KEY),
+                                          _env_bool("DISCOUNT_OTP_REQUIRED")),
+        "card_issue_otp_required": _bool_or(get_setting(db, FRAUD_CARD_ISSUE_OTP_KEY),
+                                            _env_bool("CARD_ISSUE_OTP_REQUIRED")),
+        "owner_otp_ttl_minutes": max(1, _as_int(get_setting(db, FRAUD_OTP_TTL_MINUTES_KEY),
+                                                _as_int(os.getenv("OWNER_OTP_TTL_MINUTES"), 10))),
+    }
+
+
+def allowed_issue_hours_window(db):
+    """Parse the configured 'HH-HH' window -> (start, end); allowed = start <= hour < end."""
+    try:
+        a, b = get_fraud_config(db)["allowed_issue_hours"].split("-")
+        start, end = int(a), int(b)
+        if 0 <= start <= 24 and 0 <= end <= 24 and start < end:
+            return start, end
+    except (ValueError, AttributeError):
+        pass
+    return 6, 23
+
+
 # Keys an admin may edit through PUT /complaints/config.
 COMPLAINT_EDITABLE_KEYS = tuple(
     [COMPLAINT_SLA_RESPONSE_PREFIX + p for p in ("urgent", "high", "normal", "low")]
@@ -547,6 +633,11 @@ CATEGORY_FAMILIES = {
     "maintenance": ["electrical", "plumbing", "carpentry", "appliance", "lock", "other"],
     "complaint":   ["cleanliness", "noise", "maintenance", "service", "billing", "amenities", "staff", "other"],
     "menu":        ["food", "beverage", "snack", "service"],
+    # Backlog v2 FE-6 — the last two hard-coded option lists in the web admin
+    # (Inventory.jsx and Vendors.jsx each shipped their own array).
+    "stock":       ["minibar", "toiletries", "linen", "supplies", "fnb", "cleaning", "other"],
+    "vendor":      ["laundry", "lock_amc", "linen", "electrical", "plumbing", "it",
+                    "fnb", "security", "other"],
 }
 _CATEGORY_KEY_PREFIX = "categories_"     # + family; stored as a JSON array of slugs
 _SLUG_RE = re.compile(r"^[a-z0-9_]{2,40}$")

@@ -20,6 +20,7 @@ from datetime import datetime, timedelta
 from models import Booking, Guest, BookingItem, Room, FraudAlert
 from utils import settings as app_settings
 from utils import whatsapp_service as wa
+from services import notify as notify_service
 from routers.reception import booking_checkout_moment, _grace_minutes
 
 logger = logging.getLogger(__name__)
@@ -61,13 +62,14 @@ def send_checkout_reminders(db) -> int:
             if wa.already_sent(db, f"checkout_reminder:{b.booking_id}"):
                 continue
             g = _guest(db, b)
-            if not g or not g.phone:
+            if not g or not (g.phone or g.email):
                 continue
-            wa.send_template(
-                db, g.phone, "checkout_reminder",
-                {"guest_name": g.name, "checkout_time": moment.strftime("%d-%m-%Y %H:%M"),
-                 "room_label": _room_label(db, b)},
-                guest_id=g.guest_id, booking_id=b.booking_id,
+            notify_service.notify_guest(
+                db, g, template="checkout_reminder",
+                params={"guest_name": g.name,
+                        "checkout_time": moment.strftime("%d-%m-%Y %H:%M"),
+                        "room_label": _room_label(db, b)},
+                booking_id=b.booking_id,
                 client_ref=f"checkout_reminder:{b.booking_id}")
             sent += 1
     return sent
@@ -80,7 +82,6 @@ def send_overstay_alerts(db) -> int:
         return 0
     grace = timedelta(minutes=_grace_minutes())
     now = datetime.now()
-    owner = wa.owner_number(db)
     sent = 0
     bookings = db.query(Booking).filter(Booking.status == "checked_in").all()
     for b in bookings:
@@ -88,19 +89,19 @@ def send_overstay_alerts(db) -> int:
         if now > moment + grace:
             g = _guest(db, b)
             room_label = _room_label(db, b)
-            if g and g.phone and not wa.already_sent(db, f"overstay:{b.booking_id}"):
-                wa.send_template(
-                    db, g.phone, "overstay",
-                    {"guest_name": g.name, "room_label": room_label},
+            if g and (g.phone or g.email) and not wa.already_sent(db, f"overstay:{b.booking_id}"):
+                notify_service.notify(
+                    db, template="overstay",
+                    params={"guest_name": g.name, "room_label": room_label},
+                    to_phone=g.phone, to_email=g.email, to_name=g.name,
                     guest_id=g.guest_id, booking_id=b.booking_id,
                     client_ref=f"overstay:{b.booking_id}", respect_optout=False)
                 sent += 1
-            if owner and cfg["owner_alerts_enabled"] and not wa.already_sent(db, f"overstay_owner:{b.booking_id}"):
-                wa.send_template(
-                    db, owner, "overstay",
-                    {"guest_name": g.name if g else "Guest", "room_label": room_label},
-                    booking_id=b.booking_id,
-                    client_ref=f"overstay_owner:{b.booking_id}", respect_optout=False)
+            if cfg["owner_alerts_enabled"] and not wa.already_sent(db, f"overstay_owner:{b.booking_id}"):
+                notify_service.notify_owner(
+                    db, template="overstay",
+                    params={"guest_name": g.name if g else "Guest", "room_label": room_label},
+                    client_ref=f"overstay_owner:{b.booking_id}")
                 sent += 1
     return sent
 
@@ -132,11 +133,10 @@ def send_review_requests(db) -> int:
             continue
         if guest_has_open_complaint(db, g.guest_id):
             continue  # suppress until resolved
-        wa.send_template(
-            db, g.phone, "review_feedback",
-            {"guest_name": g.name, "review_url": cfg["google_review_url"] or ""},
-            guest_id=g.guest_id, booking_id=b.booking_id,
-            client_ref=f"review:{b.booking_id}")
+        notify_service.notify_guest(
+            db, g, template="review_feedback",
+            params={"guest_name": g.name, "review_url": cfg["google_review_url"] or ""},
+            booking_id=b.booking_id, client_ref=f"review:{b.booking_id}")
         sent += 1
     return sent
 
@@ -151,13 +151,16 @@ def send_daily_digest_if_due(db) -> int:
     if now_ist.hour < cfg["daily_digest_hour"]:
         return 0
     digest = compute_daily_digest(db)
-    row = wa.send_daily_digest(db, digest)  # idempotent per day via client_ref inside
-    return 1 if row is not None else 0
+    # Returns notify()'s {channel, ok, detail} — WhatsApp, else the owner's email (FE-11).
+    result = wa.send_daily_digest(db, digest)  # idempotent per day via client_ref inside
+    return 1 if (result or {}).get("ok") else 0
 
 
 def notify_new_fraud_alerts(db) -> int:
-    """Run the reconciliation sweep, then WhatsApp the owner about any open high-severity alert."""
+    """Run the reconciliation sweep, then alert the owner about any open high-severity
+    alert — WhatsApp, falling back to their email (FE-11)."""
     from utils.fraud_detection import run_reconciliation
+    from services import notify as notify_service
     cfg = app_settings.get_whatsapp_config(db)
     if not cfg["owner_alerts_enabled"]:
         return 0
@@ -165,8 +168,8 @@ def notify_new_fraud_alerts(db) -> int:
         run_reconciliation(db)
     except Exception as e:
         logger.warning(f"whatsapp_jobs: reconciliation failed: {e}")
-    owner = wa.owner_number(db)
-    if not owner:
+    # An owner with neither a WhatsApp number nor an email can't be reached at all.
+    if not wa.owner_number(db) and not notify_service.owner_email(db):
         return 0
     alerts = (db.query(FraudAlert)
               .filter(FraudAlert.status == "open", FraudAlert.severity == "high").all())
@@ -174,8 +177,8 @@ def notify_new_fraud_alerts(db) -> int:
     for a in alerts:
         if wa.already_sent(db, f"fraud_alert:{a.id}"):
             continue
-        row = wa.send_fraud_alert(db, a)  # idempotent per alert via client_ref
-        if row is not None and row.status == "sent":
+        result = wa.send_fraud_alert(db, a)  # idempotent per alert via client_ref
+        if (result or {}).get("ok"):
             sent += 1
     return sent
 

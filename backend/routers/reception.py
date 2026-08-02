@@ -367,20 +367,14 @@ def _card_window(booking: Booking):
 
 
 def _wa_notify(db, setting_key, guest, template, params, booking_id=None, client_ref=None):
-    """Best-effort transactional WhatsApp send (prompt 15), gated by an app_settings toggle.
-    Never raises — a messaging failure must not break check-in / booking / payment."""
-    try:
-        if not guest or not getattr(guest, "phone", None):
-            return
-        from utils.settings import get_setting
-        if str(get_setting(db, setting_key, "true")).strip().lower() in ("false", "0", "no", ""):
-            return
-        from utils import whatsapp_service
-        whatsapp_service.send_template(db, guest.phone, template, params,
-                                       guest_id=getattr(guest, "guest_id", None),
-                                       booking_id=booking_id, client_ref=client_ref)
-    except Exception as e:
-        logger.warning(f"transactional WhatsApp ({template}) failed: {e}")
+    """Best-effort transactional guest message, gated by an app_settings toggle.
+    WhatsApp first, EMAIL as fallback (backlog v2 FE-11 generalised this helper into
+    services/notify.py). Never raises — a messaging failure must not break check-in /
+    booking / payment."""
+    from services import notify as notify_service
+    return notify_service.notify_guest(db, guest, template=template, params=params,
+                                       setting_key=setting_key, booking_id=booking_id,
+                                       client_ref=client_ref)
 
 
 def _room_code(room: Room) -> str:

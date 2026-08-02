@@ -18,19 +18,22 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Booking, BookingItem, CardIssuance, FraudAlert, Room
 from schemas import CardIssueRequest
+from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_reception_or_admin
 from utils.owner_otp import consume_otp
 from routers.payments import total_paid
 
 # Anti-fraud (ALT-1): reissuing a reported-lost card or cutting an EXTRA card beyond the
-# check-in set are the two high-risk desk actions. When CARD_ISSUE_OTP_REQUIRED is on they
-# need an owner approval code — opt-in (default off) so existing behaviour is unchanged.
+# check-in set are the two high-risk desk actions. When the card-issue gate is on they need
+# an owner approval code — opt-in (default off) so existing behaviour is unchanged. The
+# toggle is now admin-editable in Settings, defaulting to the CARD_ISSUE_OTP_REQUIRED env
+# var (backlog v2 FE-12).
 _OTP_GATED_ISSUE_TYPES = ("extra", "lost_reissue")
 
 
-def _card_issue_otp_required() -> bool:
-    return os.getenv("CARD_ISSUE_OTP_REQUIRED", "false").strip().lower() not in ("false", "0", "no")
+def _card_issue_otp_required(db) -> bool:
+    return app_settings.get_fraud_config(db)["card_issue_otp_required"]
 
 logger = logging.getLogger(__name__)
 
@@ -127,7 +130,7 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
         # nothing cut yet) but a card that is ALREADY encoded is still recorded and flagged —
         # a live card is never silently dropped. Consumed here so the code is only spent if the
         # issuance commits. Opt-in via CARD_ISSUE_OTP_REQUIRED (default off).
-        if data.issue_type in _OTP_GATED_ISSUE_TYPES and _card_issue_otp_required():
+        if data.issue_type in _OTP_GATED_ISSUE_TYPES and _card_issue_otp_required(db):
             try:
                 consume_otp(db, data.owner_otp_id, data.owner_otp_code, "card_issue", user)
             except HTTPException:

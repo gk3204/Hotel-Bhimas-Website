@@ -817,6 +817,60 @@ GSTIN: 37AAACK9397F1Z3
         raise
 
 
+def is_configured() -> bool:
+    """True when Mailjet credentials are present, so callers can tell a real send from a no-op."""
+    return bool(MAILJET_API_KEY and MAILJET_API_SECRET)
+
+
+def send_notification_email(to_email, subject, body, to_name=None, hotel_name="Hotel Bhimas"):
+    """Generic transactional notification (backlog v2 FE-11 — the email half of the
+    WhatsApp-or-email fallback). The body is plain text rendered from the SAME message
+    template catalog WhatsApp uses, wrapped in the house style.
+
+    Returns True on success, False otherwise — never raises, because a messaging failure
+    must not break check-in / booking / payment."""
+    if not is_configured():
+        logger.warning("email fallback skipped — Mailjet not configured")
+        return False
+    if not to_email:
+        return False
+
+    safe_body = (body or "").strip()
+    html_lines = "".join(
+        f"<p style='margin:0 0 10px'>{ln}</p>" for ln in safe_body.split("\n") if ln.strip())
+    html_body = f"""
+    <div style="font-family:Arial,sans-serif;max-width:560px;margin:auto;color:#1f2937">
+      <h2 style="color:#B8860B">{hotel_name}</h2>
+      {html_lines}
+      <p style="font-size:12px;color:#6b7280;margin-top:24px">
+        You are receiving this because it relates to your stay at {hotel_name}.
+      </p>
+    </div>
+    """
+    data = {
+        'Messages': [
+            {
+                "From": {"Email": MAIL_FROM, "Name": hotel_name},
+                "To": [{"Email": to_email, "Name": to_name or "Guest"}],
+                "Subject": subject or hotel_name,
+                "TextPart": safe_body,
+                "HTMLPart": html_body,
+                "ReplyTo": {"Email": "hotelbhimas@gmail.com", "Name": hotel_name},
+            }
+        ]
+    }
+    try:
+        result = mailjet.send.create(data=data)
+        if result.status_code == 200:
+            logger.info(f"✅ Notification email sent to {to_email}")
+            return True
+        logger.error(f"❌ Mailjet failed: {result.status_code} — {result.json()}")
+        return False
+    except Exception as e:
+        logger.error(f"❌ Notification email error: {e}")
+        return False
+
+
 def send_prearrival_link_email(guest_email, guest_name, link, hotel_name="Hotel Bhimas"):
     """Send the pre-arrival digital-registration link to a guest (prompt 14).
     Mirrors the Mailjet payload style of the other senders. Raises on failure so the

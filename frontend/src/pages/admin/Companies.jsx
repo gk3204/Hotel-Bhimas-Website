@@ -2,6 +2,8 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { FaFileCsv, FaFilePdf, FaPlus, FaSave, FaSearch } from "react-icons/fa";
 import * as api from "../../api/backoffice";
+import ConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
 import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
@@ -643,74 +645,7 @@ function InvoicesTab({ companies, selected, setSelectedId, showToast }) {
 
 /* ------------------------------------------------------------------ settings */
 
-const CONFIG_FIELDS = [
-  ["company_default_credit_days", "Default credit days for a new company", "number"],
-  ["company_invoice_prefix", "Consolidated invoice prefix", "text"],
-  ["vendor_renewal_lead_days", "Vendor renewal reminder lead (days)", "number"],
-  ["attendance_auto_close_hours", "Auto-close a forgotten clock-out after (hours)", "number"],
-];
-
-const CONFIG_TOGGLES = [
-  ["company_credit_block", "Refuse a folio that would breach a company's credit limit (an admin can still override with a reason)"],
-  ["vendor_renewal_alerts_enabled", "WhatsApp the owner when a vendor contract enters its renewal window"],
-  ["attendance_pin_enabled", "Allow staff to clock in/out with their PIN at the desk"],
-];
-
+// The same editor the Settings hub renders — one source, so the two can't drift (FE-12).
 function SettingsTab({ showToast }) {
-  const [cfg, setCfg] = useState(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    api.getBackofficeConfig().then(setCfg).catch((e) => showToast(e.message || "Failed to load config"));
-    // eslint-disable-next-line
-  }, []);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const payload = {};
-      CONFIG_FIELDS.forEach(([k, , type]) => {
-        payload[k] = type === "number" ? Number(cfg[k]) : cfg[k];
-      });
-      CONFIG_TOGGLES.forEach(([k]) => { payload[k] = !!cfg[k]; });
-      payload.roster_default_shift_type = cfg.roster_default_shift_type;
-      const updated = await api.updateBackofficeConfig(payload);
-      setCfg((c) => ({ ...c, ...updated }));
-      showToast("Settings saved");
-    } catch (e) {
-      showToast(e.message || "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (!cfg) return <Card><Spinner className="p-12" /></Card>;
-
-  return (
-    <Card title="Back-office configuration">
-      <div className="p-6">
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {CONFIG_FIELDS.map(([k, label, type]) => (
-            <Field key={k} label={label} type={type} value={cfg[k] ?? ""}
-              onChange={(e) => setCfg({ ...cfg, [k]: e.target.value })} />
-          ))}
-          <SelectField label="Default roster shift type" value={cfg.roster_default_shift_type || "general"}
-            onChange={(e) => setCfg({ ...cfg, roster_default_shift_type: e.target.value })}
-            options={["general", "morning", "evening", "night"]} />
-        </div>
-        <div className="mt-6 space-y-3">
-          {CONFIG_TOGGLES.map(([k, label]) => (
-            <label key={k} className="flex items-start gap-3 text-slate-200">
-              <input type="checkbox" checked={!!cfg[k]} className="h-5 w-5 accent-[#E5C07B] mt-0.5"
-                onChange={(e) => setCfg({ ...cfg, [k]: e.target.checked })} />
-              <span className="text-sm">{label}</span>
-            </label>
-          ))}
-        </div>
-        <PrimaryButton onClick={save} disabled={saving} className="mt-6">
-          <FaSave size={14} /> {saving ? "Saving…" : "Save settings"}
-        </PrimaryButton>
-      </div>
-    </Card>
-  );
+  return <ConfigPanel group={groupByKey("backoffice")} showToast={showToast} />;
 }

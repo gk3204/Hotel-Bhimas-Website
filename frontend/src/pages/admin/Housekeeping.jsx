@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from "react";
-import { FaSyncAlt, FaCheckDouble, FaSave } from "react-icons/fa";
-import { getRooms, getConfig, updateConfig, inspectRoom } from "../../api/housekeeping";
+import { FaSyncAlt, FaCheckDouble } from "react-icons/fa";
+import { getRooms, getConfig, inspectRoom } from "../../api/housekeeping";
 import { PageShell } from "../../components/admin/BackofficeUI";
+import ConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
 
 const hkChip = (s) => {
   const map = {
@@ -47,18 +49,6 @@ export default function Housekeeping() {
     load();
   }, []); // eslint-disable-line
 
-  const saveConfig = async () => {
-    setSaving(true);
-    try {
-      const cfg = await updateConfig({ auto_inspect: config.auto_inspect });
-      setConfig(cfg);
-      showToast("Housekeeping settings saved");
-    } catch (e) {
-      showToast(e.message, "error");
-    }
-    setSaving(false);
-  };
-
   const confirmInspect = async () => {
     const room = inspectTarget;
     if (!room) return;
@@ -87,29 +77,13 @@ export default function Housekeeping() {
       title="Housekeeping"
       subtitle="Housekeepers set cleaning status; a supervisor marks a room inspected before it is re-sellable."
     >
-        {/* Config */}
+        {/* Config — the same editor the Settings hub renders (FE-12). */}
+        <ConfigPanel group={groupByKey("housekeeping")} showToast={showToast} />
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-6 backdrop-blur">
-          <h2 className="text-xl font-bold text-[#E5C07B] mb-5">Settings</h2>
           <div className="flex flex-wrap items-center gap-6">
-            <label className="flex items-center gap-3 px-4 py-2.5 bg-slate-900/50 border border-slate-600 rounded-lg cursor-pointer">
-              <input
-                type="checkbox"
-                checked={!!config.auto_inspect}
-                onChange={(e) => setConfig({ ...config, auto_inspect: e.target.checked })}
-                className="w-4 h-4 accent-[#E5C07B]"
-              />
-              <span className="text-slate-300 text-sm">Auto-inspect (mark-clean also inspects — skips the supervisor gate)</span>
-            </label>
             <div className="text-slate-400 text-sm">
               Cleaning-too-long alert after <b className="text-slate-200">{config.cleaning_max_hours}h</b>
             </div>
-            <button
-              onClick={saveConfig}
-              disabled={saving}
-              className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-bold px-6 py-2.5 rounded-lg transition-all hover:scale-105 disabled:opacity-50 flex items-center gap-2"
-            >
-              <FaSave size={13} /> {saving ? "Saving…" : "Save"}
-            </button>
             <button onClick={load} className="bg-slate-700 hover:bg-slate-600 font-semibold px-6 py-2.5 rounded-lg transition flex items-center gap-2">
               <FaSyncAlt size={13} /> Refresh
             </button>

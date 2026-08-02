@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { PageShell } from "../../components/admin/BackofficeUI";
-import { getCashConfig, updateCashConfig, getShifts } from "../../api/cashShift";
-import { FaSave, FaSyncAlt } from "react-icons/fa";
+import ConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
+import { getCashConfig, getShifts } from "../../api/cashShift";
+import { FaSyncAlt } from "react-icons/fa";
 
 const fmt = (n) =>
   n === null || n === undefined
@@ -15,7 +17,6 @@ const statusChip = (s) =>
 
 const CashShiftSettings = () => {
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [toast, setToast] = useState(null);
 
   const [form, setForm] = useState({ cycle: "shift", variance_threshold: 100, variance_alert_enabled: true });
@@ -45,26 +46,8 @@ const CashShiftSettings = () => {
 
   useEffect(() => { load(); }, []); // eslint-disable-line
 
-  const save = async () => {
-    setSaving(true);
-    try {
-      const cfg = await updateCashConfig({
-        cycle: form.cycle,
-        variance_threshold: Number(form.variance_threshold),
-        variance_alert_enabled: form.variance_alert_enabled,
-      });
-      setForm({
-        cycle: cfg.cycle,
-        variance_threshold: cfg.variance_threshold,
-        variance_alert_enabled: !!cfg.variance_alert_enabled,
-      });
-      showToast("Cash-shift settings saved");
-    } catch (e) {
-      showToast(e.message, "error");
-    }
-    setSaving(false);
-  };
-
+  // `form` is no longer edited here — it is kept so the shift table can still highlight
+  // an over-threshold variance. The editor itself lives in ConfigPanel (FE-12).
   const flagged = (s) =>
     s.status === "closed" && form.variance_alert_enabled &&
     Math.abs(Number(s.variance || 0)) > Number(form.variance_threshold || 0);
@@ -76,64 +59,8 @@ const CashShiftSettings = () => {
       subtitle="Set the reconciliation cycle and the variance-alert threshold, and review recent shifts. A closed shift whose variance exceeds the threshold raises an owner alert."
     >
 
-        {/* Config card */}
-        <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-6 backdrop-blur">
-          <h2 className="text-xl font-bold text-[#E5C07B] mb-5">Settings</h2>
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 items-end">
-            <div className="flex flex-col">
-              <label className="mb-2 text-sm font-semibold text-slate-300">Reconciliation cycle</label>
-              <select
-                value={form.cycle}
-                onChange={(e) => setForm({ ...form, cycle: e.target.value })}
-                className={inputCls}
-              >
-                <option value="shift">Per shift</option>
-                <option value="day">Per day</option>
-              </select>
-            </div>
-            <div className="flex flex-col">
-              <label className="mb-2 text-sm font-semibold text-slate-300">Variance alert threshold (₹)</label>
-              <input
-                type="number"
-                min="0"
-                step="1"
-                value={form.variance_threshold}
-                onChange={(e) => setForm({ ...form, variance_threshold: e.target.value })}
-                className={inputCls}
-              />
-            </div>
-            <div className="flex flex-col">
-              <label className="mb-2 text-sm font-semibold text-slate-300">Owner alert</label>
-              <label className="flex items-center gap-3 px-4 py-2.5 bg-slate-900/50 border border-slate-600 rounded-lg cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={form.variance_alert_enabled}
-                  onChange={(e) => setForm({ ...form, variance_alert_enabled: e.target.checked })}
-                  className="w-4 h-4 accent-[#E5C07B]"
-                />
-                <span className="text-slate-300 text-sm">Raise an alert when variance exceeds the threshold</span>
-              </label>
-            </div>
-          </div>
-          <div className="flex items-center gap-4 mt-6">
-            <button
-              onClick={save}
-              disabled={saving}
-              className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-bold px-6 py-2.5 rounded-lg transition-all hover:scale-105 disabled:opacity-50 flex items-center gap-2"
-            >
-              <FaSave size={13} /> {saving ? "Saving…" : "Save settings"}
-            </button>
-            <button
-              onClick={load}
-              className="bg-slate-700 hover:bg-slate-600 font-semibold px-6 py-2.5 rounded-lg transition flex items-center gap-2"
-            >
-              <FaSyncAlt size={13} /> Refresh
-            </button>
-            <p className="text-slate-500 text-xs">
-              Changes apply immediately at the reception desk — no redeploy needed.
-            </p>
-          </div>
-        </div>
+        {/* Config — the same editor the Settings hub renders (FE-12). */}
+        <ConfigPanel group={groupByKey("cash")} showToast={showToast} />
 
         {/* Recent shifts */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl shadow-xl overflow-hidden backdrop-blur">

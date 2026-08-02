@@ -292,57 +292,46 @@ def _owner_alerts_on(db) -> bool:
     return app_settings.get_whatsapp_config(db)["owner_alerts_enabled"]
 
 
+# The owner wrappers below route through services/notify.py so an alert that can't go by
+# WhatsApp still reaches the owner's email (backlog v2 FE-11). They each return notify()'s
+# {channel, ok, detail} dict. Imported lazily — notify imports this module.
+def _notify_owner(db, template, params, client_ref, commit):
+    from services import notify as notify_service
+    return notify_service.notify_owner(db, template=template, params=params,
+                                       client_ref=client_ref, commit=commit)
+
+
 def send_owner_otp(db, otp, commit=True):
-    """Deliver an owner-approval code to the owner's WhatsApp (prompt 11 -> 15). Best-effort:
-    the on-screen/log delivery in owner_otp.create_otp still works if this is a no-op."""
-    if not _owner_alerts_on(db):
-        return None
-    num = owner_number(db)
-    if not num:
-        return None
-    return send_template(db, num, "owner_otp",
-                         {"code": otp.code, "action": otp.action},
-                         client_ref=f"owner_otp:{otp.id}", respect_optout=False, commit=commit)
+    """Deliver an owner-approval code to the owner (WhatsApp, else email). Best-effort:
+    the on-screen Approvals inbox always works even when this is a no-op."""
+    return _notify_owner(db, "owner_otp", {"code": otp.code, "action": otp.action},
+                         f"owner_otp:{otp.id}", commit)
 
 
 def send_fraud_alert(db, alert, commit=True):
-    if not _owner_alerts_on(db):
-        return None
-    num = owner_number(db)
-    if not num:
-        return None
     detail = ""
     try:
         d = json.loads(alert.detail) if getattr(alert, "detail", None) else {}
         detail = d.get("message") or d.get("dedupe_key") or ""
     except Exception:
         detail = ""
-    return send_template(db, num, "fraud_alert",
-                         {"alert_type": getattr(alert, "type", "alert"), "detail": detail or "see dashboard"},
-                         client_ref=f"fraud_alert:{alert.id}", respect_optout=False, commit=commit)
+    return _notify_owner(db, "fraud_alert",
+                         {"alert_type": getattr(alert, "type", "alert"),
+                          "detail": detail or "see dashboard"},
+                         f"fraud_alert:{alert.id}", commit)
 
 
 def send_cash_variance_alert(db, shift, variance, commit=True):
-    if not _owner_alerts_on(db):
-        return None
-    num = owner_number(db)
-    if not num:
-        return None
-    return send_template(db, num, "cash_variance",
+    return _notify_owner(db, "cash_variance",
                          {"shift_id": shift.id, "variance": f"{variance:.2f}"},
-                         client_ref=f"cash_variance:{shift.id}", respect_optout=False, commit=commit)
+                         f"cash_variance:{shift.id}", commit)
 
 
 def send_daily_digest(db, digest, commit=True):
-    if not _owner_alerts_on(db):
-        return None
-    num = owner_number(db)
-    if not num:
-        return None
     day = digest.get("day")
     occ = (digest.get("occupancy") or {}).get("occupancy_pct", 0)
-    return send_template(db, num, "daily_digest",
+    return _notify_owner(db, "daily_digest",
                          {"day": day, "occupancy_pct": occ,
                           "revenue": f"{digest.get('revenue_today', 0):.2f}",
                           "open_alerts": digest.get("open_alerts", 0)},
-                         client_ref=f"daily_digest:{day}", respect_optout=False, commit=commit)
+                         f"daily_digest:{day}", commit)

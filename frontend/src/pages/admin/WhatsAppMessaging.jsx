@@ -3,9 +3,11 @@ import {
   FaWhatsapp, FaSave, FaSyncAlt, FaPlay, FaPaperPlane, FaTrash, FaBan, FaListUl, FaSlidersH,
 } from "react-icons/fa";
 import {
-  getWhatsappConfig, updateWhatsappConfig, getTemplates, getMessages,
+  getWhatsappConfig, getTemplates, getMessages,
   getOptOuts, addOptOut, removeOptOut, runJobs, sendTest,
 } from "../../api/whatsapp";
+import SharedConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
 
 const inputCls =
   "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -33,20 +35,9 @@ const TabBtn = ({ active, onClick, icon, label }) => (
 );
 
 // The automation toggles rendered as a checkbox grid, bound to the config form.
-const TOGGLES = [
-  ["checkout_reminder_enabled", "Checkout reminder (≈2h before)"],
-  ["overstay_enabled", "Overstay alert (guest + owner)"],
-  ["confirmation_enabled", "Booking confirmation"],
-  ["receipt_enabled", "Payment receipt"],
-  ["room_ready_enabled", "Room ready / welcome"],
-  ["review_enabled", "Post-checkout review + feedback"],
-  ["owner_alerts_enabled", "Owner alerts (OTP / digest / fraud)"],
-];
-
 export default function WhatsAppMessaging() {
   const [tab, setTab] = useState("settings");
   const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [running, setRunning] = useState(false);
   const [toast, setToast] = useState(null);
 
@@ -101,33 +92,6 @@ export default function WhatsAppMessaging() {
   const loadMessages = async () => {
     const r = await getMessages({ status: msgStatus || undefined, limit: 150 });
     setMessages(r.data || []);
-  };
-
-  const save = async () => {
-    if (!form) return;
-    setSaving(true);
-    try {
-      const payload = {
-        checkout_reminder_enabled: !!form.checkout_reminder_enabled,
-        checkout_reminder_lead_hours: Number(form.checkout_reminder_lead_hours),
-        overstay_enabled: !!form.overstay_enabled,
-        confirmation_enabled: !!form.confirmation_enabled,
-        receipt_enabled: !!form.receipt_enabled,
-        room_ready_enabled: !!form.room_ready_enabled,
-        review_enabled: !!form.review_enabled,
-        review_delay_hours: Number(form.review_delay_hours),
-        owner_alerts_enabled: !!form.owner_alerts_enabled,
-        owner_whatsapp: form.owner_whatsapp || "",
-        google_review_url: form.google_review_url || "",
-        job_interval_minutes: Number(form.job_interval_minutes),
-        daily_digest_hour: Number(form.daily_digest_hour),
-      };
-      const cfg = await updateWhatsappConfig(payload);
-      setProvider(cfg.provider_status || null);
-      setForm(cfg);
-      showToast("WhatsApp settings saved");
-    } catch (e) { showToast(e.message, "error"); }
-    setSaving(false);
   };
 
   const doRunJobs = async () => {
@@ -202,62 +166,10 @@ export default function WhatsAppMessaging() {
         {tab === "settings" && form && (
           <>
             <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-6 backdrop-blur">
-              <h2 className="text-xl font-bold text-[#E5C07B] mb-5">Automations</h2>
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                {TOGGLES.map(([key, label]) => (
-                  <label key={key} className="flex items-center gap-3 px-4 py-2.5 bg-slate-900/50 border border-slate-600 rounded-lg cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={!!form[key]}
-                      onChange={(e) => setForm({ ...form, [key]: e.target.checked })}
-                      className="w-4 h-4 accent-[#E5C07B]"
-                    />
-                    <span className="text-slate-300 text-sm">{label}</span>
-                  </label>
-                ))}
-              </div>
+              {/* The same editor the Settings hub renders — one source (FE-12). */}
+              <SharedConfigPanel group={groupByKey("messaging")} showToast={showToast} />
 
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-5 items-end mt-6">
-                <div className="flex flex-col">
-                  <label className="mb-2 text-sm font-semibold text-slate-300">Checkout reminder lead (hours)</label>
-                  <input type="number" step="0.5" min="0.5" value={form.checkout_reminder_lead_hours}
-                    onChange={(e) => setForm({ ...form, checkout_reminder_lead_hours: e.target.value })} className={inputCls} />
-                </div>
-                <div className="flex flex-col">
-                  <label className="mb-2 text-sm font-semibold text-slate-300">Review delay after checkout (hours)</label>
-                  <input type="number" step="1" min="0" value={form.review_delay_hours}
-                    onChange={(e) => setForm({ ...form, review_delay_hours: e.target.value })} className={inputCls} />
-                </div>
-                <div className="flex flex-col">
-                  <label className="mb-2 text-sm font-semibold text-slate-300">Daily digest hour (IST, 0–23)</label>
-                  <input type="number" step="1" min="0" max="23" value={form.daily_digest_hour}
-                    onChange={(e) => setForm({ ...form, daily_digest_hour: e.target.value })} className={inputCls} />
-                </div>
-                <div className="flex flex-col">
-                  <label className="mb-2 text-sm font-semibold text-slate-300">Owner WhatsApp number (E.164)</label>
-                  <input type="text" placeholder="919347172758" value={form.owner_whatsapp || ""}
-                    onChange={(e) => setForm({ ...form, owner_whatsapp: e.target.value })} className={inputCls} />
-                </div>
-                <div className="flex flex-col">
-                  <label className="mb-2 text-sm font-semibold text-slate-300">Google review URL</label>
-                  <input type="text" placeholder="https://g.page/r/..." value={form.google_review_url || ""}
-                    onChange={(e) => setForm({ ...form, google_review_url: e.target.value })} className={inputCls} />
-                </div>
-                <div className="flex flex-col">
-                  <label className="mb-2 text-sm font-semibold text-slate-300">Scheduler interval (minutes)</label>
-                  <input type="number" step="1" min="1" value={form.job_interval_minutes}
-                    onChange={(e) => setForm({ ...form, job_interval_minutes: e.target.value })} className={inputCls} />
-                </div>
-              </div>
-
-              <div className="flex items-center gap-4 mt-6 flex-wrap">
-                <button onClick={save} disabled={saving}
-                  className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-bold px-6 py-2.5 rounded-lg transition-all hover:scale-105 disabled:opacity-50 flex items-center gap-2">
-                  <FaSave size={13} /> {saving ? "Saving…" : "Save settings"}
-                </button>
-                <button onClick={loadConfig} className="bg-slate-700 hover:bg-slate-600 font-semibold px-6 py-2.5 rounded-lg transition flex items-center gap-2">
-                  <FaSyncAlt size={13} /> Refresh
-                </button>
+              <div className="flex items-center gap-4 mt-2 flex-wrap">
                 <button onClick={doRunJobs} disabled={running}
                   className="bg-blue-600 hover:bg-blue-700 font-semibold px-6 py-2.5 rounded-lg transition flex items-center gap-2 disabled:opacity-50">
                   <FaPlay size={13} /> {running ? "Running…" : "Run jobs now"}

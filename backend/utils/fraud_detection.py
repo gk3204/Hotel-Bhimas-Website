@@ -21,7 +21,6 @@ already-open alert (matches the FraudAlert insert shape used by routers/cards.py
 """
 import json
 import logging
-import os
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import func
@@ -38,42 +37,13 @@ IST = timezone(timedelta(hours=5, minutes=30))  # single India property; no DST
 # config (read at call time — the codebase idiom, e.g. payments.py:627)
 # ---------------------------------------------------------------------------
 
-def _int_env(name: str, default: int) -> int:
-    try:
-        return int(os.getenv(name, str(default)))
-    except (TypeError, ValueError):
-        return default
-
-
-def _bool_env(name: str, default: str) -> bool:
-    return os.getenv(name, default).strip().lower() not in ("false", "0", "no")
-
-
-def get_config() -> dict:
-    """Current detector thresholds (also surfaced read-only by GET /fraud/config)."""
-    stations = [s.strip() for s in os.getenv("ALLOWED_STATIONS", "").split(",") if s.strip()]
-    return {
-        "cleaning_max_hours": _int_env("CLEANING_MAX_HOURS", 0),
-        "allowed_issue_hours": os.getenv("ALLOWED_ISSUE_HOURS", "06-23"),
-        "allowed_stations": stations,
-        "repeat_refund_threshold": _int_env("REPEAT_REFUND_THRESHOLD", 3),
-        "refund_requires_owner_otp": _bool_env("REFUND_REQUIRES_OWNER_OTP", "false"),
-        "discount_otp_required": _bool_env("DISCOUNT_OTP_REQUIRED", "false"),
-        "owner_otp_ttl_minutes": _int_env("OWNER_OTP_TTL_MINUTES", 10),
-    }
-
-
-def _allowed_hours_window():
-    """Parse ALLOWED_ISSUE_HOURS 'HH-HH' -> (start, end); allowed = start <= hour < end."""
-    raw = os.getenv("ALLOWED_ISSUE_HOURS", "06-23")
-    try:
-        a, b = raw.split("-")
-        start, end = int(a), int(b)
-        if 0 <= start <= 24 and 0 <= end <= 24 and start < end:
-            return start, end
-    except (ValueError, AttributeError):
-        pass
-    return 6, 23
+def get_config(db) -> dict:
+    """Current detector thresholds + OTP gates. These moved from env-only into
+    admin-editable settings (backlog v2 FE-12) — `utils.settings.get_fraud_config` is now
+    the single source, with the old env vars as its defaults. Every enforcement site reads
+    the same helper, so the Settings screen can never show a gate the code isn't applying."""
+    from utils import settings as app_settings
+    return app_settings.get_fraud_config(db)
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +113,7 @@ def _detect_card_anomalies(db, new_alerts, keys):
 
 
 def _detect_cleaning_too_long(db, new_alerts, keys):
-    max_hours = _int_env("CLEANING_MAX_HOURS", 6)
+    max_hours = get_config(db)["cleaning_max_hours"]
     cutoff = datetime.utcnow() - timedelta(hours=max_hours)
     rooms = db.query(Room).filter(Room.status == "cleaning").all()
     for r in rooms:
@@ -166,8 +136,9 @@ def _detect_cleaning_too_long(db, new_alerts, keys):
 
 
 def _detect_issuance_fencing(db, new_alerts, keys):
-    stations = [s.strip() for s in os.getenv("ALLOWED_STATIONS", "").split(",") if s.strip()]
-    start, end = _allowed_hours_window()
+    from utils import settings as app_settings
+    stations = get_config(db)["allowed_stations"]
+    start, end = app_settings.allowed_issue_hours_window(db)
     since = datetime.utcnow() - timedelta(days=7)  # only recent issuances
     cards = db.query(CardIssuance).filter(CardIssuance.issued_at >= since).all()
     for c in cards:
@@ -217,7 +188,7 @@ def _detect_same_id_two_rooms(db, new_alerts, keys):
 
 
 def _detect_repeated_refunds(db, new_alerts, keys):
-    threshold = _int_env("REPEAT_REFUND_THRESHOLD", 3)
+    threshold = get_config(db)["repeat_refund_threshold"]
     rows = (db.query(Payment.refund_reference, func.count(Payment.payment_id))
             .filter(Payment.refund_reference.isnot(None),
                     Payment.refund_reference != "",

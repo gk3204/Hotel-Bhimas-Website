@@ -10,6 +10,8 @@ import {
   pollReviews,
   injectTestReview,
 } from "../../api/reviews";
+import SharedConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
 
 const inputCls =
   "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -231,7 +233,7 @@ export default function Reviews() {
 
         {/* Config tab */}
         {tab === "config" && (
-          <ConfigPanel cfg={cfg} busy={busy} onSave={saveConfig} inject={inject} setInject={setInject} onInject={doInject} />
+          <ConfigPanel cfg={cfg} busy={busy} onSave={saveConfig} inject={inject} setInject={setInject} onInject={doInject} showToast={showToast} />
         )}
 
         {/* Review list (inbox + queue) */}
@@ -344,8 +346,7 @@ function Toggle({ label, value, onChange, hint }) {
   );
 }
 
-function ConfigPanel({ cfg, busy, onSave, inject, setInject, onInject }) {
-  const inputCls2 = inputCls;
+function ConfigPanel({ cfg, busy, onSave, inject, setInject, onInject, showToast }) {
   if (!cfg) {
     return (
       <div className="p-12 flex items-center justify-center">
@@ -355,37 +356,12 @@ function ConfigPanel({ cfg, busy, onSave, inject, setInject, onInject }) {
   }
   return (
     <div className="space-y-6">
-      <div className={`${cardCls} p-6`}>
-        <h2 className="text-xl font-bold text-slate-100 mb-4">Automation</h2>
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <Toggle label="Auto-reply enabled" value={cfg.auto_reply_enabled} hint="Master switch for auto-posting thank-yous" onChange={(v) => onSave({ auto_reply_enabled: v })} />
-          <Toggle label="Owner alerts on low reviews" value={cfg.owner_alerts_enabled} hint="WhatsApp the owner when a review is below threshold" onChange={(v) => onSave({ owner_alerts_enabled: v })} />
-          <Toggle label="Auto-send low-rating drafts" value={cfg.low_auto_send} hint="Off = low ratings wait in the approval queue" onChange={(v) => onSave({ low_auto_send: v })} />
-          <Toggle label="LLM generation (Claude)" value={cfg.llm_enabled} hint={cfg.llm_configured ? "ANTHROPIC_API_KEY is set" : "Set ANTHROPIC_API_KEY to use"} onChange={(v) => onSave({ llm_enabled: v })} />
-          <Field label="Auto-reply threshold (≥ stars auto-post)">
-            <select value={cfg.auto_reply_threshold} onChange={(e) => onSave({ auto_reply_threshold: Number(e.target.value) })} className={inputCls2}>
-              {[3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </Field>
-          <Field label="Low-band split (≤ uses the harsher apology)">
-            <select value={cfg.low_band_split} onChange={(e) => onSave({ low_band_split: Number(e.target.value) })} className={inputCls2}>
-              {[1, 2, 3].map((n) => <option key={n} value={n}>{n}</option>)}
-            </select>
-          </Field>
-          <Field label="Delay min (hours)" hint="Randomized posting delay">
-            <input type="number" min="0" step="0.5" defaultValue={cfg.delay_min_hours} onBlur={(e) => onSave({ delay_min_hours: Number(e.target.value) })} className={inputCls2} />
-          </Field>
-          <Field label="Delay max (hours)">
-            <input type="number" min="0" step="0.5" defaultValue={cfg.delay_max_hours} onBlur={(e) => onSave({ delay_max_hours: Number(e.target.value) })} className={inputCls2} />
-          </Field>
-          <Field label="Poll interval (minutes)">
-            <input type="number" min="1" defaultValue={cfg.poll_interval_minutes} onBlur={(e) => onSave({ poll_interval_minutes: Number(e.target.value) })} className={inputCls2} />
-          </Field>
-        </div>
-        <p className="text-xs text-slate-500 mt-4">
-          Google Business Profile: {cfg.gbp_provider?.configured ? "connected ✓" : "not configured (replies are stub-logged until GBP_* env is set)"}.
-        </p>
-      </div>
+      {/* The same editor the Settings hub renders — one source, and one batched Save
+          instead of the old PUT-on-every-keystroke (FE-12). */}
+      <SharedConfigPanel group={groupByKey("reviews")} showToast={showToast} />
+      <p className="text-xs text-slate-500 -mt-3">
+        Google Business Profile: {cfg.gbp_provider?.configured ? "connected ✓" : "not configured (replies are stub-logged until GBP_* env is set)"}.
+      </p>
 
       {/* Template pool (read-only) */}
       <div className={`${cardCls} p-6`}>

@@ -1,12 +1,17 @@
-// Operational Settings hub (F-A backbone). Admin edits the option-lists that used to be
-// hard-coded (expense / maintenance / complaint / menu categories) and the registration-slip
-// rules text — no redeploy needed. Changes flow to the desk dropdowns and backend validation.
-// On the shared BackofficeUI kit.
+// The one Settings hub (F-A backbone + backlog v2 FE-12).
+//
+// Configuration used to be scattered across ten pages — a Settings tab buried in Companies,
+// another in Complaints, cash-shift on its own page, fraud thresholds visible but not
+// editable at all. Everything an admin can change now lives here, under tabs, sharing one
+// editor (ConfigPanel) and one save idiom. The origin pages render the SAME component, so
+// there is never a second editor for the same value.
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { FaTags, FaFileSignature, FaPlus, FaTimes, FaUndo, FaSave } from "react-icons/fa";
 import {
-  Card, GhostButton, PageShell, PrimaryButton, inputCls, useToast,
+  Card, GhostButton, PageShell, PrimaryButton, Tabs, inputCls, useToast,
 } from "../../components/admin/BackofficeUI";
+import ConfigPanel from "../../components/admin/ConfigPanel";
+import { SETTINGS_GROUPS } from "../../components/admin/settingsGroups";
 import {
   getCategories, setCategoryList, getRegistrationRules, setRegistrationRules,
 } from "../../api/settings";
@@ -16,7 +21,11 @@ const FAMILY_META = {
   maintenance: { label: "Maintenance categories", hint: "Ticket types when raising a maintenance job." },
   complaint: { label: "Complaint categories", hint: "Guest-complaint types logged at the front desk." },
   menu: { label: "Room-service menu categories", hint: "Sections your room-service menu items are grouped under." },
+  stock: { label: "Inventory categories", hint: "How stock items are grouped on the Inventory screen." },
+  vendor: { label: "Vendor categories", hint: "Types of supplier on the Vendors screen." },
 };
+
+const TABS = [["lists", "Lists & printed text"], ...SETTINGS_GROUPS.map((g) => [g.key, g.label])];
 
 // A category is stored as a lowercase slug; show it title-cased for readability.
 const pretty = (s) => (s || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -107,6 +116,7 @@ function CategoryEditor({ family, meta, items, defaults, onSave }) {
 }
 
 export default function Settings() {
+  const [tab, setTab] = useState("lists");
   const [toast, showToast] = useToast();
   const [families, setFamilies] = useState(null);
   const [defaults, setDefaults] = useState({});
@@ -155,13 +165,33 @@ export default function Settings() {
     }
   };
 
+  const activeGroup = SETTINGS_GROUPS.find((g) => g.key === tab);
+
   return (
     <PageShell
       icon="⚙️"
       title="Settings"
-      subtitle="Editable option-lists and printed text — change these without a redeploy."
+      subtitle="Everything you can change without a redeploy — option lists, printed text, automations and approval rules."
       toast={toast}
     >
+      <Tabs tabs={TABS} active={tab} onChange={setTab} />
+
+      {activeGroup && <ConfigPanel key={activeGroup.key} group={activeGroup} showToast={showToast} />}
+
+      {tab === "lists" && <ListsTab
+        error={error} families={families} defaults={defaults}
+        saveCategory={saveCategory} rules={rules} setRules={setRules}
+        rulesSaved={rulesSaved} rulesSaving={rulesSaving} saveRules={saveRules} />}
+    </PageShell>
+  );
+}
+
+/* ------------------------------------------- editable lists + printed text */
+
+function ListsTab({ error, families, defaults, saveCategory, rules, setRules,
+                    rulesSaved, rulesSaving, saveRules }) {
+  return (
+    <>
       {error && (
         <div className="mb-5 p-4 rounded-lg bg-red-500/10 border border-red-500/30 text-red-300 text-sm">{error}</div>
       )}
@@ -206,6 +236,6 @@ export default function Settings() {
           </div>
         </div>
       </Card>
-    </PageShell>
+    </>
   );
 }

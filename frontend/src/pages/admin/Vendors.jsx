@@ -7,6 +7,7 @@ import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Stat, Tabs, fmtDate, inputCls, money, today, useToast,
 } from "../../components/admin/BackofficeUI";
+import { prettyCategory, useCategoryList } from "../../utils/useCategoryList";
 
 const TABS = [
   ["vendors", "Vendors"],
@@ -14,13 +15,16 @@ const TABS = [
   ["renewals", "Renewals due"],
 ];
 
-const CATEGORIES = [
+// Shipped defaults only — the live list comes from admin Settings (FE-6).
+const CATEGORY_DEFAULTS = [
   "lock_amc", "laundry", "linen", "electrical", "plumbing", "it", "fnb", "security", "other",
 ];
+// Nicer casing than the generic slug-prettifier can infer ("IT", "F&B", "Lock AMC");
+// anything the admin adds later falls through to prettyCategory.
 const CATEGORY_LABEL = {
-  lock_amc: "Lock AMC", laundry: "Laundry", linen: "Linen", electrical: "Electrical",
-  plumbing: "Plumbing", it: "IT", fnb: "F&B", security: "Security", other: "Other",
+  lock_amc: "Lock AMC", it: "IT", fnb: "F&B", amc: "AMC",
 };
+const label = (c) => CATEGORY_LABEL[c] || prettyCategory(c);
 
 /** Days-to-renewal as a chip — the whole point of the screen at a glance. */
 function RenewalChip({ contract }) {
@@ -96,6 +100,7 @@ const VENDOR_FIELDS = [
 function VendorsTab({ vendors, loading, error, reload, search, setSearch, category, setCategory, showToast }) {
   const [editing, setEditing] = useState(null);
   const { confirm } = useConfirm();
+  const categories = useCategoryList("vendor", CATEGORY_DEFAULTS);
 
   const remove = async (v) => {
     if (!(await confirm({
@@ -122,7 +127,7 @@ function VendorsTab({ vendors, loading, error, reload, search, setSearch, catego
           </Field>
           <SelectField label="Category" value={category} onChange={(e) => setCategory(e.target.value)}
             options={[{ value: "", label: "All categories" },
-              ...CATEGORIES.map((c) => ({ value: c, label: CATEGORY_LABEL[c] }))]} />
+              ...categories.map((c) => ({ value: c, label: label(c) }))]} />
           <PrimaryButton onClick={reload}><FaSearch size={14} /> Search</PrimaryButton>
           <PrimaryButton onClick={() => setEditing({ ...EMPTY_VENDOR })}>
             <FaPlus size={14} /> New vendor
@@ -134,7 +139,7 @@ function VendorsTab({ vendors, loading, error, reload, search, setSearch, catego
         <DataTable
           columns={[
             { label: "Vendor", sort: (v) => v.name },
-            { label: "Category", sort: (v) => CATEGORY_LABEL[v.category] || v.category },
+            { label: "Category", sort: (v) => label(v.category) },
             "Contact",
             "Contracts",
             { label: "Renewals due", sort: (v) => v.renewals_due },
@@ -146,7 +151,7 @@ function VendorsTab({ vendors, loading, error, reload, search, setSearch, catego
           empty="No vendors yet. Add your laundry, lock-AMC and linen suppliers here."
           renderRow={(v) => [
             <span key="n" className="font-semibold text-slate-100">{v.name}</span>,
-            <Chip key="c" tone="info">{CATEGORY_LABEL[v.category] || v.category}</Chip>,
+            <Chip key="c" tone="info">{label(v.category)}</Chip>,
             v.contact_person ? `${v.contact_person}${v.phone ? ` · ${v.phone}` : ""}` : v.phone,
             `${v.active_contracts} active / ${v.contract_count}`,
             v.renewals_due > 0 ? <Chip key="r" tone="warn">{v.renewals_due} due</Chip> : "—",
@@ -182,6 +187,7 @@ function VendorForm({ value, onClose, onSaved, showToast }) {
   const [form, setForm] = useState(value);
   const [saving, setSaving] = useState(false);
   const isEdit = !!value.id;
+  const categories = useCategoryList("vendor", CATEGORY_DEFAULTS);
 
   const save = async () => {
     if (!form.name || form.name.trim().length < 2) { showToast("A vendor name is required"); return; }
@@ -213,7 +219,7 @@ function VendorForm({ value, onClose, onSaved, showToast }) {
         ))}
         <SelectField label="Category" value={form.category}
           onChange={(e) => setForm({ ...form, category: e.target.value })}
-          options={CATEGORIES.map((c) => ({ value: c, label: CATEGORY_LABEL[c] }))} />
+          options={categories.map((c) => ({ value: c, label: label(c) }))} />
       </div>
       <Field label="Notes">
         <textarea rows={3} className={inputCls} value={form.notes ?? ""}

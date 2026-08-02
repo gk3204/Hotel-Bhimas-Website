@@ -30,6 +30,7 @@ from models import Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, 
 from schemas import (FolioBillToRequest, FolioChargeCreate, FolioDiscountRequest, FolioOpenRequest,
                      FolioVoidRequest)
 from services import company_service
+from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import get_current_user, require_admin, require_reception_or_admin
 from utils.owner_otp import consume_otp
@@ -448,10 +449,10 @@ def apply_discount(folio_id: int, data: FolioDiscountRequest, db: Session = Depe
             raise HTTPException(status_code=400, detail="Discount cannot exceed the folio total")
 
         # Owner-approval OTP (prompt 11): a discount deeper than DISCOUNT_FLOOR_PERCENT of the
-        # folio total is "below floor" and needs the owner's code when DISCOUNT_OTP_REQUIRED is on.
-        # Opt-in (default off) so prompt-07 behaviour is unchanged. Consumed here so the code is
-        # only spent if the discount commits.
-        if os.getenv("DISCOUNT_OTP_REQUIRED", "false").strip().lower() not in ("false", "0", "no"):
+        # folio total is "below floor" and needs the owner's code when the discount gate is on.
+        # Opt-in (default off) so prompt-07 behaviour is unchanged; the toggle is admin-editable
+        # in Settings (FE-12). Consumed here so the code is only spent if the discount commits.
+        if app_settings.get_fraud_config(db)["discount_otp_required"]:
             try:
                 floor_pct = float(os.getenv("DISCOUNT_FLOOR_PERCENT", "20"))
             except (TypeError, ValueError):

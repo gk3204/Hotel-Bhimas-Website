@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Expense, Vendor, VendorContract
 from schemas import (VendorContractCreate, VendorContractUpdate, VendorCreate, VendorUpdate)
+from utils import settings as app_settings
 from utils.audit import _resolve_user_id, write_audit
 from utils.auth_utils import require_admin, require_reception_or_admin
 
@@ -162,6 +163,8 @@ def create_vendor(data: VendorCreate, db: Session = Depends(get_db), user=Depend
             raise HTTPException(status_code=400, detail="A vendor with that name already exists")
         payload = data.model_dump()
         payload["name"] = name
+        # The schema now accepts any slug; the admin-editable list is the real constraint (FE-6).
+        payload["category"] = app_settings.validate_category(db, "vendor", payload.get("category"))
         vendor = Vendor(**payload, created_by=_resolve_user_id(db, user))
         db.add(vendor)
         db.commit()
@@ -245,6 +248,8 @@ def update_vendor(vendor_id: int, data: VendorUpdate, db: Session = Depends(get_
                 raise HTTPException(status_code=400,
                                     detail="A vendor with that name already exists")
             changes["name"] = name
+        if changes.get("category"):
+            changes["category"] = app_settings.validate_category(db, "vendor", changes["category"])
         for key, value in changes.items():
             setattr(vendor, key, value)
         vendor.updated_by = _resolve_user_id(db, user)

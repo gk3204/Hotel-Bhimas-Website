@@ -221,28 +221,26 @@ def generate_reply(db, review: GoogleReview) -> tuple[str, str, bool]:
 
 
 def send_low_review_alert(db, review: GoogleReview):
-    """WhatsApp the owner about a <threshold review (mirrors whatsapp_service.send_fraud_alert).
-    Best-effort + idempotent via client_ref; respects the wa_owner_alerts + review_owner_alerts
-    toggles. Never raises."""
+    """Alert the owner about a <threshold review — WhatsApp, falling back to their email
+    (FE-11). Best-effort + idempotent via client_ref; respects the wa_owner_alerts +
+    review_owner_alerts toggles. Never raises."""
     try:
         from utils import whatsapp_service as wa
+        from services import notify as notify_service
         cfg = app_settings.get_review_config(db)
         if not cfg["owner_alerts_enabled"]:
-            return None
-        num = wa.owner_number(db)
-        if not num or not wa._owner_alerts_on(db):
             return None
         if wa.already_sent(db, f"review_alert:{review.id}"):
             return None
         snippet = (review.review_text or "").strip().replace("\n", " ")
         if len(snippet) > 160:
             snippet = snippet[:157] + "..."
-        return wa.send_template(
-            db, num, "review_alert",
-            {"author_name": review.author_name or "A guest",
-             "rating": str(review.rating),
-             "snippet": snippet or "(no text)"},
-            client_ref=f"review_alert:{review.id}", respect_optout=False)
+        return notify_service.notify_owner(
+            db, template="review_alert",
+            params={"author_name": review.author_name or "A guest",
+                    "rating": str(review.rating),
+                    "snippet": snippet or "(no text)"},
+            client_ref=f"review_alert:{review.id}")
     except Exception as e:
         logger.error(f"❌ review owner alert failed: {e}")
         return None

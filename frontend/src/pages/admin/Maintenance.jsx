@@ -10,6 +10,7 @@ import {
   purchaseItem,
   getMaintenanceStaff,
 } from "../../api/maintenance";
+import { prettyCategory, useCategoryList } from "../../utils/useCategoryList";
 
 const inputCls =
   "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -30,7 +31,9 @@ const statusChip = (s) => {
   return map[s] || "bg-slate-600/30 text-slate-300 border-slate-600/40";
 };
 
-const CATEGORIES = ["", "electrical", "plumbing", "carpentry", "appliance", "lock", "other"];
+// Shipped defaults only — this list duplicated the `maintenance` family that admin
+// Settings already edits, so the two could drift. The live list now wins (FE-6).
+const CATEGORY_DEFAULTS = ["electrical", "plumbing", "carpentry", "appliance", "lock", "other"];
 const STATUSES = ["", "open", "assigned", "in_progress", "awaiting_parts", "resolved", "verified"];
 
 export default function Maintenance() {
@@ -42,6 +45,7 @@ export default function Maintenance() {
   const [toast, setToast] = useState(null);
   const [detail, setDetail] = useState({}); // id -> full ticket
   const [busy, setBusy] = useState(false);
+  const categories = useCategoryList("maintenance", CATEGORY_DEFAULTS);
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -139,8 +143,9 @@ export default function Maintenance() {
           <div className="flex flex-col">
             <label className="mb-1 text-sm font-semibold text-slate-300">Category</label>
             <select value={filters.category} onChange={(e) => setFilters({ ...filters, category: e.target.value })} className={inputCls}>
-              {CATEGORIES.map((c) => (
-                <option key={c} value={c}>{c || "All"}</option>
+              <option value="">All</option>
+              {categories.map((c) => (
+                <option key={c} value={c}>{prettyCategory(c)}</option>
               ))}
             </select>
           </div>

@@ -90,8 +90,18 @@ export async function resendOtp(otpId) {
   return handle(res);
 }
 
-// Current detector thresholds / OTP toggles (read-only)
+// Current detector thresholds / OTP toggles
 export async function getConfig() {
   const res = await fetch(`${BASE_URL}/fraud/config`, { headers: authHeaders() });
+  return handle(res);
+}
+
+// Edit the thresholds + approval gates (backlog v2 FE-12 — these used to be env-only)
+export async function updateFraudConfig(body) {
+  const res = await fetch(`${BASE_URL}/fraud/config`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify(body),
+  });
   return handle(res);
 }

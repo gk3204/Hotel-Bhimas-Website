@@ -3,7 +3,9 @@
 import React, { useCallback, useEffect, useState } from "react";
 import { FaCheck, FaPlus, FaSave, FaSearch, FaTimes } from "react-icons/fa";
 import * as api from "../../api/portal";
-import { getCategories } from "../../api/settings";
+import { useCategoryList } from "../../utils/useCategoryList";
+import ConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
 import { useConfirm } from "../../components/ConfirmDialog";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
@@ -276,13 +278,9 @@ function MenuForm({ value, onClose, onSaved, showToast }) {
   const [form, setForm] = useState(value);
   const [saving, setSaving] = useState(false);
   const [errors, setErrors] = useState({});
-  // Categories are admin-editable (F-A) — load the configured list, fall back to the shipped defaults.
-  const [categories, setCategories] = useState(MENU_CATEGORIES);
-  useEffect(() => {
-    getCategories()
-      .then((d) => { if (d?.families?.menu?.length) setCategories(d.families.menu); })
-      .catch(() => { /* keep defaults */ });
-  }, []);
+  // Categories are admin-editable (F-A) — the shared hook fetches them and falls back
+  // to the shipped defaults on an older backend (FE-6).
+  const categories = useCategoryList("menu", MENU_CATEGORIES);
   const isEdit = !!value.id;
   const set = (patch, clearKey) => {
     setForm((f) => ({ ...f, ...patch }));
@@ -339,64 +337,7 @@ function MenuForm({ value, onClose, onSaved, showToast }) {
 
 /* ------------------------------------------------------------------ settings */
 
-const TOGGLES = [
-  ["enabled", "Guest portal enabled (master)"],
-  ["room_service_enabled", "Room service"],
-  ["wifi_enabled", "WiFi voucher"],
-  ["wakeup_enabled", "Wake-up call"],
-  ["cab_enabled", "Cab / tour desk"],
-  ["contactless_checkout_enabled", "Contactless checkout"],
-];
-
+// The same editor the Settings hub renders — one source, so the two can't drift (FE-12).
 function SettingsTab({ showToast }) {
-  const [cfg, setCfg] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    api.getPortalConfig().then(setCfg).catch((e) => setError(e.message || "Failed to load settings"));
-  }, []);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      await api.updatePortalConfig({
-        guest_portal_enabled: cfg.enabled,
-        portal_room_service_enabled: cfg.room_service_enabled,
-        portal_wifi_enabled: cfg.wifi_enabled,
-        portal_wakeup_enabled: cfg.wakeup_enabled,
-        portal_cab_enabled: cfg.cab_enabled,
-        portal_contactless_checkout_enabled: cfg.contactless_checkout_enabled,
-        wifi_ssid: cfg.wifi_ssid,
-        wifi_voucher_mode: cfg.wifi_voucher_mode,
-      });
-      showToast("Settings saved");
-    } catch (e) { showToast(e.message || "Save failed"); }
-    finally { setSaving(false); }
-  };
-
-  if (error) return <Card><div className="p-8 text-center text-red-300">{error}</div></Card>;
-  if (!cfg) return <Card><div className="p-12"><Spinner /></div></Card>;
-
-  return (
-    <Card title="Guest portal settings">
-      <div className="p-6 space-y-4 max-w-2xl">
-        {TOGGLES.map(([k, label]) => (
-          <label key={k} className="flex items-center gap-3 text-slate-200">
-            <input type="checkbox" checked={!!cfg[k]} onChange={(e) => setCfg({ ...cfg, [k]: e.target.checked })} />
-            {label}
-          </label>
-        ))}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4 pt-2">
-          <Field label="WiFi SSID" value={cfg.wifi_ssid || ""}
-            onChange={(e) => setCfg({ ...cfg, wifi_ssid: e.target.value })} />
-          <SelectField label="WiFi voucher mode" value={cfg.wifi_voucher_mode}
-            onChange={(e) => setCfg({ ...cfg, wifi_voucher_mode: e.target.value })}
-            options={[{ value: "auto", label: "Auto — show a per-stay code" },
-              { value: "manual", label: "Manual — desk issues a code" }]} />
-        </div>
-        <PrimaryButton onClick={save} disabled={saving}><FaSave size={14} /> {saving ? "Saving…" : "Save settings"}</PrimaryButton>
-      </div>
-    </Card>
-  );
+  return <ConfigPanel group={groupByKey("portal")} showToast={showToast} />;
 }

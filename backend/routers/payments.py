@@ -19,6 +19,7 @@ from utils.auth_utils import require_reception_or_admin, get_current_user
 from utils.audit import write_audit, _resolve_user_id
 from utils.owner_otp import consume_otp
 from utils.settings import get_desk_pay_config
+from utils import settings as app_settings
 from routers.folio import _recompute as _folio_recompute
 
 # Try to import razorpay, but allow app to run without it
@@ -650,13 +651,14 @@ def _open_shift(db: Session):
             .order_by(CashShift.opened_at.desc()).first())
 
 
-def require_refund_permission(user=Depends(get_current_user)):
+def require_refund_permission(user=Depends(get_current_user), db: Session = Depends(get_db)):
     """Refund gate. Two approval modes, read at call time so flags change without a restart:
-      - REFUND_REQUIRES_OWNER_OTP (default false, prompt 11): owner OTP IS the approval, so
-        reception+admin pass the gate and the endpoint consumes the OTP in its body.
+      - the owner-OTP refund gate (default false, prompt 11): owner OTP IS the approval, so
+        reception+admin pass the gate and the endpoint consumes the OTP in its body. Now
+        admin-editable in Settings, defaulting to REFUND_REQUIRES_OWNER_OTP (FE-12).
       - else REFUND_REQUIRES_ADMIN (default true, prompt 08 interim): admin JWT required.
     """
-    if os.getenv("REFUND_REQUIRES_OWNER_OTP", "false").strip().lower() not in ("false", "0", "no"):
+    if app_settings.get_fraud_config(db)["refund_requires_owner_otp"]:
         if user.get("role") not in ["admin", "reception"]:
             raise HTTPException(status_code=403, detail="Access denied")
         return user
@@ -1156,9 +1158,9 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
     if amount > float(payment.amount):
         raise HTTPException(status_code=400, detail="Refund exceeds payment amount")
 
-    # Owner-approval OTP (prompt 11): opt-in via REFUND_REQUIRES_OWNER_OTP. Consumed here so
-    # the code is only spent if the refund itself commits. 403 if missing/invalid/expired.
-    if os.getenv("REFUND_REQUIRES_OWNER_OTP", "false").strip().lower() not in ("false", "0", "no"):
+    # Owner-approval OTP (prompt 11): opt-in, admin-editable in Settings (FE-12). Consumed here
+    # so the code is only spent if the refund itself commits. 403 if missing/invalid/expired.
+    if app_settings.get_fraud_config(db)["refund_requires_owner_otp"]:
         consume_otp(db, data.owner_otp_id, data.owner_otp_code, "refund", user)
 
     folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()

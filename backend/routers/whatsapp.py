@@ -68,6 +68,7 @@ _CONFIG_KEYS = {
     "review_delay_hours": app_settings.WA_REVIEW_DELAY_HOURS_KEY,
     "owner_alerts_enabled": app_settings.WA_OWNER_ALERTS_KEY,
     "owner_whatsapp": app_settings.WA_OWNER_NUMBER_KEY,
+    "owner_email": app_settings.OWNER_EMAIL_KEY,      # email fallback (FE-11)
     "google_review_url": app_settings.WA_REVIEW_URL_KEY,
     "job_interval_minutes": app_settings.WA_JOB_INTERVAL_KEY,
     "daily_digest_hour": app_settings.WA_DIGEST_HOUR_KEY,

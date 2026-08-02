@@ -376,7 +376,9 @@ def purchase_item(item_id: int, data: TicketItemPurchase, db: Session = Depends(
             shift = _open_shift(db, data.station_id)
             exp = Expense(
                 shift_id=shift.id if shift else None,
-                category=data.category,
+                # Expense categories are admin-editable (F-A); this was the last create path
+                # still carrying the old fixed enum (FE-6).
+                category=validate_category(db, "expense", data.category),
                 description=f"Ticket #{ticket.id}: {it.item}" if ticket else it.item,
                 amount=Decimal(str(round(data.actual_cost, 2))),
                 client_ref=data.client_ref,

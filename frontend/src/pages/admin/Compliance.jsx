@@ -2,6 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { FaSearch, FaFileCsv, FaFilePdf, FaFileCode, FaPrint, FaSync, FaSave } from "react-icons/fa";
 import * as api from "../../api/compliance";
 import { PageShell } from "../../components/admin/BackofficeUI";
+import ConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
 
 const today = () => new Date().toISOString().slice(0, 10);
 const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
@@ -245,70 +247,7 @@ function TallyResult({ data, loading, error }) {
   );
 }
 
-const CONFIG_FIELDS = [
-  ["police_station_name", "Police Station Name", "text"],
-  ["police_station_code", "Police Station Code", "text"],
-  ["frro_office", "FRRO Office", "text"],
-  ["hotel_registration_no", "Hotel Registration No", "text"],
-  ["tally_company_name", "Tally Company Name", "text"],
-  ["tally_sales_ledger", "Tally Sales Ledger", "text"],
-  ["tally_cgst_ledger", "Tally CGST Ledger", "text"],
-  ["tally_sgst_ledger", "Tally SGST Ledger", "text"],
-  ["tally_cash_ledger", "Tally Cash Ledger", "text"],
-  ["tally_bank_ledger", "Tally Bank Ledger", "text"],
-  ["tally_debtors_ledger", "Tally Debtors Ledger", "text"],
-  ["admin_idle_logout_minutes", "Admin Idle Logout (minutes)", "number"],
-];
-
+// The same editor the Settings hub renders — one source, so the two can't drift (FE-12).
 function SettingsPanel({ showToast }) {
-  const [cfg, setCfg] = useState(null);
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    api.getComplianceConfig().then(setCfg).catch((e) => showToast(e.message || "Failed to load config"));
-    // eslint-disable-next-line
-  }, []);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const payload = {};
-      CONFIG_FIELDS.forEach(([k, , type]) => {
-        payload[k] = type === "number" ? Number(cfg[k]) : cfg[k];
-      });
-      payload.admin_2fa_required = !!cfg.admin_2fa_required;
-      const updated = await api.updateComplianceConfig(payload);
-      setCfg((c) => ({ ...c, ...updated }));
-      showToast("Settings saved");
-    } catch (e) { showToast(e.message || "Save failed"); }
-    finally { setSaving(false); }
-  };
-
-  if (!cfg) return <div className="p-12 flex justify-center"><div className="animate-spin"><div className="h-10 w-10 border-4 border-[#E5C07B] border-t-[#D4AF37] rounded-full" /></div></div>;
-
-  return (
-    <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl shadow-xl backdrop-blur p-6">
-      <h2 className="text-lg font-bold text-[#E5C07B] mb-4">Compliance configuration</h2>
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {CONFIG_FIELDS.map(([k, label, type]) => (
-          <Field key={k} label={label} type={type} value={cfg[k] ?? ""}
-            onChange={(e) => setCfg({ ...cfg, [k]: e.target.value })} />
-        ))}
-      </div>
-      <label className="flex items-center gap-3 mt-5 text-slate-200">
-        <input type="checkbox" checked={!!cfg.admin_2fa_required}
-          onChange={(e) => setCfg({ ...cfg, admin_2fa_required: e.target.checked })}
-          className="h-5 w-5 accent-[#E5C07B]" />
-        Require admins to enrol 2FA (shows a reminder on the 2FA screen)
-      </label>
-      <div className="mt-4 text-slate-400 text-sm space-y-1">
-        <p>e-Invoicing provider: <b className="text-slate-200">{cfg.einvoice_provider?.mode || "stub"}</b> {cfg.einvoice_provider?.configured ? "(live)" : "(stub — set GST_EINVOICE_* to go live)"}</p>
-        <p>2FA library available: <b className="text-slate-200">{cfg.twofa_available ? "yes" : "no"}</b></p>
-      </div>
-      <button onClick={save} disabled={saving}
-        className="mt-6 bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-bold px-6 py-2.5 rounded-lg transition-all hover:scale-105 flex items-center gap-2 disabled:opacity-50">
-        <FaSave size={14} /> {saving ? "Saving…" : "Save settings"}
-      </button>
-    </div>
-  );
+  return <ConfigPanel group={groupByKey("compliance")} showToast={showToast} />;
 }

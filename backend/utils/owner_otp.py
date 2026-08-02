@@ -25,11 +25,16 @@ from utils.audit import _resolve_user_id
 logger = logging.getLogger(__name__)
 
 
-def _ttl_minutes() -> int:
+def _ttl_minutes(db) -> int:
+    """Code lifetime. Admin-editable in Settings, defaulting to OWNER_OTP_TTL_MINUTES (FE-12)."""
     try:
-        return max(1, int(os.getenv("OWNER_OTP_TTL_MINUTES", "10")))
-    except (TypeError, ValueError):
-        return 10
+        from utils import settings as app_settings
+        return app_settings.get_fraud_config(db)["owner_otp_ttl_minutes"]
+    except Exception:            # never let a config read break an approval
+        try:
+            return max(1, int(os.getenv("OWNER_OTP_TTL_MINUTES", "10")))
+        except (TypeError, ValueError):
+            return 10
 
 
 def deliver_otp(db, otp, commit: bool = True) -> dict:
@@ -46,26 +51,24 @@ def deliver_otp(db, otp, commit: bool = True) -> dict:
     """
     logger.info(f"🔐 Owner OTP for action={otp.action} otp_id={otp.id}: code={otp.code} "
                 f"(expires {otp.expires_at.isoformat()})")
+    fallback = {"channel": "onscreen", "ok": False,
+                "detail": "Could not message the owner — read the code from the admin "
+                          "Approvals inbox."}
     try:
         from utils import whatsapp_service
-        if not whatsapp_service.is_configured():
-            return {"channel": "onscreen", "ok": False,
-                    "detail": "WhatsApp is not configured — read the code from the admin Approvals inbox."}
-        row = whatsapp_service.send_owner_otp(db, otp, commit=commit)
-        if row is None:
-            return {"channel": "onscreen", "ok": False,
-                    "detail": "Owner alerts are off or no owner number is set — "
-                              "read the code from the admin Approvals inbox."}
-        if getattr(row, "status", None) == "sent":
-            return {"channel": "whatsapp", "ok": True,
-                    "detail": "Approval code sent to the owner's WhatsApp."}
+        result = whatsapp_service.send_owner_otp(db, otp, commit=commit)
+        if not isinstance(result, dict):
+            return fallback
+        if result.get("ok"):
+            where = "WhatsApp" if result.get("channel") == "whatsapp" else "email"
+            return {"channel": result["channel"], "ok": True,
+                    "detail": f"Approval code sent to the owner by {where}."}
         return {"channel": "onscreen", "ok": False,
-                "detail": f"WhatsApp send failed ({getattr(row, 'error', None) or 'unknown'}) — "
-                          f"read the code from the admin Approvals inbox."}
+                "detail": (result.get("detail") or "").rstrip(".")
+                          + " — read the code from the admin Approvals inbox."}
     except Exception as e:
-        logger.warning(f"owner OTP WhatsApp delivery failed (on-screen still works): {e}")
-        return {"channel": "onscreen", "ok": False,
-                "detail": "WhatsApp delivery failed — read the code from the admin Approvals inbox."}
+        logger.warning(f"owner OTP delivery failed (on-screen still works): {e}")
+        return fallback
 
 
 def create_otp(db, action: str, context, user, commit: bool = True, return_delivery: bool = False):
@@ -79,7 +82,7 @@ def create_otp(db, action: str, context, user, commit: bool = True, return_deliv
         action=action,
         context=json.dumps(context, default=str) if context is not None else None,
         code=code,
-        expires_at=datetime.utcnow() + timedelta(minutes=_ttl_minutes()),
+        expires_at=datetime.utcnow() + timedelta(minutes=_ttl_minutes(db)),
         used=False,
         created_by=_resolve_user_id(db, user),
     )

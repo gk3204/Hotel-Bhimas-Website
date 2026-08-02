@@ -634,7 +634,9 @@ class TicketItemCreate(BaseModel):
 class TicketItemPurchase(BaseModel):
     """Admin logs an approved item as purchased -> optionally posts to expenses."""
     actual_cost: float = Field(..., ge=0, le=10000000)         # ₹ actually spent (posts to the ledger)
-    category: str = Field(default="vendor", pattern="^(supplies|staff|vendor|misc)$")
+    # This posts to the EXPENSE ledger, so it uses the editable expense family (F-A/FE-6)
+    # — it was the last place still carrying the old fixed expense enum.
+    category: str = Field(default="vendor", pattern=CATEGORY_SLUG_RE)
     station_id: Optional[str] = Field(None, max_length=50)     # if given + shift open, links the expense to the drawer
     post_to_expenses: bool = True
     client_ref: Optional[str] = Field(None, max_length=80)
@@ -735,6 +737,7 @@ class WhatsAppConfigUpdate(BaseModel):
     review_delay_hours: Optional[float] = Field(None, ge=0, le=168)
     owner_alerts_enabled: Optional[bool] = None
     owner_whatsapp: Optional[str] = Field(None, max_length=20)
+    owner_email: Optional[str] = Field(None, max_length=120)   # email fallback (FE-11)
     google_review_url: Optional[str] = Field(None, max_length=300)
     job_interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
     daily_digest_hour: Optional[int] = Field(None, ge=0, le=23)
@@ -844,7 +847,7 @@ class FolioBillToRequest(BaseModel):
 # =====================================================================
 # VENDOR / AMC TRACKING (prompt 18, slice 13)
 # =====================================================================
-VENDOR_CATEGORY_RE = "^(laundry|lock_amc|linen|electrical|plumbing|it|fnb|security|other)$"
+VENDOR_CATEGORY_RE = CATEGORY_SLUG_RE   # editable list (F-A/FE-6); membership checked at the endpoint
 
 
 class VendorCreate(BaseModel):
@@ -991,7 +994,20 @@ class BackofficeConfigUpdate(BaseModel):
 # =====================================================================
 # INVENTORY / STOCK (prompt 18c, slice 8)
 # =====================================================================
-STOCK_CATEGORY_RE = "^(minibar|toiletries|linen|supplies|fnb|cleaning|other)$"
+class FraudConfigUpdate(BaseModel):
+    """Admin-editable anti-fraud thresholds + approval gates (backlog v2 FE-12).
+    Every field optional — only what's sent is changed."""
+    cleaning_max_hours: Optional[int] = Field(None, ge=0, le=168)
+    allowed_issue_hours: Optional[str] = Field(None, pattern=r"^\d{1,2}-\d{1,2}$")
+    allowed_stations: Optional[List[str]] = None      # [] = no station fencing
+    repeat_refund_threshold: Optional[int] = Field(None, ge=1, le=100)
+    refund_requires_owner_otp: Optional[bool] = None
+    discount_otp_required: Optional[bool] = None
+    card_issue_otp_required: Optional[bool] = None
+    owner_otp_ttl_minutes: Optional[int] = Field(None, ge=1, le=1440)
+
+
+STOCK_CATEGORY_RE = CATEGORY_SLUG_RE   # editable list (F-A/FE-6); membership checked at the endpoint
 STOCK_UNIT_RE = "^(pcs|bottle|kg|litre|pack|roll|set)$"
 
 

@@ -5,6 +5,8 @@ import React, { useCallback, useEffect, useState } from "react";
 import { FaBell, FaCheck, FaGift, FaReply, FaSearch } from "react-icons/fa";
 import * as api from "../../api/complaints";
 import { useConfirm } from "../../components/ConfirmDialog";
+import ConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
 import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Stat, Tabs, fmtDate, inputCls, money, useToast,
@@ -364,77 +366,7 @@ function ComplaintDetail({ id, onClose, showToast, onChanged }) {
 
 const PRIORITIES = ["urgent", "high", "normal", "low"];
 
+// The same editor the Settings hub renders — one source, so the two can't drift (FE-12).
 function SettingsTab({ showToast }) {
-  const [cfg, setCfg] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    api.getComplaintsConfig().then(setCfg).catch((e) => setError(e.message || "Failed to load settings"));
-  }, []);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const body = { complaint_escalation_enabled: cfg.escalation_enabled };
-      PRIORITIES.forEach((p) => {
-        body[`complaint_sla_response_hours_${p}`] = Number(cfg.sla_response_hours[p]) || 1;
-        body[`complaint_sla_resolve_hours_${p}`] = Number(cfg.sla_resolve_hours[p]) || 1;
-      });
-      await api.updateComplaintsConfig(body);
-      showToast("SLA settings saved");
-    } catch (e) {
-      showToast(e.message || "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (error) return <Card><div className="p-8 text-center text-red-300">{error}</div></Card>;
-  if (!cfg) return <Card><div className="p-12 text-center text-slate-400">Loading…</div></Card>;
-
-  return (
-    <Card title="Complaint SLA settings">
-      <div className="p-6">
-        <label className="flex items-center gap-3 text-slate-200 mb-6">
-          <input type="checkbox" checked={cfg.escalation_enabled}
-            onChange={(e) => setCfg({ ...cfg, escalation_enabled: e.target.checked })} />
-          Auto-escalate complaints when an SLA is breached (owner gets a WhatsApp alert)
-        </label>
-
-        <div className="overflow-x-auto">
-          <table className="w-full text-left text-sm mb-2">
-            <thead className="text-slate-400">
-              <tr>
-                <th className="py-2">Priority</th>
-                <th className="py-2">Respond within (hours)</th>
-                <th className="py-2">Resolve within (hours)</th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-700">
-              {PRIORITIES.map((p) => (
-                <tr key={p}>
-                  <td className="py-2"><Chip tone={PRIORITY_TONE[p]}>{p}</Chip></td>
-                  <td className="py-2 pr-4">
-                    <input type="number" className={inputCls} value={cfg.sla_response_hours[p]}
-                      onChange={(e) => setCfg({ ...cfg, sla_response_hours: { ...cfg.sla_response_hours, [p]: e.target.value } })} />
-                  </td>
-                  <td className="py-2">
-                    <input type="number" className={inputCls} value={cfg.sla_resolve_hours[p]}
-                      onChange={(e) => setCfg({ ...cfg, sla_resolve_hours: { ...cfg.sla_resolve_hours, [p]: e.target.value } })} />
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-
-        <div className="mt-6">
-          <PrimaryButton onClick={save} disabled={saving}>
-            {saving ? "Saving…" : "Save SLA settings"}
-          </PrimaryButton>
-        </div>
-      </div>
-    </Card>
-  );
+  return <ConfigPanel group={groupByKey("complaints")} showToast={showToast} />;
 }

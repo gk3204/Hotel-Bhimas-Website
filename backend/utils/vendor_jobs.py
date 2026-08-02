@@ -51,8 +51,9 @@ def send_renewal_reminders(db) -> int:
     if not cfg["vendor_renewal_alerts_enabled"]:
         return 0
 
-    owner = wa.owner_number(db)
-    if not owner:
+    # Reachable by WhatsApp or by email — either is enough (FE-11).
+    from services import notify as notify_service
+    if not wa.owner_number(db) and not notify_service.owner_email(db):
         return 0
 
     today = date.today()
@@ -70,16 +71,15 @@ def send_renewal_reminders(db) -> int:
 
         vendor = db.query(Vendor).filter(Vendor.id == c.vendor_id).first()
         left = days_to_renewal(c, today)
-        row = wa.send_template(
-            db, owner, "vendor_renewal",
-            {
+        row = notify_service.notify_owner(
+            db, template="vendor_renewal",
+            params={
                 "vendor_name": vendor.name if vendor else "Vendor",
                 "contract_title": c.title,
                 "end_date": f"{c.end_date:%d-%m-%Y}",
                 "days_left": str(max(0, left if left is not None else 0)),
             },
             client_ref=f"vendor_renewal:{c.id}:{c.end_date}",
-            respect_optout=False,          # operational alert to the owner, not marketing
         )
         if row is not None:
             c.last_reminder_sent_at = datetime.utcnow()

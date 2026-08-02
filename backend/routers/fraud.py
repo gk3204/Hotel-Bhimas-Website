@@ -18,7 +18,8 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import (Booking, BookingItem, CardIssuance, FraudAlert,
                     OwnerOtp, Room)
-from schemas import AlertReview, OtpRequest, OtpVerify
+from schemas import AlertReview, FraudConfigUpdate, OtpRequest, OtpVerify
+from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.fraud_detection import run_reconciliation, compute_daily_digest, get_config
@@ -203,10 +204,51 @@ def digest(db: Session = Depends(get_db), day: str = Query(None)):
 
 
 @router.get("/config", dependencies=[Depends(require_admin)])
-def config():
-    """Current detector thresholds + OTP toggles (env-backed, read-only in this build).
-    Live editing needs a settings table — a documented follow-up."""
-    return get_config()
+def config(db: Session = Depends(get_db)):
+    """Current detector thresholds + OTP toggles."""
+    return get_config(db)
+
+
+@router.put("/config")
+def update_config(data: FraudConfigUpdate, db: Session = Depends(get_db),
+                  user=Depends(require_admin)):
+    """Edit the detector thresholds + approval gates (backlog v2 FE-12).
+
+    These used to be env-only and read-only on screen, so arming the refund/discount/card
+    approval gates meant a redeploy. Every enforcement site now reads the same settings
+    helper, so what this screen shows is what the code applies. Audited."""
+    before = get_config(db)
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        return get_config(db)
+
+    key_map = {
+        "cleaning_max_hours": app_settings.FRAUD_CLEANING_MAX_HOURS_KEY,
+        "allowed_issue_hours": app_settings.FRAUD_ALLOWED_ISSUE_HOURS_KEY,
+        "allowed_stations": app_settings.FRAUD_ALLOWED_STATIONS_KEY,
+        "repeat_refund_threshold": app_settings.FRAUD_REPEAT_REFUND_THRESHOLD_KEY,
+        "refund_requires_owner_otp": app_settings.FRAUD_REFUND_OTP_KEY,
+        "discount_otp_required": app_settings.FRAUD_DISCOUNT_OTP_KEY,
+        "card_issue_otp_required": app_settings.FRAUD_CARD_ISSUE_OTP_KEY,
+        "owner_otp_ttl_minutes": app_settings.FRAUD_OTP_TTL_MINUTES_KEY,
+    }
+    for field, value in changes.items():
+        key = key_map.get(field)
+        if not key:
+            continue
+        if isinstance(value, bool):
+            stored = "true" if value else "false"
+        elif isinstance(value, list):
+            stored = ",".join(str(v).strip() for v in value if str(v).strip())
+        else:
+            stored = str(value)
+        app_settings.set_setting(db, key, stored, user=user, commit=False)
+    db.commit()
+
+    after = get_config(db)
+    write_audit(db, user, "fraud.config_update", "app_settings", None,
+                before=before, after=after, client="web", commit=True)
+    return after
 
 
 # ---------------------------------------------------------------------------

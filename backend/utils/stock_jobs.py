@@ -30,8 +30,9 @@ def send_low_stock_alerts(db) -> int:
     if not cfg["low_stock_alerts_enabled"]:
         return 0
 
-    owner = wa.owner_number(db)
-    if not owner:
+    # Reachable by WhatsApp or by email — either is enough (FE-11).
+    from services import notify as notify_service
+    if not wa.owner_number(db) and not notify_service.owner_email(db):
         return 0
 
     items = db.query(StockItem).filter(StockItem.is_active == True).all()  # noqa: E712
@@ -41,9 +42,9 @@ def send_low_stock_alerts(db) -> int:
 
     sent = 0
     for it in low:
-        row = wa.send_template(
-            db, owner, "low_stock_alert",
-            {
+        row = notify_service.notify_owner(
+            db, template="low_stock_alert",
+            params={
                 "item_name": it.name,
                 "current_qty": str(float(it.current_qty or 0)),
                 "unit": it.unit,
@@ -52,7 +53,6 @@ def send_low_stock_alerts(db) -> int:
                     else cfg["low_stock_default_threshold"], 2)),
             },
             client_ref=f"low_stock:{it.id}:{it.low_stock_alerted_at}",
-            respect_optout=False,          # operational alert to the owner, not marketing
         )
         if row is not None:
             it.low_stock_alerted_at = datetime.utcnow()

@@ -9,6 +9,9 @@ import {
   Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField,
   Spinner, Stat, Tabs, fmtDate, inputCls, money, useToast,
 } from "../../components/admin/BackofficeUI";
+import { prettyCategory, useCategoryList } from "../../utils/useCategoryList";
+import ConfigPanel from "../../components/admin/ConfigPanel";
+import { groupByKey } from "../../components/admin/settingsGroups";
 
 const TABS = [
   ["items", "Items & stock"],
@@ -17,7 +20,8 @@ const TABS = [
   ["settings", "Settings"],
 ];
 
-const CATEGORIES = ["minibar", "toiletries", "linen", "supplies", "fnb", "cleaning", "other"];
+// Shipped defaults only — the live list comes from admin Settings (FE-6).
+const CATEGORY_DEFAULTS = ["minibar", "toiletries", "linen", "supplies", "fnb", "cleaning", "other"];
 const UNITS = ["pcs", "bottle", "kg", "litre", "pack", "roll", "set"];
 
 /** Current quantity vs reorder point, at a glance. */
@@ -62,6 +66,7 @@ function ItemsTab({ showToast }) {
   const [category, setCategory] = useState("");
   const [editing, setEditing] = useState(null);
   const [moving, setMoving] = useState(null);   // item being received/adjusted
+  const categories = useCategoryList("stock", CATEGORY_DEFAULTS);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -105,7 +110,8 @@ function ItemsTab({ showToast }) {
               onChange={(e) => setSearch(e.target.value)} onKeyDown={(e) => e.key === "Enter" && load()} />
           </Field>
           <SelectField label="Category" value={category} onChange={(e) => setCategory(e.target.value)}
-            options={[{ value: "", label: "All categories" }, ...CATEGORIES.map((c) => ({ value: c, label: c }))]} />
+            options={[{ value: "", label: "All categories" },
+                      ...categories.map((c) => ({ value: c, label: prettyCategory(c) }))]} />
           <PrimaryButton onClick={load}><FaSearch size={14} /> Search</PrimaryButton>
           <PrimaryButton onClick={() => setEditing({ ...EMPTY_ITEM })}>
             <FaPlus size={14} /> New item
@@ -178,6 +184,7 @@ function ItemForm({ value, onClose, onSaved, showToast }) {
   const [form, setForm] = useState(value);
   const [saving, setSaving] = useState(false);
   const isEdit = !!value.id;
+  const categories = useCategoryList("stock", CATEGORY_DEFAULTS);
 
   const save = async () => {
     if (!form.name || form.name.trim().length < 2) { showToast("An item name is required"); return; }
@@ -213,7 +220,8 @@ function ItemForm({ value, onClose, onSaved, showToast }) {
         <Field label="Name *" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
         <Field label="SKU / code" value={form.sku ?? ""} onChange={(e) => setForm({ ...form, sku: e.target.value })} />
         <SelectField label="Category" value={form.category}
-          onChange={(e) => setForm({ ...form, category: e.target.value })} options={CATEGORIES} />
+          onChange={(e) => setForm({ ...form, category: e.target.value })}
+          options={categories.map((c) => ({ value: c, label: prettyCategory(c) }))} />
         <SelectField label="Unit" value={form.unit}
           onChange={(e) => setForm({ ...form, unit: e.target.value })} options={UNITS} />
         <Field label="Reorder threshold" type="number" value={form.reorder_threshold}
@@ -458,50 +466,7 @@ function LowStockTab({ showToast }) {
 
 /* ------------------------------------------------------------------ settings */
 
+// The same editor the Settings hub renders — one source, so the two can't drift (FE-12).
 function SettingsTab({ showToast }) {
-  const [cfg, setCfg] = useState(null);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState("");
-
-  useEffect(() => {
-    api.getStockConfig().then(setCfg).catch((e) => setError(e.message || "Failed to load settings"));
-  }, []);
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      await api.updateStockConfig({
-        low_stock_alerts_enabled: cfg.low_stock_alerts_enabled,
-        low_stock_default_threshold: Number(cfg.low_stock_default_threshold) || 0,
-      });
-      showToast("Settings saved");
-    } catch (e) {
-      showToast(e.message || "Save failed");
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  if (error) return <Card><div className="p-8 text-center text-red-300">{error}</div></Card>;
-  if (!cfg) return <Card><div className="p-12"><Spinner /></div></Card>;
-
-  return (
-    <Card title="Inventory settings">
-      <div className="p-6 grid grid-cols-1 md:grid-cols-2 gap-6 max-w-2xl">
-        <label className="flex items-center gap-3 text-slate-200">
-          <input type="checkbox" checked={cfg.low_stock_alerts_enabled}
-            onChange={(e) => setCfg({ ...cfg, low_stock_alerts_enabled: e.target.checked })} />
-          WhatsApp the owner on low stock
-        </label>
-        <Field label="Default reorder threshold" type="number" value={cfg.low_stock_default_threshold}
-          hint="Used for items whose own threshold is left at 0."
-          onChange={(e) => setCfg({ ...cfg, low_stock_default_threshold: e.target.value })} />
-      </div>
-      <div className="px-6 pb-6">
-        <PrimaryButton onClick={save} disabled={saving}>
-          <FaSave size={14} /> {saving ? "Saving…" : "Save settings"}
-        </PrimaryButton>
-      </div>
-    </Card>
-  );
+  return <ConfigPanel group={groupByKey("stock")} showToast={showToast} />;
 }

@@ -176,6 +176,8 @@ def create_item(data: StockItemCreate, db: Session = Depends(get_db), user=Depen
             raise HTTPException(status_code=404, detail="Vendor not found")
         payload = data.model_dump(exclude={"opening_qty"})
         payload["name"] = name
+        # The schema now accepts any slug; the admin-editable list is the real constraint (FE-6).
+        payload["category"] = app_settings.validate_category(db, "stock", payload.get("category"))
         if payload.get("sku"):
             payload["sku"] = payload["sku"].strip()
         item = StockItem(**payload, current_qty=0, created_by=_resolve_user_id(db, user))
@@ -275,6 +277,8 @@ def update_item(item_id: int, data: StockItemUpdate, db: Session = Depends(get_d
             changes["sku"] = sku
         if changes.get("name"):
             changes["name"] = changes["name"].strip()
+        if changes.get("category"):
+            changes["category"] = app_settings.validate_category(db, "stock", changes["category"])
         if changes.get("vendor_id") and not db.query(Vendor).filter(
                 Vendor.id == changes["vendor_id"]).first():
             raise HTTPException(status_code=404, detail="Vendor not found")
