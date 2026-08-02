@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { FaClipboardList, FaPlus } from "react-icons/fa";
-import { getTickets, getTicket, updateTicketStatus, addTicketItem } from "../../api/maintenance";
+import { getTickets, getTicket, updateTicketStatus, addTicketItem, claimTicket } from "../../api/maintenance";
 
 const inputCls =
   "w-full px-3 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -59,6 +59,19 @@ export default function MyTickets() {
     }
   };
 
+  const claim = async (t) => {
+    setBusyId(t.id);
+    try {
+      await claimTicket(t.id);
+      showToast(`Ticket #${t.id} is yours — start work when ready`);
+      await load();
+    } catch (e) {
+      showToast(e.message, "error");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
   const advance = async (t, status) => {
     setBusyId(t.id);
     try {
@@ -82,12 +95,12 @@ export default function MyTickets() {
       <h1 className="text-2xl font-bold mb-1 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-2">
         <FaClipboardList /> My Tickets
       </h1>
-      <p className="text-slate-400 mb-5 text-sm">Jobs assigned to you. A supervisor verifies before a ticket closes.</p>
+      <p className="text-slate-400 mb-5 text-sm">Jobs assigned to you, plus open ones you can claim. A supervisor verifies before a ticket closes.</p>
 
       {loading ? (
         <div className="p-10 text-center text-slate-400">Loading…</div>
       ) : tickets.length === 0 ? (
-        <div className="p-10 text-center text-slate-400">No tickets assigned to you.</div>
+        <div className="p-10 text-center text-slate-400">Nothing to do right now.</div>
       ) : (
         <div className="space-y-3">
           {tickets.map((t) => {
@@ -109,6 +122,13 @@ export default function MyTickets() {
 
                 {!terminal && (
                   <div className="flex flex-wrap gap-2 mt-3">
+                    {/* An unassigned open job can be picked up directly (ALT-8) — previously
+                        you had to wait for a supervisor to assign it before you could start. */}
+                    {t.status === "open" && !t.assignee && (
+                      <button disabled={busy} onClick={() => claim(t)} className="bg-[#E5C07B] hover:bg-[#D4AF37] text-slate-900 px-3 py-1.5 rounded-lg text-sm font-bold disabled:opacity-50">
+                        Claim this job
+                      </button>
+                    )}
                     {t.status === "assigned" && (
                       <button disabled={busy} onClick={() => advance(t, "in_progress")} className="bg-yellow-600 hover:bg-yellow-700 px-3 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50">
                         Start work

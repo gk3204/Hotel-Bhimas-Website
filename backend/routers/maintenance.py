@@ -111,20 +111,24 @@ def _get_ticket(db: Session, ticket_id: int) -> MaintenanceTicket:
     return t
 
 
-def raise_ac_on_ticket(db: Session, booking_id, room, commit=False):
-    """Auto-raise a 'turn on AC' maintenance ticket for an AC room at check-in / shift-into-AC
-    (FE-10). source='reception' (NOT 'guest' — that would be a complaint). Idempotent per
-    booking+room. Best-effort: callers wrap this so a failure never blocks the stay flow."""
+def _raise_ac_ticket(db: Session, booking_id, room, *, turning_on: bool, commit=False):
+    """Shared body for the AC on/off tickets. source='reception' (NOT 'guest' — that would be
+    a complaint). Idempotent per booking+room+direction. Best-effort: callers wrap this so a
+    failure never blocks the stay flow."""
     if room is None:
         return None
-    client_ref = f"ac-on-{booking_id}-{room.room_id}"
+    kind = "on" if turning_on else "off"
+    client_ref = f"ac-{kind}-{booking_id}-{room.room_id}"
     dup = db.query(MaintenanceTicket).filter(MaintenanceTicket.client_ref == client_ref).first()
     if dup:
         return dup
     t = MaintenanceTicket(
         room_id=room.room_id, category="appliance",
-        issue=f"Turn on AC — Room {room.room_number}",
-        priority="high", status="open", booking_id=booking_id,
+        issue=f"Turn {kind} AC — Room {room.room_number}",
+        # Turning the AC ON is guest comfort and blocks the stay starting well; turning it
+        # OFF is energy saving on an empty room, so it does not need to jump the queue.
+        priority="high" if turning_on else "normal",
+        status="open", booking_id=booking_id,
         source="reception", client_ref=client_ref,
     )
     db.add(t)
@@ -133,8 +137,19 @@ def raise_ac_on_ticket(db: Session, booking_id, room, commit=False):
         db.refresh(t)
     else:
         db.flush()
-    logger.info(f"❄️ AC-on ticket #{t.id} raised for room {room.room_number} (booking={booking_id})")
+    logger.info(f"❄️ AC-{kind} ticket #{t.id} raised for room {room.room_number} (booking={booking_id})")
     return t
+
+
+def raise_ac_on_ticket(db: Session, booking_id, room, commit=False):
+    """Auto-raise a 'turn on AC' ticket for an AC room at check-in / shift-into-AC (FE-10)."""
+    return _raise_ac_ticket(db, booking_id, room, turning_on=True, commit=commit)
+
+
+def raise_ac_off_ticket(db: Session, booking_id, room, commit=False):
+    """Auto-raise a 'turn off AC' ticket when an AC room is vacated (FE-10 follow-up) so an
+    empty room isn't cooled all day. Same idempotency + best-effort contract as the on-ticket."""
+    return _raise_ac_ticket(db, booking_id, room, turning_on=False, commit=commit)
 
 
 def create_guest_ticket(db: Session, issue: str, booking_id=None, room_id=None,
@@ -264,6 +279,40 @@ def assign_ticket(ticket_id: int, data: TicketAssignRequest, db: Session = Depen
                 client_ref=f"ticket_assign:{t.id}", respect_optout=False)
         except Exception as e:
             logger.warning(f"assignee whatsapp notify failed: {e}")
+    return _ticket_dict(db, t)
+
+
+@router.post("/tickets/{ticket_id}/claim")
+def claim_ticket(ticket_id: int, db: Session = Depends(get_db),
+                 user=Depends(require_maintenance_or_admin)):
+    """A maintenance user picks up an unassigned ticket themselves (backlog v2 ALT-8).
+
+    Until now only a supervisor/admin could assign, so a technician who spotted an open job
+    was blocked with "Ticket is not assigned yet" until someone else acted. Claiming
+    auto-assigns on pick-up. Deliberately narrow: only an OPEN, UNASSIGNED ticket can be
+    claimed, so this can never take a job off a colleague — reassignment stays an admin
+    action. Audited like any other assignment."""
+    t = _get_ticket(db, ticket_id)
+    if t.status in TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Ticket is {t.status}")
+    if t.assignee is not None:
+        raise HTTPException(status_code=409, detail="That ticket is already assigned")
+    if t.status != "open":
+        raise HTTPException(status_code=409, detail=f"Only an open ticket can be claimed (this one is {t.status})")
+
+    me = _resolve_user_id(db, user)
+    if not me:
+        raise HTTPException(status_code=403, detail="Could not identify the claiming user")
+
+    before = {"status": t.status, "assignee": t.assignee}
+    t.assignee = me
+    t.assigned_at = datetime.utcnow()
+    t.status = "assigned"
+    db.commit()
+    write_audit(db, user, "maintenance.claim", "maintenance_ticket", t.id,
+                before=before, after={"status": t.status, "assignee": t.assignee},
+                client="pwa", commit=True)
+    logger.info(f"🔧 Ticket #{t.id} claimed by user {me}")
     return _ticket_dict(db, t)
 
 

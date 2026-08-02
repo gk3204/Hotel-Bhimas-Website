@@ -70,6 +70,15 @@ export async function updateTicketStatus(id, data) {
   return handle(res);
 }
 
+// A maintenance user picks up an unassigned open ticket themselves (backlog v2 ALT-8).
+export async function claimTicket(id) {
+  const res = await fetch(`${BASE_URL}/maintenance/tickets/${id}/claim`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handle(res);
+}
+
 export async function verifyTicket(id, data = {}) {
   const res = await fetch(`${BASE_URL}/maintenance/tickets/${id}/verify`, {
     method: "POST",

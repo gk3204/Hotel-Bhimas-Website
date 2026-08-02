@@ -325,6 +325,10 @@ def read_all_bookings(
             "check_in": booking.check_in,
             "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
             "check_out": booking.check_out,
+            # Expected vs actual (FE-1) — the list showed only the planned dates, so there
+            # was no way to see when a guest really arrived or left.
+            "checked_in_at": booking.checked_in_at.isoformat() if booking.checked_in_at else None,
+            "checked_out_at": booking.checked_out_at.isoformat() if booking.checked_out_at else None,
             "status": booking.status,
             "payable_amount": float(booking.grand_total),
         })
@@ -417,6 +421,8 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
             "check_in": booking.check_in,
             "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
             "check_out": booking.check_out,
+            "checked_in_at": booking.checked_in_at.isoformat() if booking.checked_in_at else None,
+            "checked_out_at": booking.checked_out_at.isoformat() if booking.checked_out_at else None,
             "nights": (booking.check_out - booking.check_in).days,
         },
 

@@ -4,10 +4,21 @@ import {
   getBookings,
   getBookingById,
   cancelBooking,
+  getBookingGuests,
+  getGuestScanObjectUrl,
 } from "../../api/bookings";
 import { adminCancelBooking } from "../../api/admin";
 import { jwtDecode } from "jwt-decode";
-import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash } from "react-icons/fa";
+import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard } from "react-icons/fa";
+
+// "2026-08-02T14:32:10" -> "14:32". Times are stored/served in Asia/Kolkata.
+const stampTime = (iso) => (iso ? String(iso).slice(11, 16) : "");
+const stampDateTime = (iso) => {
+  if (!iso) return "—";
+  const [d, t] = String(iso).split("T");
+  const [y, m, day] = (d || "").split("-");
+  return `${day}-${m}-${y} ${(t || "").slice(0, 5)}`;
+};
 
 const Bookings = () => {
   const [bookings, setBookings] = useState([]);
@@ -351,8 +362,22 @@ const Bookings = () => {
                               {b.room_count === 1 ? "room" : "rooms"}
                             </span>
                           </td>
-                          <td className="px-6 py-4 text-sm">{b.check_in}</td>
-                          <td className="px-6 py-4 text-sm">{b.check_out}</td>
+                          {/* Planned date with what ACTUALLY happened beneath it (FE-1) —
+                              stacked rather than two more columns, which would crowd the row. */}
+                          <td className="px-6 py-4 text-sm">
+                            <div>{b.check_in}</div>
+                            {b.checked_in_at
+                              ? <div className="text-xs text-green-300/80">in {stampTime(b.checked_in_at)}</div>
+                              : b.check_in_time
+                                ? <div className="text-xs text-slate-500">exp {String(b.check_in_time).slice(0, 5)}</div>
+                                : null}
+                          </td>
+                          <td className="px-6 py-4 text-sm">
+                            <div>{b.check_out}</div>
+                            {b.checked_out_at && (
+                              <div className="text-xs text-green-300/80">out {stampTime(b.checked_out_at)}</div>
+                            )}
+                          </td>
                           <td className="px-6 py-4 text-center">
                             <span
                               className={`px-3 py-1 rounded-full text-xs font-semibold border ${getStatusColor(b.status)}`}
@@ -509,7 +534,7 @@ const Bookings = () => {
                       </p>
                     </div>
                     <div>
-                      <p className="text-slate-400 text-xs mb-1">Arrival Time</p>
+                      <p className="text-slate-400 text-xs mb-1">Expected Arrival</p>
                       <p className="font-semibold">
                         {selectedBooking.stay.check_in_time
                           ? selectedBooking.stay.check_in_time.slice(0, 5)
@@ -522,6 +547,19 @@ const Bookings = () => {
                         {selectedBooking.stay.check_out}
                       </p>
                     </div>
+                    {/* What actually happened, beside what was planned (FE-1). */}
+                    <div>
+                      <p className="text-slate-400 text-xs mb-1">Actually Checked In</p>
+                      <p className="font-semibold text-green-300">
+                        {stampDateTime(selectedBooking.stay.checked_in_at)}
+                      </p>
+                    </div>
+                    <div>
+                      <p className="text-slate-400 text-xs mb-1">Actually Checked Out</p>
+                      <p className="font-semibold text-green-300">
+                        {stampDateTime(selectedBooking.stay.checked_out_at)}
+                      </p>
+                    </div>
                     <div>
                       <p className="text-slate-400 text-xs mb-1">Duration</p>
                       <p className="font-semibold text-[#E5C07B]">
@@ -530,6 +568,9 @@ const Bookings = () => {
                     </div>
                   </div>
                 </div>
+
+                {/* Occupants (FE-3) — the per-guest KYC roster captured at check-in. */}
+                <OccupantsCard bookingId={selectedBooking.booking_id ?? selectedBooking.booking?.booking_id} />
 
                 {/* Charges Card */}
                 <div className="bg-gradient-to-br from-slate-700/50 to-slate-800/50 border border-[#E5C07B]/30 p-6 rounded-xl">
@@ -738,5 +779,133 @@ const Bookings = () => {
     </PageShell>
   );
 };
+
+/**
+ * Per-occupant KYC roster for a booking (backlog v2 FE-3).
+ *
+ * The `booking_guests` table has existed since the check-in wizard started capturing every
+ * occupant, but nothing in the web admin ever showed it — the police/FRRO registers were the
+ * only way to see who was actually in a room. ID numbers are masked at rest; the scan image
+ * is encrypted and only ever fetched through the authed decrypt-on-read route, which writes
+ * an `id.view` audit entry, so it is deliberately behind a click rather than auto-loaded.
+ */
+function OccupantsCard({ bookingId }) {
+  const [guests, setGuests] = useState(null);
+  const [error, setError] = useState("");
+  const [scan, setScan] = useState(null);      // { url, type, name }
+  const [scanError, setScanError] = useState("");
+
+  useEffect(() => {
+    if (!bookingId) return;
+    let alive = true;
+    getBookingGuests(bookingId)
+      .then((d) => { if (alive) setGuests(d.guests || []); })
+      .catch((e) => { if (alive) setError(e.message || "Could not load the occupant list"); });
+    return () => { alive = false; };
+  }, [bookingId]);
+
+  // Blob URLs must be released or they leak for the life of the tab.
+  useEffect(() => () => { if (scan?.url) URL.revokeObjectURL(scan.url); }, [scan]);
+
+  const viewScan = async (g) => {
+    setScanError("");
+    try {
+      const s = await getGuestScanObjectUrl(bookingId, g.id);
+      setScan({ ...s, name: g.name });
+    } catch (e) {
+      setScanError(e.message || "Could not open the ID scan");
+    }
+  };
+
+  const closeScan = () => {
+    if (scan?.url) URL.revokeObjectURL(scan.url);
+    setScan(null);
+  };
+
+  return (
+    <div className="bg-slate-700/50 border border-slate-600 p-5 rounded-xl">
+      <h3 className="text-lg font-bold text-[#E5C07B] mb-4">🪪 Occupants &amp; ID</h3>
+
+      {error && <p className="text-red-300 text-sm">{error}</p>}
+      {!error && guests === null && <p className="text-slate-400 text-sm">Loading…</p>}
+      {!error && guests?.length === 0 && (
+        <p className="text-slate-400 text-sm">
+          No per-guest details were captured for this booking. The check-in wizard records
+          every occupant — older bookings predate that.
+        </p>
+      )}
+
+      {guests?.length > 0 && (
+        <div className="overflow-x-auto">
+          <table className="w-full text-left text-sm">
+            <thead className="text-slate-400 border-b border-slate-600">
+              <tr>
+                <th className="py-2 pr-4">Guest</th>
+                <th className="py-2 pr-4">ID type</th>
+                <th className="py-2 pr-4">ID number</th>
+                <th className="py-2 text-right">ID scan</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700">
+              {guests.map((g) => (
+                <tr key={g.id}>
+                  <td className="py-2 pr-4">
+                    <span className="font-medium">{g.name}</span>
+                    {g.is_primary && (
+                      <span className="ml-2 px-2 py-0.5 rounded-full text-xs bg-[#E5C07B]/20 text-[#FCD34D] border border-[#E5C07B]/30">
+                        Lead
+                      </span>
+                    )}
+                  </td>
+                  <td className="py-2 pr-4 capitalize">
+                    {(g.id_type || "—").replace(/_/g, " ")}
+                  </td>
+                  <td className="py-2 pr-4 font-mono">{g.id_number_masked || "—"}</td>
+                  <td className="py-2 text-right">
+                    {g.has_scan ? (
+                      <button
+                        onClick={() => viewScan(g)}
+                        className="bg-slate-600 hover:bg-slate-500 px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5 transition"
+                      >
+                        <FaIdCard size={11} /> View
+                      </button>
+                    ) : (
+                      <span className="text-slate-500 text-xs">none</span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <p className="text-slate-500 text-xs mt-3">
+            ID numbers are stored masked. Opening a scan is recorded in the audit log.
+          </p>
+        </div>
+      )}
+
+      {scanError && <p className="text-red-300 text-sm mt-3">{scanError}</p>}
+
+      {scan && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60] p-6"
+             onClick={closeScan}>
+          <div className="bg-slate-800 border border-slate-600 rounded-xl p-4 max-w-3xl max-h-full overflow-auto"
+               onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-3">
+              <h4 className="font-bold text-[#E5C07B]">ID scan — {scan.name}</h4>
+              <button onClick={closeScan}
+                      className="text-slate-400 hover:text-white px-2 text-xl leading-none">×</button>
+            </div>
+            {scan.type === "application/pdf" ? (
+              <iframe title="ID scan" src={scan.url} className="w-[70vw] h-[70vh] bg-white rounded" />
+            ) : (
+              <img src={scan.url} alt={`ID scan for ${scan.name}`}
+                   className="max-w-full max-h-[70vh] rounded" />
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default Bookings;

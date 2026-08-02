@@ -1048,18 +1048,19 @@ def generate_shift_report_pdf(shift_data):
     expenses = shift_data.get("expenses") or []
     elements.append(Paragraph("<b>Expenses</b>", styles["Heading2"]))
     if expenses:
-        rows = [["#", "Category", "Description", "Amount"]]
+        rows = [["#", "Category", "Description", "Logged by", "Amount"]]
         for i, e in enumerate(expenses, 1):
             rows.append([str(i), (e.get("category") or "").capitalize(),
                          Paragraph(e.get("description") or "", styles["Normal"]),
+                         e.get("logged_by") or "—",
                          _rs(e.get("amount"))])
-        rows.append(["", "", "Total", _rs(shift_data.get("expenses_total"))])
-        exp_table = Table(rows, colWidths=[25, 90, 245, 80])
+        rows.append(["", "", "", "Total", _rs(shift_data.get("expenses_total"))])
+        exp_table = Table(rows, colWidths=[22, 80, 190, 78, 70])
         exp_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-            ('ALIGN', (3, 0), (3, -1), 'RIGHT'),
+            ('ALIGN', (4, 0), (4, -1), 'RIGHT'),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
             ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
             ('TOPPADDING', (0, 0), (-1, -1), 2),
@@ -1067,6 +1068,34 @@ def generate_shift_report_pdf(shift_data):
         elements.append(exp_table)
     else:
         elements.append(Paragraph("No expenses logged this shift.", styles["Normal"]))
+    elements.append(Spacer(1, 0.2 * inch))
+
+    # Cash paid OUT, itemised (backlog v2 ALT-5). This used to be a single lump sum in the
+    # reconciliation block, so a shift receipt could not be checked line by line.
+    payouts = shift_data.get("payouts") or []
+    elements.append(Paragraph("<b>Payouts &amp; refunds (cash out)</b>", styles["Heading2"]))
+    if payouts:
+        prows = [["#", "Booking", "Reason", "Reference", "Amount"]]
+        for i, p in enumerate(payouts, 1):
+            prows.append([str(i),
+                          f"#{p.get('booking_id')}" if p.get("booking_id") else "—",
+                          Paragraph(p.get("reason") or "", styles["Normal"]),
+                          p.get("reference") or "—",
+                          _rs(p.get("amount"))])
+        prows.append(["", "", "", "Total", _rs(shift_data.get("payouts_total"))])
+        pay_table = Table(prows, colWidths=[22, 55, 195, 88, 80])
+        pay_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
+            ('ALIGN', (4, 0), (4, -1), 'RIGHT'),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        elements.append(pay_table)
+    else:
+        elements.append(Paragraph("No cash paid out this shift.", styles["Normal"]))
     elements.append(Spacer(1, 0.2 * inch))
 
     # Denomination count (if entered)

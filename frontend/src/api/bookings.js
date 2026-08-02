@@ -55,6 +55,34 @@ export const cancelBooking = async (id) => {
 };
 
 
+// Per-occupant KYC roster for a booking (FE-3). Masked IDs only; `has_scan` says whether
+// an encrypted ID image is on file.
+export const getBookingGuests = async (bookingId) => {
+  const res = await fetch(`${BASE_URL}/reception/bookings/${bookingId}/guests`, {
+    headers: getAuthHeader(),
+  });
+  if (!res.ok) throw new Error("Failed to fetch the occupant list");
+  return await res.json();
+};
+
+// Fetch a decrypted ID scan as a blob URL. It is NEVER a public URL — the endpoint is
+// authed and every view is written to the audit log — so it has to be fetched with the
+// bearer token rather than dropped into an <img src>.
+export const getGuestScanObjectUrl = async (bookingId, guestId) => {
+  const res = await fetch(
+    `${BASE_URL}/reception/bookings/${bookingId}/guests/${guestId}/scan`,
+    { headers: { Authorization: getAuthHeader().Authorization } },
+  );
+  if (!res.ok) {
+    const msg = res.status === 503
+      ? "ID scans can't be decrypted — the encryption key isn't configured on the server."
+      : "No ID scan on file for this guest.";
+    throw new Error(msg);
+  }
+  const blob = await res.blob();
+  return { url: URL.createObjectURL(blob), type: blob.type };
+};
+
 // Filter bookings by date
 export const getBookingsByDate = async (from, to) => {
   const res = await fetch(

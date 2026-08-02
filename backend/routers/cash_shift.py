@@ -125,9 +125,21 @@ def _report_data(db: Session, shift: CashShift) -> dict:
     expenses = (db.query(Expense).filter(Expense.shift_id == shift.id)
                 .order_by(Expense.created_at).all())
     denoms = json.loads(shift.denominations) if shift.denominations else None
+    # Who logged each expense, so the printed receipt can be tied back to a person.
+    user_names = {u.user_id: u.username for u in db.query(User).all()} if expenses else {}
     s["expenses"] = [{"category": e.category, "description": e.description,
                       "amount": float(e.amount), "receipt_ref": e.receipt_url,
-                      "created_at": e.created_at} for e in expenses]
+                      "created_at": e.created_at,
+                      "logged_by": user_names.get(e.created_by)} for e in expenses]
+    # ALT-5: cash paid OUT of the drawer was printed as one lump sum, so the receipt could
+    # not be reconciled line by line. The itemised rows already existed on the JSON detail
+    # endpoint — carry them into the PDF too.
+    payouts = (db.query(Payment)
+               .filter(Payment.refund_shift_id == shift.id)
+               .order_by(Payment.payment_id).all())
+    s["payouts"] = [{"payment_id": p.payment_id, "booking_id": p.booking_id,
+                     "amount": float(p.refund_amount or 0), "reason": p.refund_reason,
+                     "reference": p.refund_reference} for p in payouts]
     s["denominations"] = denoms
     s["close_note"] = shift.close_note
     return s

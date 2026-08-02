@@ -786,6 +786,20 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         except Exception as e:
             logger.error(f"linen on_checkout hook failed for booking {booking.booking_id}: {e}")
 
+        # FE-10 follow-up: raise a "turn off AC" task for each vacated AC room so an empty
+        # room isn't cooled all day. Best-effort — never blocks a checkout.
+        try:
+            from routers.maintenance import raise_ac_off_ticket
+            for room in rooms:
+                rt = db.query(RoomType).filter(RoomType.room_type_id == room.room_type_id,
+                                               RoomType.is_ac == True).first()  # noqa: E712
+                if rt:
+                    raise_ac_off_ticket(db, booking.booking_id, room)
+            db.commit()
+        except Exception as e:
+            logger.error(f"AC-off ticket at checkout failed for booking {booking.booking_id}: {e}")
+            db.rollback()
+
         resp = _checkout_response(db, booking, folio, override=override_used, already=False)
         resp["loyalty_awarded"] = points_awarded
         resp["company_transfer"] = company_transfer
@@ -1127,6 +1141,9 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "phone": b.guest.phone if b.guest else None,
             "check_in": str(b.check_in),
             "check_out": str(b.check_out),
+            # Expected arrival vs what actually happened (FE-1) — both on the row so the
+            # in-house board can show a late/early arrival at a glance.
+            "check_in_time": str(b.check_in_time) if b.check_in_time else None,
             "checked_in_at": b.checked_in_at.isoformat() if b.checked_in_at else None,
             "grand_total": float(b.grand_total or 0),
             "paid_total": paid,
@@ -1229,6 +1246,13 @@ def get_guest_scan(booking_id: int, guest_id: int, db: Session = Depends(get_db)
         raise HTTPException(status_code=404, detail="ID scan not found")
     except RuntimeError:
         raise HTTPException(status_code=503, detail="ID scan cannot be decrypted (key not configured)")
+    # Record WHO looked at a government ID. `routers/crm.py` already emits `id.view` when a
+    # guest record is opened; this path decrypts an actual ID image and was not audited at
+    # all — a gap worth closing now that the web admin surfaces it (FE-3).
+    write_audit(db, user, "id.view", "booking_guest", g.id,
+                after={"booking_id": booking_id, "guest_name": g.name,
+                       "id_type": g.id_type, "id_number_masked": g.id_number_masked},
+                commit=True)
     return StreamingResponse(io.BytesIO(data), media_type=g.id_scan_mime or "application/octet-stream")
 
 

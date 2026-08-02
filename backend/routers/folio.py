@@ -199,6 +199,11 @@ def _folio_detail(db: Session, folio: Folio):
         "email": booking.guest.email if booking and booking.guest else None,
         "check_in": str(booking.check_in) if booking else None,
         "check_out": str(booking.check_out) if booking else None,
+        # Expected arrival vs what actually happened (FE-1) — the folio header is where the
+        # desk looks when a guest queries their bill, so it needs the real times.
+        "check_in_time": str(booking.check_in_time) if booking and booking.check_in_time else None,
+        "checked_in_at": booking.checked_in_at.isoformat() if booking and booking.checked_in_at else None,
+        "checked_out_at": booking.checked_out_at.isoformat() if booking and booking.checked_out_at else None,
         "booking_status": booking.status if booking else None,
         "invoice_no": invoice.invoice_no if invoice else None,
         "invoice_date": str(invoice.invoice_date) if invoice else None,
