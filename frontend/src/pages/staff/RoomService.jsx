@@ -6,13 +6,20 @@
 //
 // Printing goes through the tablet's own browser (see components/ThermalPrint.jsx) because
 // the backend is in the cloud and can't reach a printer in the hotel.
-import React, { useCallback, useEffect, useMemo, useState } from "react";
-import { FaConciergeBell, FaPrint, FaSyncAlt, FaCheck, FaTimes, FaPlus, FaMinus } from "react-icons/fa";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  FaConciergeBell, FaPrint, FaSyncAlt, FaCheck, FaTimes, FaPlus, FaMinus, FaBell, FaBellSlash,
+} from "react-icons/fa";
 import * as api from "../../api/roomService";
 import { KotSheet, BillSheet } from "../../components/ThermalPrint";
 import { prettyCategory } from "../../utils/useCategoryList";
+import { playChime, unlockAudio, isAudioBlocked } from "../../utils/alertSound";
 
 const money = (v) => `₹${Number(v || 0).toFixed(2)}`;
+
+const POLL_MS = 20000;    // how soon a guest order shows up (and chimes)
+const REPEAT_MS = 30000;  // re-chime while an order still has no kitchen docket
+const MUTE_KEY = "rs_alert_muted";
 
 const statusChip = (s) =>
   ({
@@ -43,10 +50,35 @@ export default function RoomService() {
   // Orders whose KOT we've already auto-printed this session — a poll must not reprint.
   const [autoPrinted] = useState(() => new Set());
 
+  // ---- Audible alert for guest QR orders ----------------------------------
+  // Ids already on the board when this screen opened. They are seeded WITHOUT chiming, so
+  // opening or reloading the page never alarms for orders staff already know about.
+  const seenIds = useRef(null);
+  const [muted, setMuted] = useState(() => localStorage.getItem(MUTE_KEY) === "1");
+  const [audioBlocked, setAudioBlocked] = useState(true);
+  const mutedRef = useRef(muted);
+  useEffect(() => { mutedRef.current = muted; }, [muted]);
+
   const showToast = (message, type = "success") => {
     setToast({ message, type });
     setTimeout(() => setToast(null), 3500);
   };
+
+  // Browsers keep audio suspended until the user interacts. Unlock on the first tap/keypress
+  // anywhere on the screen, and reflect the real state so the UI can prompt if it's still off.
+  useEffect(() => {
+    const unlock = () => {
+      unlockAudio();
+      setAudioBlocked(isAudioBlocked());
+    };
+    unlock();
+    window.addEventListener("pointerdown", unlock);
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
 
   const loadBoard = useCallback(async (auto = true) => {
     try {
@@ -54,19 +86,31 @@ export default function RoomService() {
       const list = d.orders || [];
       setOrders(list);
 
+      // First load only seeds the baseline — no alert for what was already there.
+      if (seenIds.current === null) {
+        seenIds.current = new Set(list.map((o) => o.id));
+        return;
+      }
+
       // A guest order arriving from the QR portal needs to reach the kitchen. Browsers won't
-      // print unattended without a gesture, so we surface it loudly and let one tap send it —
-      // the desk app is the one that can print these silently.
-      if (auto) {
-        const fresh = list.find(
-          (o) => o.source === "portal" && !o.printed_kot_at && !autoPrinted.has(o.id),
+      // print unattended without a gesture, so we chime and let one tap send it — the desk app
+      // is the one that can print these silently.
+      const fresh = list.filter((o) => o.source === "portal" && !seenIds.current.has(o.id));
+      list.forEach((o) => seenIds.current.add(o.id));
+      if (auto && fresh.length > 0) {
+        if (!mutedRef.current) playChime();
+        const first = fresh[0];
+        showToast(
+          fresh.length === 1
+            ? `New guest order — room ${first.room_number}`
+            : `${fresh.length} new guest orders`,
+          "info",
         );
-        if (fresh) showToast(`New guest order for room ${fresh.room_number} — print the KOT`, "info");
       }
     } catch (e) {
       showToast(e.message, "error");
     }
-  }, [autoPrinted]);
+  }, []);
 
   useEffect(() => {
     (async () => {
@@ -86,9 +130,56 @@ export default function RoomService() {
 
   // Keep the board live without hammering the API.
   useEffect(() => {
-    const id = window.setInterval(() => loadBoard(true), 30000);
+    const id = window.setInterval(() => loadBoard(true), POLL_MS);
     return () => window.clearInterval(id);
   }, [loadBoard]);
+
+  // Orders the kitchen hasn't been told about yet. Drives both the banner and the re-chime.
+  const awaitingKot = useMemo(
+    () => orders.filter((o) => !o.printed_kot_at && o.status !== "completed"),
+    [orders],
+  );
+
+  // Keep chiming while anything is still waiting for the kitchen — a single ding is easy to
+  // miss at a busy desk. It stops the moment the docket is printed.
+  useEffect(() => {
+    if (muted || awaitingKot.length === 0) return undefined;
+    const id = window.setInterval(() => {
+      if (!mutedRef.current) playChime();
+    }, REPEAT_MS);
+    return () => window.clearInterval(id);
+  }, [muted, awaitingKot.length]);
+
+  // A sleeping tablet is the likeliest way an order gets missed, and browsers throttle timers
+  // in hidden tabs. Hold a screen wake lock while this screen is open, and re-take it when the
+  // tablet comes back to the foreground (the lock is dropped automatically on hide).
+  useEffect(() => {
+    let lock = null;
+    let cancelled = false;
+    const acquire = async () => {
+      try {
+        if (document.visibilityState !== "visible" || !navigator.wakeLock) return;
+        lock = await navigator.wakeLock.request("screen");
+      } catch {
+        /* unsupported or refused — the screen just sleeps as usual */
+      }
+    };
+    const onVisible = () => { if (document.visibilityState === "visible" && !cancelled) acquire(); };
+    acquire();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      try { lock?.release(); } catch { /* already gone */ }
+    };
+  }, []);
+
+  const toggleMute = () => {
+    const next = !muted;
+    setMuted(next);
+    localStorage.setItem(MUTE_KEY, next ? "1" : "0");
+    if (!next) { unlockAudio(); setAudioBlocked(isAudioBlocked()); playChime(); }
+  };
 
   const bump = (id, delta) =>
     setCart((c) => {
@@ -192,6 +283,33 @@ export default function RoomService() {
         Take an order, send it to the kitchen, then deliver — the charges land on the guest's room bill.
       </p>
 
+      {/* Waiting-for-kitchen banner. The chime is the prompt; this is the action, and it still
+          works when sound is muted or the browser has blocked audio. */}
+      {awaitingKot.length > 0 && (
+        <button
+          onClick={() => { setTab("board"); printKotFor(awaitingKot[0]); }}
+          className="w-full mb-4 px-4 py-3 rounded-xl bg-[#E5C07B] text-slate-900 font-bold flex items-center justify-between gap-3 shadow-lg animate-pulse text-left"
+        >
+          <span className="flex items-center gap-2">
+            <FaBell />
+            {awaitingKot.length === 1
+              ? `Room ${awaitingKot[0].room_number} — order waiting for the kitchen`
+              : `${awaitingKot.length} orders waiting for the kitchen`}
+          </span>
+          <span className="text-sm whitespace-nowrap">Print KOT →</span>
+        </button>
+      )}
+
+      {/* Sound is useless if it's silently blocked, so say so rather than pretend. */}
+      {!muted && audioBlocked && (
+        <button
+          onClick={() => { unlockAudio(); setAudioBlocked(isAudioBlocked()); }}
+          className="w-full mb-4 px-4 py-2.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm text-left"
+        >
+          🔇 Sound is blocked by the browser — tap here to enable order alerts.
+        </button>
+      )}
+
       <div className="flex gap-2 mb-5">
         {[["board", `Orders${orders.length ? ` (${orders.length})` : ""}`], ["order", "Take an order"]].map(([k, label]) => (
           <button
@@ -204,8 +322,17 @@ export default function RoomService() {
             {label}
           </button>
         ))}
+        <button onClick={toggleMute}
+                title={muted ? "Order alerts are muted" : "Order alerts are on"}
+                aria-label={muted ? "Unmute order alerts" : "Mute order alerts"}
+                className={`ml-auto px-4 py-2.5 rounded-lg text-sm flex items-center gap-2 transition ${
+                  muted ? "bg-slate-700 hover:bg-slate-600 text-slate-400" : "bg-slate-700 hover:bg-slate-600"
+                }`}>
+          {muted ? <FaBellSlash size={12} /> : <FaBell size={12} />}
+          {muted ? "Muted" : "Alerts on"}
+        </button>
         <button onClick={() => loadBoard(false)}
-                className="ml-auto px-4 py-2.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm flex items-center gap-2">
+                className="px-4 py-2.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm flex items-center gap-2">
           <FaSyncAlt size={12} /> Refresh
         </button>
       </div>
