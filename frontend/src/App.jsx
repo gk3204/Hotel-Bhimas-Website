@@ -180,7 +180,31 @@ function App() {
         <Route path="/staff/room-service" element={<RoomService />} />
       </Route>
 
+      {/* Catch-all. Without this an unmatched URL rendered NOTHING — a white page — which is
+          what a guest saw when an in-room QR pointed at a host that didn't have the portal
+          route. A wrong link should always say so. */}
+      <Route path="*" element={<NotFound />} />
     </Routes>
+  );
+}
+
+function NotFound() {
+  return (
+    <div className="min-h-screen bg-[#0F172A] text-white flex items-center justify-center p-6">
+      <div className="text-center max-w-md">
+        <div className="text-5xl mb-4">🧭</div>
+        <h1 className="text-2xl font-bold mb-2 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent">
+          Page not found
+        </h1>
+        <p className="text-slate-400 text-sm">
+          This link doesn't lead anywhere. If you scanned a QR code in your room, please ask the
+          front desk for a fresh one.
+        </p>
+        <a href="/" className="inline-block mt-6 px-5 py-2.5 rounded-lg bg-[#E5C07B] text-slate-900 font-semibold">
+          Go to the home page
+        </a>
+      </div>
+    </div>
   );
 }
 

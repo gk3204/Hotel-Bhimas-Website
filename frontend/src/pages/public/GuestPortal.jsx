@@ -43,12 +43,15 @@ export default function GuestPortal() {
       </Shell>
     );
   }
-  if (error && !data) {
+  // Anything that leaves us without data renders a message — never a blank page.
+  // `!data.active` below would throw on a null `data`, which unmounts the whole tree and
+  // shows the guest a white screen (this route has no error boundary above it).
+  if (!data) {
     return (
       <Shell>
         <div className="text-center py-10">
           <div className="text-4xl mb-3">🔒</div>
-          <p className="text-slate-700">{error}</p>
+          <p className="text-slate-700">{error || "This link is not valid. Please ask the front desk for a new QR code."}</p>
         </div>
       </Shell>
     );
