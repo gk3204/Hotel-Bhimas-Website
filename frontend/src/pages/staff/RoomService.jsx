@@ -17,8 +17,11 @@ import { playChime, unlockAudio, isAudioBlocked } from "../../utils/alertSound";
 
 const money = (v) => `₹${Number(v || 0).toFixed(2)}`;
 
-const POLL_MS = 20000;    // how soon a guest order shows up (and chimes)
-const REPEAT_MS = 30000;  // re-chime while an order still has no kitchen docket
+const POLL_MS = 20000;  // how soon a guest order shows up (and chimes)
+// Re-chime while an order still has no kitchen docket. At 1s this is a continuous alarm
+// rather than a periodic reminder — the chime itself is ~0.5s, so there is about half a
+// second of silence between repeats. Printing the KOT or muting stops it.
+const REPEAT_MS = 1000;
 const MUTE_KEY = "rs_alert_muted";
 
 const statusChip = (s) =>
