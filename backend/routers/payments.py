@@ -292,35 +292,7 @@ async def verify_payment(
     logger.info(f"✅ Payment verified for booking {booking.booking_id}. Starting background confirmation task...")
 
     # Extract booking data BEFORE session closes (prevent detached instance issues)
-    booking_data = {
-        "booking_id": booking.booking_id,
-        "guest_name": booking.guest.name,
-        "guest_email": booking.guest.email,
-        "guest_phone": booking.guest.phone,
-        "check_in": booking.check_in,
-        "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
-        "check_out": booking.check_out,
-        "status": booking.status,
-        "base_amount": float(booking.base_amount),
-        "gst_amount": float(booking.gst_amount),
-        "discount_amount": float(booking.discount_amount or 0),
-        "total_amount": float(booking.total_amount),
-        "convenience_fee": float(booking.convenience_fee),
-        "convenience_gst": float(booking.convenience_gst),
-        "grand_total": float(booking.grand_total),
-        "booking_items": [
-            {
-                "room_type_name": item.room_type.name,
-                "room_type_id": item.room_type.room_type_id,
-                "quantity": item.quantity,
-                "base_amount": float(item.base_amount),
-                "gst_amount": float(item.gst_amount),
-                "total_amount": float(item.total_amount),
-                "price_per_night": float(item.room_type.price_per_night)
-            }
-            for item in booking.booking_items
-        ]
-    }
+    booking_data = booking_pdf_payload(booking)
 
     # Extract payment data BEFORE session closes (detached instance error prevention)
     payment_data = {
@@ -684,14 +656,66 @@ def require_excess_return_permission(user=Depends(get_current_user)):
     return user
 
 def total_paid(db: Session, booking_id: int) -> float:
-    """Sum of recorded payments for a booking (the anti-fraud 'recorded payment' gate
-    used by check-in and card issue). Recorded = Payment.status == 'paid'."""
+    """Sum of MONEY THE HOTEL RECEIVED for a booking. Recorded = Payment.status == 'paid'.
+
+    ⚠️ Do NOT widen this to include a prepayment collected by an OTA. This is the number the
+    payment/refund screens, collections_summary and the cash reports mean by "we were paid".
+    The anti-fraud gates want total_paid_including_prepaid() instead.
+    """
     total = (
         db.query(func.coalesce(func.sum(Payment.amount), 0))
         .filter(Payment.booking_id == booking_id, Payment.status == "paid")
         .scalar()
     )
     return float(total or 0)
+
+
+def total_paid_including_prepaid(db: Session, booking_id: int) -> float:
+    """What the guest has paid ANYONE for this stay — the hotel, or the channel that sold it.
+
+    That is the right question for the anti-fraud gates ("has this booking been paid for, so
+    may we check them in and cut a key card?") and the wrong one for the cash reports.
+
+    v4b1 (R9): an OTA booking records NO Payment row, because the channel took the money, not
+    the hotel. total_paid() therefore returned 0 for every OTA stay, and four things broke off
+    that single fact — the folio showed the full room amount due (so the desk collected it a
+    second time), check-in saw an unpaid booking, card issue tripped `card_without_payment`,
+    and fraud_detection raised an alert on every single OTA guest.
+    """
+    prepaid = (
+        db.query(func.coalesce(func.sum(Booking.prepaid_amount), 0))
+        .filter(Booking.booking_id == booking_id)
+        .scalar()
+    )
+    return round(total_paid(db, booking_id) + float(prepaid or 0), 2)
+
+
+def prepaid_slice(db: Session, booking, *, paid: float | None = None) -> dict:
+    """v4b9 (R9): the prepaid facts every guest-facing surface needs, decided in ONE place.
+
+    `is_prepaid` is the flag the desk chips on, and it is computed here rather than on the
+    desktop for the same reason the rest of this codebase prices on the server: the desk would
+    have to re-derive "fully covered" from three numbers, and the day someone changes what
+    counts, the two answers diverge — in the direction of asking a guest to pay twice.
+
+    A complimentary stay is deliberately NOT prepaid: nobody paid anything, and it carries its
+    own chip (v4b6).
+
+    `paid` lets a caller that has already summed this booking's Payments (the desk board does,
+    once per row) pass it in rather than making this re-query it — one rule, no N+1.
+    """
+    if booking is None:
+        return {"prepaid_amount": 0.0, "prepaid_source": None, "is_prepaid": False}
+    amount = float(getattr(booking, "prepaid_amount", 0) or 0)
+    grand = float(booking.grand_total or 0)
+    covered = (round(paid + amount, 2) if paid is not None
+               else total_paid_including_prepaid(db, booking.booking_id))
+    return {
+        "prepaid_amount": amount,
+        "prepaid_source": getattr(booking, "prepaid_source", None),
+        # +0.01 absorbs the rounding of a per-night split against a stored grand total.
+        "is_prepaid": bool(amount > 0 and grand > 0 and covered + 0.01 >= grand),
+    }
 
 
 # =====================================================================
@@ -829,14 +853,17 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
             client_ref=data.client_ref,
             collected_by=_resolve_user_id(db, user),
         )
-        if data.method == "cash":
-            # Hard cash gate (prompt 12): cash must land in an open drawer so it is
-            # attributable to a shift. Non-cash (card/upi/bank) is unaffected.
-            shift = _open_shift(db)
-            if not shift:
-                raise HTTPException(
-                    status_code=409,
-                    detail="No cash shift is open — open a cash shift before recording cash.")
+        # Attribute EVERY desk payment to the open shift, not just cash (v3 item 6) — the
+        # owner reconciles a shift by method, and a card/UPI row with a NULL shift_id is
+        # invisible to that report. The HARD GATE stays cash-only: a card payment must not be
+        # refused because no drawer is open, so non-cash simply records with shift_id = NULL
+        # in that case, exactly as it did before.
+        shift = _open_shift(db)
+        if data.method == "cash" and not shift:
+            raise HTTPException(
+                status_code=409,
+                detail="No cash shift is open — open a cash shift before recording cash.")
+        if shift:
             payment.shift_id = shift.id
         db.add(payment)
         db.flush()
@@ -873,12 +900,25 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
             guest = booking.guest
             if guest and guest.phone and \
                str(get_setting(db, "wa_receipt_enabled", "true")).strip().lower() not in ("false", "0", "no", ""):
-                from utils import whatsapp_service
-                whatsapp_service.send_template(
-                    db, guest.phone, "payment_receipt",
-                    {"guest_name": guest.name, "amount": f"{float(payment.amount):.2f}",
-                     "method": data.method, "booking_ref": str(booking.booking_id)},
-                    guest_id=guest.guest_id, booking_id=booking.booking_id,
+                amount = f"{float(payment.amount):.2f}"
+                # The desk already generates this receipt as a PDF; send the guest the same file
+                # rather than a text line. Falls back to the text template automatically.
+                pdf_path = None
+                try:
+                    pdf_path = generate_payment_receipt_pdf(receipt_payload(db, payment, "payment"))
+                except Exception as e:
+                    logger.warning(f"receipt PDF for WhatsApp failed (sending text instead): {e}")
+                from services import notify as notify_service
+                notify_service.notify_guest_document(
+                    db, guest,
+                    doc_template="payment_receipt_doc", text_template="payment_receipt",
+                    doc_params={"guest_name": guest.name, "amount": amount},
+                    text_params={"guest_name": guest.name, "amount": amount,
+                                 "method": data.method, "booking_ref": str(booking.booking_id)},
+                    pdf_path=pdf_path,
+                    filename=f"receipt-{payment.payment_id}.pdf",
+                    caption=f"Receipt for Rs. {amount} \u2014 Hotel Bhimas",
+                    booking_id=booking.booking_id,
                     client_ref=f"receipt:{payment.payment_id}")
         except Exception as e:
             logger.warning(f"payment receipt WhatsApp failed: {e}")
@@ -981,6 +1021,7 @@ def desk_collect(data: DeskCollectRequest, db: Session = Depends(get_db),
         if not cfg["upi_qr_enabled"]:
             raise HTTPException(status_code=409, detail="UPI QR collection is disabled")
         close_by = int((datetime.utcnow() + timedelta(minutes=cfg["qr_expiry_minutes"])).timestamp())
+        qr = None
         try:
             qr = client.qrcode.create({
                 "type": "upi_qr",
@@ -993,22 +1034,33 @@ def desk_collect(data: DeskCollectRequest, db: Session = Depends(get_db),
                 "notes": {"booking_id": str(booking.booking_id), "desk": "reception"},
             })
         except Exception as e:
-            logger.error(f"❌ Razorpay QR create failed for booking {booking.booking_id}: {e}", exc_info=True)
-            raise HTTPException(status_code=502, detail="Failed to create the UPI QR")
-        payment = Payment(
-            booking_id=booking.booking_id, gateway="razorpay", method="upi",
-            collect_method="upi_qr", amount=Decimal(str(charge)),
-            convenience_fee_amount=Decimal(str(fee)), currency="INR", status="created",
-            client_ref=data.client_ref, collected_by=_resolve_user_id(db, user),
-            qr_code_id=qr.get("id"), qr_image_url=qr.get("image_url"))
-        db.add(payment)
-        db.commit()
-        write_audit(db, user, "payment.desk_collect", "payment", payment.payment_id,
-                    after={"booking_id": booking.booking_id, "method": "upi_qr",
-                           "amount": float(charge), "fee": float(fee), "qr_code_id": payment.qr_code_id},
-                    client="desktop", commit=True)
-        logger.info(f"🧾 Desk UPI QR ₹{charge} raised for booking {booking.booking_id} (qr {payment.qr_code_id})")
-        return _desk_collect_response(db, payment, expires_at=close_by)
+            # QR Codes may not be enabled on this Razorpay account (the API returns "URL not
+            # found"). Don't fail the collection — fall through to a payment link when one is
+            # available; only surface an error if links are disabled too.
+            logger.error(f"❌ Razorpay QR create failed for booking {booking.booking_id}: {e} "
+                         f"— QR Codes may not be enabled on the account; falling back to a payment link",
+                         exc_info=True)
+            if not cfg["link_enabled"]:
+                raise HTTPException(
+                    status_code=502,
+                    detail="UPI QR is unavailable (enable QR Codes on your Razorpay account), and "
+                           "payment links are disabled — cannot collect online.")
+        if qr is not None:
+            payment = Payment(
+                booking_id=booking.booking_id, gateway="razorpay", method="upi",
+                collect_method="upi_qr", amount=Decimal(str(charge)),
+                convenience_fee_amount=Decimal(str(fee)), currency="INR", status="created",
+                client_ref=data.client_ref, collected_by=_resolve_user_id(db, user),
+                qr_code_id=qr.get("id"), qr_image_url=qr.get("image_url"))
+            db.add(payment)
+            db.commit()
+            write_audit(db, user, "payment.desk_collect", "payment", payment.payment_id,
+                        after={"booking_id": booking.booking_id, "method": "upi_qr",
+                               "amount": float(charge), "fee": float(fee), "qr_code_id": payment.qr_code_id},
+                        client="desktop", commit=True)
+            logger.info(f"🧾 Desk UPI QR ₹{charge} raised for booking {booking.booking_id} (qr {payment.qr_code_id})")
+            return _desk_collect_response(db, payment, expires_at=close_by)
+        # QR failed but links are enabled — fall through to the payment-link path below.
 
     # ---- Razorpay payment link ----
     if not cfg["link_enabled"]:
@@ -1186,9 +1238,11 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
         payment.refund_reason = data.reason
         payment.refund_mode = data.mode
         payment.refund_reference = data.reference
-        if data.mode == "cash":
-            shift = _open_shift(db)
-            payment.refund_shift_id = shift.id if shift else None
+        # Link the refund to the open shift whatever the mode (v3 item 6), so a shift's
+        # money-out is reportable by mode. The DRAWER maths in cash_shift._compute_totals
+        # still counts only refund_mode == "cash", so expected_cash is unchanged.
+        shift = _open_shift(db)
+        payment.refund_shift_id = shift.id if shift else None
 
     folio_posting_failed = False
     try:
@@ -1377,6 +1431,70 @@ def payments_by_booking(booking_id: int, db: Session = Depends(get_db),
     }
 
 
+def booking_pdf_payload(booking) -> dict:
+    """The dict generate_booking_pdf() expects. Lifted out of the online-payment flow so the DESK
+    booking path (routers/reception.py) can attach the same confirmation PDF to its WhatsApp
+    message. Read eagerly -- the online flow builds this before its session closes."""
+    return {
+        "booking_id": booking.booking_id,
+        "guest_name": booking.guest.name,
+        "guest_email": booking.guest.email,
+        "guest_phone": booking.guest.phone,
+        "check_in": booking.check_in,
+        "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
+        "check_out": booking.check_out,
+        "status": booking.status,
+        "base_amount": float(booking.base_amount),
+        "gst_amount": float(booking.gst_amount),
+        "discount_amount": float(booking.discount_amount or 0),
+        "total_amount": float(booking.total_amount),
+        "convenience_fee": float(booking.convenience_fee),
+        "convenience_gst": float(booking.convenience_gst),
+        "grand_total": float(booking.grand_total),
+        "booking_items": [
+            {
+                "room_type_name": item.room_type.name,
+                "room_type_id": item.room_type.room_type_id,
+                "quantity": item.quantity,
+                "base_amount": float(item.base_amount),
+                "gst_amount": float(item.gst_amount),
+                "total_amount": float(item.total_amount),
+                "price_per_night": float(item.room_type.price_per_night)
+            }
+            for item in booking.booking_items
+        ],
+    }
+
+
+def receipt_payload(db, payment, kind="payment") -> dict:
+    """The dict generate_payment_receipt_pdf() expects. Shared by the receipt endpoint and the
+    WhatsApp receipt send, so the PDF the guest gets is byte-identical to the desk's."""
+    booking = db.query(Booking).filter(Booking.booking_id == payment.booking_id).first()
+    guest = booking.guest if booking else None
+    collector = (db.query(User).filter(User.user_id == payment.collected_by).first()
+                 if payment.collected_by else None)
+    return {
+        "kind": kind,
+        "payment_id": payment.payment_id,
+        "receipt_no": (f"RCPT-{payment.payment_id}" if kind == "payment"
+                       else f"RFND-{payment.payment_id}"),
+        "booking_id": payment.booking_id,
+        "guest_name": guest.name if guest else "\u2014",
+        "guest_phone": guest.phone if guest else None,
+        "date": payment.created_at,
+        "amount": float(payment.amount or 0),
+        "method": payment.method or payment.gateway,
+        "reference": payment.payment_id_gateway,
+        "gateway": payment.gateway,
+        "collected_by_name": (collector.full_name or collector.username) if collector else None,
+        "refund_id": payment.refund_id,
+        "refund_amount": float(payment.refund_amount) if payment.refund_amount is not None else None,
+        "refund_reason": payment.refund_reason,
+        "refund_mode": payment.refund_mode,
+        "refund_reference": payment.refund_reference,
+    }
+
+
 @router.get("/{payment_id}/receipt/pdf")
 def payment_receipt_pdf(payment_id: int, kind: str = "payment", db: Session = Depends(get_db),
                         user=Depends(require_reception_or_admin)):
@@ -1392,31 +1510,7 @@ def payment_receipt_pdf(payment_id: int, kind: str = "payment", db: Session = De
     if kind == "refund" and payment.refund_status != "completed":
         raise HTTPException(status_code=400, detail="Payment has no completed refund")
 
-    booking = db.query(Booking).filter(Booking.booking_id == payment.booking_id).first()
-    guest = booking.guest if booking else None
-    collector = (db.query(User).filter(User.user_id == payment.collected_by).first()
-                 if payment.collected_by else None)
-
-    receipt_data = {
-        "kind": kind,
-        "payment_id": payment.payment_id,
-        "receipt_no": (f"RCPT-{payment.payment_id}" if kind == "payment"
-                       else f"RFND-{payment.payment_id}"),
-        "booking_id": payment.booking_id,
-        "guest_name": guest.name if guest else "—",
-        "guest_phone": guest.phone if guest else None,
-        "date": payment.created_at,
-        "amount": float(payment.amount or 0),
-        "method": payment.method or payment.gateway,
-        "reference": payment.payment_id_gateway,
-        "gateway": payment.gateway,
-        "collected_by_name": (collector.full_name or collector.username) if collector else None,
-        "refund_id": payment.refund_id,
-        "refund_amount": float(payment.refund_amount) if payment.refund_amount is not None else None,
-        "refund_reason": payment.refund_reason,
-        "refund_mode": payment.refund_mode,
-        "refund_reference": payment.refund_reference,
-    }
+    receipt_data = receipt_payload(db, payment, kind)
     try:
         pdf_path = generate_payment_receipt_pdf(receipt_data)
     except Exception as e:

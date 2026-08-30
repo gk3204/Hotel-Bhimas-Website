@@ -61,6 +61,17 @@ to_run.append("022_booking_guests.sql")
 to_run.append("023_linen.sql")
 to_run.append("024_room_type_ac.sql")
 to_run.append("025_room_service.sql")
+to_run.append("026_booking_guest_back_scan.sql")
+to_run.append("027_sales_reports_shift_split.sql")
+to_run.append("028_room_night_posting.sql")
+to_run.append("029_complimentary.sql")
+to_run.append("030_alt_room_type.sql")
+to_run.append("031_housekeeping_names.sql")
+to_run.append("032_booking_occupancy.sql")
+to_run.append("033_ota_draft_occupancy.sql")
+to_run.append("034_ota_actual_commission.sql")
+to_run.append("035_menu_availability_windows.sql")
+to_run.append("036_whatsapp_inbox.sql")
 
 for f in to_run:
     path = os.path.join(BACKEND, "migrations", f)
@@ -78,6 +89,8 @@ print("After: folios:", table_exists("folios"),
       "| owner_otps:", table_exists("owner_otps"),
       "| rooms.status_changed_at:", col_exists("rooms", "status_changed_at"),
       "| app_settings:", table_exists("app_settings"),
-      "| cash_shifts.denominations:", col_exists("cash_shifts", "denominations"))
+      "| cash_shifts.denominations:", col_exists("cash_shifts", "denominations"),
+      "| booking_guests.id_scan_back_ref:", col_exists("booking_guests", "id_scan_back_ref"),
+      "| folio_charges.menu_item_id:", col_exists("folio_charges", "menu_item_id"))
 conn.close()
 print("DONE")

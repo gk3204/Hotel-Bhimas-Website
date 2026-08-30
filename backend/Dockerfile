@@ -45,6 +45,7 @@ USER appuser
 # Expose port
 EXPOSE 8000
 
-# Run application with explicit python path
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]
+# Run the API. 2 workers suits a single hotel: fewer duplicate in-process schedulers and roughly
+# half the memory of 4. Raise to 4 only if you run many concurrent desk stations. Only the LAST CMD
+# takes effect, so there is exactly one now (the old duplicate --workers 4 line was dead).
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]

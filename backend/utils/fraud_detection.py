@@ -89,7 +89,10 @@ def _make_alert(new_alerts, keys, *, type, severity, dedupe_key, detail,
 # ---------------------------------------------------------------------------
 
 def _detect_card_anomalies(db, new_alerts, keys):
-    from routers.payments import total_paid  # lazy: avoid import cycle at module load
+    # lazy: avoid an import cycle at module load.
+    # v4b1: counts an OTA/website prepayment, otherwise this detector raised a
+    # `card_without_payment` alert on EVERY OTA guest — noise that trains staff to ignore it.
+    from routers.payments import total_paid_including_prepaid
     cards = db.query(CardIssuance).filter(CardIssuance.status == "active").all()
     for c in cards:
         booking = db.query(Booking).filter(Booking.booking_id == c.booking_id).first() if c.booking_id else None
@@ -100,7 +103,7 @@ def _detect_card_anomalies(db, new_alerts, keys):
                 BookingItem.booking_id == booking.booking_id,
                 BookingItem.room_id == c.room_id).first():
             reason = "card_without_booking"  # room not part of this stay
-        elif total_paid(db, booking.booking_id) <= 0:
+        elif total_paid_including_prepaid(db, booking.booking_id) <= 0:
             reason = "card_without_payment"
         if reason:
             _make_alert(new_alerts, keys, type=reason, severity="high",
@@ -133,6 +136,28 @@ def _detect_cleaning_too_long(db, new_alerts, keys):
                             "threshold_hours": max_hours,
                             "since": str(r.status_changed_at),
                             "note": "room held in cleaning far beyond threshold with no in-house booking"})
+
+
+def _detect_inspection_overdue(db, new_alerts, keys):
+    """A room CLEANED (housekeeping task done) but not yet INSPECTED beyond the threshold — the
+    room can't go back into service until someone signs off on it."""
+    from models import HousekeepingTask
+    max_hours = get_config(db)["inspection_max_hours"]
+    cutoff = datetime.utcnow() - timedelta(hours=max_hours)
+    tasks = (db.query(HousekeepingTask)
+             .filter(HousekeepingTask.status == "done",
+                     HousekeepingTask.inspected_at.is_(None),
+                     HousekeepingTask.done_at.isnot(None),
+                     HousekeepingTask.done_at < cutoff).all())
+    for t in tasks:
+        r = db.query(Room).filter(Room.room_id == t.room_id).first()
+        hours = round((datetime.utcnow() - t.done_at).total_seconds() / 3600, 1)
+        _make_alert(new_alerts, keys, type="inspection_overdue", severity="high",
+                    dedupe_key=f"inspection_overdue:task:{t.id}", room_id=t.room_id,
+                    detail={"room_number": r.room_number if r else None,
+                            "hours_since_cleaned": hours, "threshold_hours": max_hours,
+                            "since": str(t.done_at),
+                            "note": "room cleaned but not inspected beyond threshold"})
 
 
 def _detect_issuance_fencing(db, new_alerts, keys):
@@ -208,6 +233,7 @@ def run_reconciliation(db) -> dict:
     keys = _existing_open_keys(db)
     new_alerts = []
     for detector in (_detect_card_anomalies, _detect_cleaning_too_long,
+                     _detect_inspection_overdue,
                      _detect_issuance_fencing, _detect_same_id_two_rooms,
                      _detect_repeated_refunds):
         try:

@@ -27,6 +27,8 @@ const Booking = () => {
     check_in: "",
     check_in_time: "",
     check_out: "",
+    adults: 1,
+    children: 0,
   });
 
   /* ================= SCROLL TO TOP ON MOUNT ================= */
@@ -274,6 +276,8 @@ const Booking = () => {
             check_in_time: formData.check_in_time,
             check_out: formData.check_out,
             rooms: selectedRoomsList,
+            adults: Number(formData.adults) || 1,
+            children: Number(formData.children) || 0,
             booking_source: "website",
           }),
         })
@@ -643,6 +647,28 @@ const Booking = () => {
                     onChange={handleChange}
                     className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
                   />
+                </div>
+
+                {/* Guests */}
+                <div className="grid md:grid-cols-2 gap-6">
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Adults *</label>
+                    <input
+                      type="number" name="adults" min="1" required
+                      value={formData.adults}
+                      onChange={handleChange}
+                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Children</label>
+                    <input
+                      type="number" name="children" min="0"
+                      value={formData.children}
+                      onChange={handleChange}
+                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"
+                    />
+                  </div>
                 </div>
 
                 {/* Submit Button */}

@@ -69,7 +69,7 @@ export async function setRoomStatus(roomId, data) {
   return handle(res);
 }
 
-// Admin/supervisor only — the inspected gate (room -> re-sellable).
+// Admin/housekeeper only — the inspected gate (room -> re-sellable).
 export async function inspectRoom(roomId, data = {}) {
   const res = await fetch(`${BASE_URL}/housekeeping/rooms/${roomId}/inspect`, {
     method: "POST",

@@ -1,6 +1,7 @@
 import React from "react";
 import { Link } from "react-router-dom";
 import ImageWithSpinner from "../../components/ImageWithSpinner";
+import OffersBanner from "../../components/OffersBanner";
 import heroImg from "./hero.png";
 import doubleDeluxe from "./images/rooms/double-deluxe.png";
 import threeBedAc from "./images/rooms/3 bed ac.png";
@@ -94,6 +95,11 @@ React.useEffect(() => {
 
 
 
+
+      {/* ================= CURRENT OFFERS ================= */}
+      <div className="mt-16 px-6">
+        <OffersBanner />
+      </div>
 
       {/* ================= ABOUT SHORT ================= */}
       <section className="max-w-5xl mx-auto mt-20 px-6">

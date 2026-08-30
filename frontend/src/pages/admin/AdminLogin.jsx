@@ -19,10 +19,12 @@ const AdminLogin = () => {
     localStorage.setItem("adminToken", token);
     const decoded = jwtDecode(token);
     if (decoded.role === "admin") navigate("/admin");
-    else if (decoded.role === "supervisor") navigate("/admin/housekeeping");
     else if (decoded.role === "reception") navigate("/reception");
+    // v4b8: the housekeeper (ex-supervisor) cleans, inspects and approves maintenance from the
+    // WEB ADMIN, so land them on the Housekeeping page — not the staff phone shell.
+    else if (decoded.role === "housekeeper") navigate("/admin/housekeeping");
     // roomservice is a tablet role and lives in the same installable staff shell (TBC-4).
-    else if (["housekeeper", "maintenance", "roomservice"].includes(decoded.role)) navigate("/staff");
+    else if (["maintenance", "roomservice"].includes(decoded.role)) navigate("/staff");
     else setError("Unauthorized role");
   };
 

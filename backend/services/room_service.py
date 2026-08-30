@@ -96,6 +96,19 @@ def post_to_folio(db: Session, r: GuestRequest, user):
     if not lines:
         raise HTTPException(status_code=409, detail="This order has no items")
 
+    # v4b6: a fully complimentary stay is charged NOTHING for room service.
+    # ⚠️ The stock still moves. The food left the store whether or not anyone paid for it, and
+    # an inventory that silently ignores comped orders drifts away from the shelf — that is
+    # the easy mistake here. `comp_mode == 'room'` bills extras normally: only the room is free.
+    booking = db.query(Booking).filter(Booking.booking_id == r.booking_id).first()
+    if booking is not None and getattr(booking, "comp_mode", "none") == "all":
+        for ln in lines:
+            _consume_stock(db, r, ln, user, charge_id=None)
+        r.folio_charge_id = None
+        payload["comped"] = True          # bill_payload prints "Complimentary"
+        r.payload = json.dumps(payload)
+        return folio
+
     first_charge_id = None
     for ln in lines:
         qty = float(ln.get("qty") or 1)
@@ -105,27 +118,41 @@ def post_to_folio(db: Session, r: GuestRequest, user):
             description=f"Room service — {ln.get('name', 'item')}",
             qty=qty, unit_price=unit, amount=round(qty * unit, 2),
             gst_percent=ln.get("gst_percent"), posted_by=_resolve_user_id(db, user),
+            # v3 item 4 — the durable charge->dish link the product-wise sales report groups
+            # on. This is the ONLY place it is ever set: both the tablet's "deliver" and the
+            # portal's "complete" reach the folio through here, so they cannot drift.
+            menu_item_id=ln.get("menu_item_id"),
         )
         db.add(charge)
         db.flush()
         first_charge_id = first_charge_id or charge.id
-        # Decrement linked stock, best-effort — a stock hiccup must not lose the charge.
-        if ln.get("stock_item_id"):
-            try:
-                from routers.stock import record_movement
-                item = db.query(StockItem).filter(StockItem.id == ln["stock_item_id"]).first()
-                if item is not None:
-                    record_movement(db, item, "consume", -abs(qty), user=user,
-                                    reason=f"Room service — order #{r.id}",
-                                    folio_charge_id=charge.id,
-                                    client_ref=f"portal_rs:{r.id}:{ln.get('menu_item_id')}",
-                                    commit=False)
-            except Exception as e:
-                logger.warning(f"room-service stock consume skipped: {e}")
+        _consume_stock(db, r, ln, user, charge_id=charge.id)
 
     _recompute(db, folio)
     r.folio_charge_id = first_charge_id
     return folio
+
+
+def _consume_stock(db: Session, r: GuestRequest, ln: dict, user, *, charge_id):
+    """Decrement the linked stock item, best-effort — a stock hiccup must not lose the charge.
+
+    Extracted in v4b6 so a COMPLIMENTARY order still moves inventory even though it posts no
+    folio line (hence `charge_id=None` on that path)."""
+    if not ln.get("stock_item_id"):
+        return
+    qty = float(ln.get("qty") or 1)
+    try:
+        from routers.stock import record_movement
+        item = db.query(StockItem).filter(StockItem.id == ln["stock_item_id"]).first()
+        if item is not None:
+            record_movement(db, item, "consume", -abs(qty), user=user,
+                            reason=f"Room service — order #{r.id}"
+                                   + ("" if charge_id else " (complimentary)"),
+                            folio_charge_id=charge_id,
+                            client_ref=f"portal_rs:{r.id}:{ln.get('menu_item_id')}",
+                            commit=False)
+    except Exception as e:
+        logger.warning(f"room-service stock consume skipped: {e}")
 
 
 # ---------------------------------------------------------------- printable docs

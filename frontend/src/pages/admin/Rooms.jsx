@@ -50,6 +50,7 @@ const Rooms = () => {
   const [formData, setFormData] = useState({
     room_number: "",
     room_type_id: "",
+    alt_room_type_id: "",
     building: "1",
     floor: "1",
     max_cards: "4",
@@ -87,7 +88,7 @@ const Rooms = () => {
     }
     try {
       await createRoom(formData);
-      setFormData({ room_number: "", room_type_id: "", building: "1", floor: "1", max_cards: "4", lock_no: "", status: "vacant" });
+      setFormData({ room_number: "", room_type_id: "", alt_room_type_id: "", building: "1", floor: "1", max_cards: "4", lock_no: "", status: "vacant" });
       loadAll();
       showToast("Room created successfully");
     } catch (err) {
@@ -104,6 +105,9 @@ const Rooms = () => {
         floor: parseInt(editingRoom.floor),
         max_cards: parseInt(editingRoom.max_cards),
         lock_no: editingRoom.lock_no || null,
+        // v4b7: 0 CLEARS the alternate. null would mean "don't change it".
+        alt_room_type_id: editingRoom.alt_room_type_id
+          ? parseInt(editingRoom.alt_room_type_id) : 0,
         status: editingRoom.status,
         is_active: editingRoom.is_active,
       });
@@ -155,7 +159,7 @@ const Rooms = () => {
             <FaPlus size={20} /> Add New Room
           </h2>
 
-          <div className="grid grid-cols-1 md:grid-cols-6 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-7 gap-4">
             <InputField label="Room Number" name="room_number" placeholder="e.g., 45" value={formData.room_number} onChange={handleChange} />
 
             <div className="flex flex-col">
@@ -166,6 +170,24 @@ const Rooms = () => {
                 {roomTypes.map((t) => (
                   <option key={t.room_type_id} value={t.room_type_id}>{t.name}</option>
                 ))}
+              </select>
+            </div>
+
+            {/* v4b7: the second type this physical room may be sold as. Only usable when
+                the booked type has run out, and it needs the owner's approval. */}
+            <div className="flex flex-col">
+              <label className="mb-2 text-sm font-semibold text-slate-300">
+                Can also be sold as
+              </label>
+              <select name="alt_room_type_id" value={formData.alt_room_type_id} onChange={handleChange}
+                title="Only offered when no room of the booked type is free, and it needs owner approval"
+                className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]">
+                <option value="">— none —</option>
+                {roomTypes
+                  .filter((t) => String(t.room_type_id) !== String(formData.room_type_id))
+                  .map((t) => (
+                    <option key={t.room_type_id} value={t.room_type_id}>{t.name}</option>
+                  ))}
               </select>
             </div>
 
@@ -210,7 +232,16 @@ const Rooms = () => {
                       <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-semibold bg-red-600/80">INACTIVE</span>
                     )}
                   </td>
-                  <td className="px-5 py-3">{typeName(r.room_type_id)}</td>
+                  <td className="px-5 py-3">
+                    {typeName(r.room_type_id)}
+                    {/* v4b7: under the type rather than as a 9th column — the table is already
+                        wide, and this is supporting detail, not something you sort by. */}
+                    {r.alt_room_type_id && (
+                      <div className="text-[11px] text-slate-400 mt-0.5">
+                        or {r.alt_room_type_name || typeName(r.alt_room_type_id)}
+                      </div>
+                    )}
+                  </td>
                   <td className="px-5 py-3">{r.building} / {r.floor}</td>
                   <td className="px-5 py-3">{r.max_cards}</td>
                   <td className="px-5 py-3 text-slate-400">{r.lock_no || "—"}</td>
@@ -309,6 +340,20 @@ const Rooms = () => {
                     onChange={(e) => setEditingRoom({ ...editingRoom, room_type_id: e.target.value })}
                     className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]">
                     {roomTypes.map((t) => (<option key={t.room_type_id} value={t.room_type_id}>{t.name}</option>))}
+                  </select>
+                </div>
+                <div className="flex flex-col">
+                  <label className="mb-2 text-sm font-semibold text-slate-300">
+                    Can also be sold as
+                  </label>
+                  <select value={editingRoom.alt_room_type_id || ""}
+                    onChange={(e) => setEditingRoom({ ...editingRoom, alt_room_type_id: e.target.value })}
+                    title="Only offered when no room of the booked type is free, and it needs owner approval"
+                    className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]">
+                    <option value="">— none —</option>
+                    {roomTypes
+                      .filter((t) => String(t.room_type_id) !== String(editingRoom.room_type_id))
+                      .map((t) => (<option key={t.room_type_id} value={t.room_type_id}>{t.name}</option>))}
                   </select>
                 </div>
                 <InputField label="Building" type="number" value={editingRoom.building}

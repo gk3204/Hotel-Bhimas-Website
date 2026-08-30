@@ -113,6 +113,12 @@ def send_review_requests(db) -> int:
     cfg = app_settings.get_whatsapp_config(db)
     if not cfg["review_enabled"]:
         return 0
+    if not (cfg["google_review_url"] or "").strip():
+        # The template embeds the URL inline ("we'd love a Google review: {review_url}"), so an
+        # unset one has no sane placeholder -- it used to be sent as "" and Meta rejected the whole
+        # message with (#131008). Hold the requests until the owner configures the URL.
+        logger.info("review requests skipped: google_review_url not configured")
+        return 0
     delay = timedelta(hours=cfg["review_delay_hours"])
     now = datetime.utcnow()
     # Window: checked out at least `delay` ago, but not older than delay + 2 days (don't backfill
@@ -135,25 +141,92 @@ def send_review_requests(db) -> int:
             continue  # suppress until resolved
         notify_service.notify_guest(
             db, g, template="review_feedback",
-            params={"guest_name": g.name, "review_url": cfg["google_review_url"] or ""},
+            params={"guest_name": g.name, "review_url": cfg["google_review_url"]},
             booking_id=b.booking_id, client_ref=f"review:{b.booking_id}")
         sent += 1
     return sent
 
 
+def _deliver_report(db, *, cref, report, pdf, caption, doc_template, doc_params, subject, filename):
+    """Shared delivery for the daily/weekly owner report: WhatsApp PDF (document-header template) +
+    email attachment, idempotent per `cref`. Best-effort — never raises."""
+    if wa.already_sent(db, cref):
+        return 0
+    num = wa.owner_number(db)
+    if num and pdf:
+        wa.send_document(db, num, pdf, filename, caption,
+                         template=doc_template, params=doc_params, client_ref=cref)
+    # Email the same PDF (free + reliable even before the WhatsApp doc template is approved).
+    try:
+        from services import notify as notify_service
+        from utils.email_service import send_owner_report_email
+        oe = notify_service.owner_email(db)
+        if oe and pdf:
+            send_owner_report_email(oe, subject, f"<pre>{caption}</pre>", pdf, filename)
+    except Exception as e:
+        logger.warning(f"owner report email failed: {e}")
+    # Guarantee idempotency even when the owner has no WhatsApp number (email-only path).
+    if not wa.already_sent(db, cref):
+        wa._log_row(db, "out", num or "owner", doc_template, doc_params, caption,
+                    status="sent", provider="job", client_ref=cref, commit=True)
+    return 1
+
+
 def send_daily_digest_if_due(db) -> int:
-    """Send the owner the daily digest once, at/after the configured IST hour."""
-    from utils.fraud_detection import compute_daily_digest
+    """Build the rich previous-day report → PDF, and send it to the owner (WhatsApp + email) once,
+    at/after the configured IST hour."""
     cfg = app_settings.get_whatsapp_config(db)
     if not cfg["owner_alerts_enabled"]:
         return 0
     now_ist = _now_ist()
     if now_ist.hour < cfg["daily_digest_hour"]:
         return 0
-    digest = compute_daily_digest(db)
-    # Returns notify()'s {channel, ok, detail} — WhatsApp, else the owner's email (FE-11).
-    result = wa.send_daily_digest(db, digest)  # idempotent per day via client_ref inside
-    return 1 if (result or {}).get("ok") else 0
+    day = now_ist.date() - timedelta(days=1)     # the previous day
+    cref = f"day_report:{day}"
+    if wa.already_sent(db, cref):
+        return 0
+    from services import day_report as dr
+    report = dr.compute_day_report(db, day)
+    caption = dr.summary_text(report)
+    try:
+        pdf = dr.render_day_report_pdf(report)
+    except Exception as e:
+        logger.error(f"daily report PDF failed: {e}")
+        pdf = None
+    return _deliver_report(db, cref=cref, report=report, pdf=pdf, caption=caption,
+                           doc_template="daily_report_doc", doc_params={"day": str(day)},
+                           subject=f"Hotel Bhimas — daily report {day}",
+                           filename=f"HotelBhimas_daily_{day}.pdf")
+
+
+def send_weekly_digest_if_due(db) -> int:
+    """Once a week (configured weekday, at/after the digest hour) send a 7-day report ending
+    yesterday. Idempotent per ISO week."""
+    cfg = app_settings.get_whatsapp_config(db)
+    if not cfg["owner_alerts_enabled"] or not cfg.get("weekly_digest_enabled", True):
+        return 0
+    now_ist = _now_ist()
+    if now_ist.weekday() != cfg.get("weekly_digest_weekday", 0) or now_ist.hour < cfg["daily_digest_hour"]:
+        return 0
+    week_end = now_ist.date() - timedelta(days=1)
+    iso = week_end.isocalendar()
+    cref = f"week_report:{iso[0]}-W{iso[1]:02d}"
+    if wa.already_sent(db, cref):
+        return 0
+    from services import day_report as dr
+    report = dr.compute_week_report(db, week_end)
+    caption = (f"Hotel Bhimas weekly ({report['from']} → {report['to']}): "
+               f"avg occ {report['totals']['avg_occupancy_pct']}%, "
+               f"collected ₹{report['totals']['collected']:,.0f}. Full report attached.")
+    try:
+        pdf = dr.render_week_report_pdf(report)
+    except Exception as e:
+        logger.error(f"weekly report PDF failed: {e}")
+        pdf = None
+    return _deliver_report(db, cref=cref, report=report, pdf=pdf, caption=caption,
+                           doc_template="weekly_report_doc", doc_params={"week": f"W{iso[1]:02d} {iso[0]}"},
+                           subject=f"Hotel Bhimas — weekly report {report['from']} to {report['to']}",
+                           filename=f"HotelBhimas_weekly_{report['to']}.pdf")
 
 
 def notify_new_fraud_alerts(db) -> int:
@@ -214,6 +287,7 @@ _JOBS = [
     ("overstay_alerts", send_overstay_alerts),
     ("review_requests", send_review_requests),
     ("daily_digest", send_daily_digest_if_due),
+    ("weekly_digest", send_weekly_digest_if_due),
     ("fraud_alerts", notify_new_fraud_alerts),
     ("vendor_renewals", sweep_vendor_renewals),
     ("low_stock_alerts", sweep_low_stock),

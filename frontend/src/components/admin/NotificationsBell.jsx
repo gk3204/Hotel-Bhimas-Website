@@ -6,6 +6,7 @@ import { getAlerts } from "../../api/fraud";
 import { listComplaints } from "../../api/complaints";
 import { getLowStock } from "../../api/stock";
 import { listReviews } from "../../api/reviews";
+import usePoll from "../../utils/usePoll";
 
 // Count helper — tolerant of the different response shapes across the APIs.
 const len = (x) =>
@@ -52,11 +53,9 @@ export default function NotificationsBell() {
     setCounts(next);
   }, []);
 
-  useEffect(() => {
-    load();
-    const id = setInterval(load, POLL_MS);
-    return () => clearInterval(id);
-  }, [load]);
+  useEffect(() => { load(); }, [load]);
+  // Shared poller (v3 item 5): skips hidden tabs, refreshes the moment one is focused again.
+  usePoll(load, POLL_MS);
 
   // Close on outside click.
   useEffect(() => {

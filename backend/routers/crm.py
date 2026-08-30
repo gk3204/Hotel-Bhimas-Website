@@ -31,7 +31,7 @@ from schemas import (GuestProfileUpdate, VipUpdate, BlacklistUpdate, LoyaltyRede
                      PreArrivalCreate, PreArrivalSubmit, FolioDiscountRequest)
 from utils.auth_utils import require_reception_or_admin, require_admin
 from utils.audit import write_audit, _resolve_user_id
-from utils.settings import get_crm_config, set_setting, get_setting
+from utils.settings import get_crm_config, set_setting, get_setting, validate_category
 from utils import storage
 from services import ocr_service
 
@@ -132,8 +132,12 @@ def _complaints_for_guest(db: Session, guest_id: int) -> list[dict]:
              db.query(Booking.booking_id).filter(Booking.guest_id == guest_id).all()]
     if not b_ids:
         return []
+    # ONLY genuine guest complaints (source='guest'). Staff/system maintenance tasks — e.g. the
+    # auto-raised "turn on AC" ticket (source='reception') — are NOT complaints and must not show
+    # in the guest's complaint history or trip the open-complaint review-suppression gate.
     tickets = db.query(MaintenanceTicket).filter(
-        MaintenanceTicket.booking_id.in_([b[0] if isinstance(b, tuple) else b for b in b_ids])
+        MaintenanceTicket.booking_id.in_([b[0] if isinstance(b, tuple) else b for b in b_ids]),
+        MaintenanceTicket.source == "guest",
     ).order_by(MaintenanceTicket.created_at.desc()).all()
     open_states = ("open", "assigned", "in_progress", "awaiting_parts")
     out = []
@@ -184,12 +188,19 @@ def accrue_loyalty_on_checkout(db: Session, booking: Booking, user=None) -> int:
     grand total. Joins the caller's transaction (no commit here). Returns points awarded."""
     if not booking or not booking.guest_id:
         return 0
+    # v4b6: a complimentary stay earns no points. The guest paid nothing, and accruing on
+    # `grand_total` — which a comp deliberately does NOT zero, because it records what the
+    # stay was worth — would hand out points for a giveaway, turning one gift into two.
+    if getattr(booking, "comp_mode", "none") not in (None, "none"):
+        return 0
     existing = db.query(LoyaltyLedger).filter(
         LoyaltyLedger.booking_id == booking.booking_id,
         LoyaltyLedger.delta > 0).first()
     if existing:
         return 0
     cfg = get_crm_config(db)
+    if not cfg.get("loyalty_enabled", True):   # loyalty programme switched off in settings
+        return 0
     rate = cfg["loyalty_points_per_rupee"]
     if rate <= 0:
         return 0
@@ -278,6 +289,33 @@ def get_guest(guest_id: int, request: Request, db: Session = Depends(get_db),
     return data
 
 
+@router.post("/guests")
+def create_guest(data: GuestProfileUpdate, db: Session = Depends(get_db),
+                 user=Depends(require_reception_or_admin)):
+    """Create a standalone guest (name + phone required; email + CRM fields optional). Used by the
+    desk 'Add guest' action. Normal bookings still create their own guest on the booking path."""
+    name = (data.name or "").strip()
+    phone = (data.phone or "").strip()
+    if not name:
+        raise HTTPException(status_code=422, detail="Guest name is required")
+    if len(phone) < 7:
+        raise HTTPException(status_code=422, detail="A valid phone number is required")
+    guest = Guest(name=name, phone=phone, email=(data.email or None))
+    db.add(guest)
+    db.flush()
+    p = _get_or_create_profile(db, guest.guest_id, user)
+    if data.id_type is not None:
+        p.id_type = validate_category(db, "id_type", data.id_type)
+    if data.id_number is not None:
+        p.id_number_masked = _mask_id(data.id_number)
+    if data.address is not None:
+        p.address = data.address
+    db.commit()
+    write_audit(db, user, "crm.guest_create", "guest", guest.guest_id,
+                after={"name": name, "phone": phone}, client="web", commit=True)
+    return _guest_dict(db, guest)
+
+
 @router.put("/guests/{guest_id}")
 def update_guest(guest_id: int, data: GuestProfileUpdate, db: Session = Depends(get_db),
                  user=Depends(require_reception_or_admin)):
@@ -295,7 +333,7 @@ def update_guest(guest_id: int, data: GuestProfileUpdate, db: Session = Depends(
             guest.email = data.email
         p = _get_or_create_profile(db, guest_id, user)
         if data.id_type is not None:
-            p.id_type = data.id_type
+            p.id_type = validate_category(db, "id_type", data.id_type)
         if data.id_number is not None:
             p.id_number_masked = _mask_id(data.id_number)
         if data.id_photo_url is not None:
@@ -458,6 +496,8 @@ def redeem_loyalty(guest_id: int, data: LoyaltyRedeem, db: Session = Depends(get
     """Redeem points as a non-taxable folio discount on the guest's open folio.
     Points -> ₹ via loyalty_rupee_per_point. Debits points + writes a ledger row."""
     from routers.folio import apply_discount  # local import avoids a circular module load
+    if not get_crm_config(db).get("loyalty_enabled", True):
+        raise HTTPException(status_code=409, detail="The loyalty programme is switched off.")
     guest = db.query(Guest).filter(Guest.guest_id == guest_id).first()
     if not guest:
         raise HTTPException(status_code=404, detail="Guest not found")
@@ -661,7 +701,7 @@ def submit_prearrival(token: str, data: PreArrivalSubmit, db: Session = Depends(
 
     p = _get_or_create_profile(db, guest.guest_id, user=None)
     if data.id_type is not None:
-        p.id_type = data.id_type
+        p.id_type = validate_category(db, "id_type", data.id_type)
     if data.id_number is not None:
         p.id_number_masked = _mask_id(data.id_number)
     if data.id_photo_url is not None:
@@ -721,9 +761,12 @@ def get_config(db: Session = Depends(get_db)):
 def update_config(loyalty_points_per_rupee: float | None = None,
                   loyalty_rupee_per_point: float | None = None,
                   blacklist_enforcement: str | None = None,
+                  loyalty_enabled: bool | None = None,
                   db: Session = Depends(get_db), user=Depends(require_admin)):
-    from utils.settings import (LOYALTY_POINTS_PER_RUPEE_KEY, LOYALTY_RUPEE_PER_POINT_KEY,
-                                BLACKLIST_ENFORCEMENT_KEY)
+    from utils.settings import (LOYALTY_ENABLED_KEY, LOYALTY_POINTS_PER_RUPEE_KEY,
+                                LOYALTY_RUPEE_PER_POINT_KEY, BLACKLIST_ENFORCEMENT_KEY)
+    if loyalty_enabled is not None:
+        set_setting(db, LOYALTY_ENABLED_KEY, "true" if loyalty_enabled else "false", user)
     if loyalty_points_per_rupee is not None:
         set_setting(db, LOYALTY_POINTS_PER_RUPEE_KEY, max(0.0, loyalty_points_per_rupee), user)
     if loyalty_rupee_per_point is not None:

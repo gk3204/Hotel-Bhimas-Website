@@ -46,4 +46,10 @@ export const getKot = (id, mark = true) =>
 export const deliverOrder = (id) => send("POST", `/room-service/orders/${id}/deliver`);
 export const getBill = (id, mark = false) =>
   get(`/room-service/orders/${id}/bill?mark=${mark ? "true" : "false"}`);
-export const cancelOrder = (id) => send("POST", `/room-service/orders/${id}/cancel`);
+/**
+ * Cancel an undelivered order (v4b5). A reason is mandatory, and when
+ * `rs_cancel_otp_required` is armed the owner's code is too.
+ * `body` = { reason, owner_otp_id?, owner_otp_code? }
+ */
+export const cancelOrder = (id, body) =>
+  send("POST", `/room-service/orders/${id}/cancel`, body);

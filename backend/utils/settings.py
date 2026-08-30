@@ -31,6 +31,7 @@ CASH_VARIANCE_ALERT_KEY = "cash_variance_alert_enabled"
 HK_AUTO_INSPECT_KEY = "housekeeping_auto_inspect"
 
 # Customer CRM config keys + defaults (prompt 14; seeded in migration 012).
+LOYALTY_ENABLED_KEY = "loyalty_enabled"                     # master on/off for the loyalty programme
 LOYALTY_POINTS_PER_RUPEE_KEY = "loyalty_points_per_rupee"   # points earned per ₹1 of stay spend
 LOYALTY_RUPEE_PER_POINT_KEY = "loyalty_rupee_per_point"     # ₹ value of 1 point on redemption
 BLACKLIST_ENFORCEMENT_KEY = "blacklist_enforcement"         # warn | block
@@ -45,6 +46,7 @@ WA_OVERSTAY_KEY = "wa_overstay_enabled"
 WA_CONFIRMATION_KEY = "wa_confirmation_enabled"
 WA_RECEIPT_KEY = "wa_receipt_enabled"
 WA_ROOM_READY_KEY = "wa_room_ready_enabled"
+WA_PORTAL_LINK_KEY = "wa_portal_link_enabled"
 WA_REVIEW_KEY = "wa_review_enabled"
 WA_REVIEW_DELAY_HOURS_KEY = "wa_review_delay_hours"
 WA_OWNER_ALERTS_KEY = "wa_owner_alerts_enabled"
@@ -55,6 +57,8 @@ OWNER_EMAIL_KEY = "owner_email"
 WA_REVIEW_URL_KEY = "wa_google_review_url"
 WA_JOB_INTERVAL_KEY = "wa_job_interval_minutes"
 WA_DIGEST_HOUR_KEY = "wa_daily_digest_hour"
+WA_WEEKLY_DIGEST_KEY = "wa_weekly_digest_enabled"
+WA_WEEKLY_WEEKDAY_KEY = "wa_weekly_digest_weekday"   # 0=Mon … 6=Sun
 
 # Reports / night-audit config keys + defaults (prompt 16; seeded in migration 014).
 # `business_date` is the PMS's rolling business day (advanced by the night audit);
@@ -145,6 +149,7 @@ _DEFAULTS = {
     CASH_VARIANCE_THRESHOLD_KEY: "100",
     CASH_VARIANCE_ALERT_KEY: "true",
     HK_AUTO_INSPECT_KEY: "false",
+    LOYALTY_ENABLED_KEY: "true",
     LOYALTY_POINTS_PER_RUPEE_KEY: "0.01",
     LOYALTY_RUPEE_PER_POINT_KEY: "1",
     BLACKLIST_ENFORCEMENT_KEY: "warn",
@@ -155,6 +160,7 @@ _DEFAULTS = {
     WA_CONFIRMATION_KEY: "true",
     WA_RECEIPT_KEY: "true",
     WA_ROOM_READY_KEY: "true",
+    WA_PORTAL_LINK_KEY: "true",
     WA_REVIEW_KEY: "true",
     WA_REVIEW_DELAY_HOURS_KEY: "3",
     WA_OWNER_ALERTS_KEY: "true",
@@ -162,6 +168,8 @@ _DEFAULTS = {
     WA_REVIEW_URL_KEY: "",
     WA_JOB_INTERVAL_KEY: "15",
     WA_DIGEST_HOUR_KEY: "9",
+    WA_WEEKLY_DIGEST_KEY: "true",
+    WA_WEEKLY_WEEKDAY_KEY: "0",
     BUSINESS_DATE_KEY: "",
     NIGHT_AUDIT_HOUR_KEY: "3",
     NIGHT_AUDIT_ENABLED_KEY: "true",
@@ -305,6 +313,7 @@ def get_crm_config(db) -> dict:
         enforcement = "warn"
     ttl = _as_float(get_setting(db, CRM_LINK_TTL_HOURS_KEY), 72.0)
     return {
+        "loyalty_enabled": _bool_or(get_setting(db, LOYALTY_ENABLED_KEY), True),
         "loyalty_points_per_rupee": max(0.0, ppr),
         "loyalty_rupee_per_point": max(0.0, rpp),
         "blacklist_enforcement": enforcement,
@@ -330,6 +339,7 @@ def get_whatsapp_config(db) -> dict:
         "confirmation_enabled": _as_bool(get_setting(db, WA_CONFIRMATION_KEY, "true")),
         "receipt_enabled": _as_bool(get_setting(db, WA_RECEIPT_KEY, "true")),
         "room_ready_enabled": _as_bool(get_setting(db, WA_ROOM_READY_KEY, "true")),
+        "portal_link_enabled": _as_bool(get_setting(db, WA_PORTAL_LINK_KEY, "true")),
         "review_enabled": _as_bool(get_setting(db, WA_REVIEW_KEY, "true")),
         "review_delay_hours": max(0.0, _as_float(get_setting(db, WA_REVIEW_DELAY_HOURS_KEY), 3.0)),
         "owner_alerts_enabled": _as_bool(get_setting(db, WA_OWNER_ALERTS_KEY, "true")),
@@ -339,6 +349,8 @@ def get_whatsapp_config(db) -> dict:
         "google_review_url": (get_setting(db, WA_REVIEW_URL_KEY, "") or "").strip(),
         "job_interval_minutes": max(1, _as_int(get_setting(db, WA_JOB_INTERVAL_KEY), 15)),
         "daily_digest_hour": min(23, max(0, _as_int(get_setting(db, WA_DIGEST_HOUR_KEY), 9))),
+        "weekly_digest_enabled": _as_bool(get_setting(db, WA_WEEKLY_DIGEST_KEY, "true")),
+        "weekly_digest_weekday": min(6, max(0, _as_int(get_setting(db, WA_WEEKLY_WEEKDAY_KEY), 0))),
     }
 
 
@@ -437,10 +449,15 @@ def get_review_config(db) -> dict:
 
 
 # Keys an admin may edit through PUT /companies/config (shared back-office settings screen).
+# v4b8: every new maintenance ticket goes to this technician automatically. 0 / unset keeps
+# the old behaviour (unassigned, and the technician self-claims).
+MAINTENANCE_DEFAULT_ASSIGNEE_KEY = "maintenance_default_assignee_id"
+
 BACKOFFICE_EDITABLE_KEYS = (
     COMPANY_CREDIT_BLOCK_KEY, COMPANY_DEFAULT_CREDIT_DAYS_KEY, COMPANY_INVOICE_PREFIX_KEY,
     VENDOR_RENEWAL_ALERTS_KEY, VENDOR_RENEWAL_LEAD_DAYS_KEY,
     ROSTER_DEFAULT_SHIFT_TYPE_KEY, ATTENDANCE_PIN_ENABLED_KEY, ATTENDANCE_AUTO_CLOSE_HOURS_KEY,
+    MAINTENANCE_DEFAULT_ASSIGNEE_KEY,
 )
 
 
@@ -456,6 +473,8 @@ def get_backoffice_config(db) -> dict:
     if shift_type not in ("morning", "evening", "night", "general"):
         shift_type = "general"
     return {
+        "maintenance_default_assignee_id": _as_int(
+            get_setting(db, MAINTENANCE_DEFAULT_ASSIGNEE_KEY), 0),
         "company_credit_block": _as_bool(get_setting(db, COMPANY_CREDIT_BLOCK_KEY, "true")),
         "company_default_credit_days": max(0, _as_int(get_setting(db, COMPANY_DEFAULT_CREDIT_DAYS_KEY), 30)),
         "company_invoice_prefix": prefix,
@@ -491,18 +510,33 @@ def get_stock_config(db) -> dict:
 # over. Every enforcement site reads get_fraud_config() so the screen can never
 # claim a gate is on while the code checks something else.
 FRAUD_CLEANING_MAX_HOURS_KEY = "fraud_cleaning_max_hours"
+FRAUD_INSPECTION_MAX_HOURS_KEY = "fraud_inspection_max_hours"
 FRAUD_ALLOWED_ISSUE_HOURS_KEY = "fraud_allowed_issue_hours"
 FRAUD_ALLOWED_STATIONS_KEY = "fraud_allowed_stations"
 FRAUD_REPEAT_REFUND_THRESHOLD_KEY = "fraud_repeat_refund_threshold"
 FRAUD_REFUND_OTP_KEY = "fraud_refund_requires_owner_otp"
 FRAUD_DISCOUNT_OTP_KEY = "fraud_discount_otp_required"
+FRAUD_VOID_OTP_KEY = "fraud_void_otp_required"
 FRAUD_CARD_ISSUE_OTP_KEY = "fraud_card_issue_otp_required"
 FRAUD_OTP_TTL_MINUTES_KEY = "fraud_owner_otp_ttl_minutes"
+
+# v4b0: the gates FE-12 left behind. AC_DOWNGRADE_OTP_REQUIRED was read with os.getenv at
+# reception.py, so the Settings screen could not arm it — an owner had a gate with no switch
+# (one of the four reasons FE-10 "wasn't working"). The rest are the v4 gates; they are
+# declared here so every one of them is armable from the same screen from day one.
+FRAUD_AC_DOWNGRADE_OTP_KEY = "fraud_ac_downgrade_otp_required"
+FRAUD_ALT_ROOM_TYPE_OTP_KEY = "fraud_alt_room_type_otp_required"
+FRAUD_COMP_OTP_KEY = "fraud_comp_otp_required"
+FRAUD_OVERSTAY_REVERSE_OTP_KEY = "fraud_overstay_reverse_otp_required"
+FRAUD_RS_CANCEL_OTP_KEY = "fraud_rs_cancel_otp_required"
+FRAUD_CHECKOUT_NO_CARD_OTP_KEY = "fraud_checkout_no_card_otp_required"
 
 FRAUD_EDITABLE_KEYS = (
     FRAUD_CLEANING_MAX_HOURS_KEY, FRAUD_ALLOWED_ISSUE_HOURS_KEY, FRAUD_ALLOWED_STATIONS_KEY,
     FRAUD_REPEAT_REFUND_THRESHOLD_KEY, FRAUD_REFUND_OTP_KEY, FRAUD_DISCOUNT_OTP_KEY,
     FRAUD_CARD_ISSUE_OTP_KEY, FRAUD_OTP_TTL_MINUTES_KEY,
+    FRAUD_AC_DOWNGRADE_OTP_KEY, FRAUD_ALT_ROOM_TYPE_OTP_KEY, FRAUD_COMP_OTP_KEY,
+    FRAUD_OVERSTAY_REVERSE_OTP_KEY, FRAUD_RS_CANCEL_OTP_KEY, FRAUD_CHECKOUT_NO_CARD_OTP_KEY,
 )
 
 _ALLOWED_HOURS_RE = re.compile(r"^\d{1,2}-\d{1,2}$")
@@ -535,18 +569,79 @@ def get_fraud_config(db) -> dict:
         # 0 disables the cleaning-too-long detector's alerting window.
         "cleaning_max_hours": max(0, _as_int(get_setting(db, FRAUD_CLEANING_MAX_HOURS_KEY),
                                              _as_int(os.getenv("CLEANING_MAX_HOURS"), 6))),
+        "inspection_max_hours": max(0, _as_int(get_setting(db, FRAUD_INSPECTION_MAX_HOURS_KEY),
+                                               _as_int(os.getenv("INSPECTION_MAX_HOURS"), 6))),
         "allowed_issue_hours": hours,
         "allowed_stations": stations,
         "repeat_refund_threshold": max(1, _as_int(get_setting(db, FRAUD_REPEAT_REFUND_THRESHOLD_KEY),
                                                   _as_int(os.getenv("REPEAT_REFUND_THRESHOLD"), 3))),
+        # Money-touching folio gates ship ARMED (owner asked every refund/discount/void to need a
+        # code); the owner can still switch any off in Settings.
         "refund_requires_owner_otp": _bool_or(get_setting(db, FRAUD_REFUND_OTP_KEY),
-                                              _env_bool("REFUND_REQUIRES_OWNER_OTP")),
+                                              _env_bool("REFUND_REQUIRES_OWNER_OTP", "true")),
         "discount_otp_required": _bool_or(get_setting(db, FRAUD_DISCOUNT_OTP_KEY),
-                                          _env_bool("DISCOUNT_OTP_REQUIRED")),
+                                          _env_bool("DISCOUNT_OTP_REQUIRED", "true")),
+        "void_otp_required": _bool_or(get_setting(db, FRAUD_VOID_OTP_KEY),
+                                      _env_bool("VOID_OTP_REQUIRED", "true")),
         "card_issue_otp_required": _bool_or(get_setting(db, FRAUD_CARD_ISSUE_OTP_KEY),
                                             _env_bool("CARD_ISSUE_OTP_REQUIRED")),
         "owner_otp_ttl_minutes": max(1, _as_int(get_setting(db, FRAUD_OTP_TTL_MINUTES_KEY),
                                                 _as_int(os.getenv("OWNER_OTP_TTL_MINUTES"), 10))),
+        # v4b0 gates. Each keeps its historical env var as the default so an untouched
+        # install is byte-for-byte unchanged.
+        "ac_downgrade_otp_required": _bool_or(get_setting(db, FRAUD_AC_DOWNGRADE_OTP_KEY),
+                                              _env_bool("AC_DOWNGRADE_OTP_REQUIRED")),
+        "alt_room_type_otp_required": _bool_or(get_setting(db, FRAUD_ALT_ROOM_TYPE_OTP_KEY),
+                                               _env_bool("ALT_ROOM_TYPE_OTP_REQUIRED")),
+        # A comp is 100% of the stay and has no floor to fall back on, so unlike the other
+        # gates this one ships ARMED.
+        "comp_otp_required": _bool_or(get_setting(db, FRAUD_COMP_OTP_KEY),
+                                      _env_bool("COMP_OTP_REQUIRED", "true")),
+        # Likewise: an automatic charge must never be reversible without approval.
+        "overstay_reverse_otp_required": _bool_or(get_setting(db, FRAUD_OVERSTAY_REVERSE_OTP_KEY),
+                                                  _env_bool("OVERSTAY_REVERSE_OTP_REQUIRED", "true")),
+        "rs_cancel_otp_required": _bool_or(get_setting(db, FRAUD_RS_CANCEL_OTP_KEY),
+                                           _env_bool("RS_CANCEL_OTP_REQUIRED")),
+        "checkout_no_card_otp_required": _bool_or(get_setting(db, FRAUD_CHECKOUT_NO_CARD_OTP_KEY),
+                                                  _env_bool("CHECKOUT_NO_CARD_OTP_REQUIRED")),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Overstay auto-billing (v4b3)
+# ---------------------------------------------------------------------------
+OVERSTAY_ENABLED_KEY = "overstay_auto_charge_enabled"
+OVERSTAY_GRACE_KEY = "overstay_grace_minutes"
+OVERSTAY_INTERVAL_KEY = "overstay_sweep_interval_minutes"
+OVERSTAY_MAX_DAYS_KEY = "overstay_max_auto_days"
+
+OVERSTAY_EDITABLE_KEYS = (
+    OVERSTAY_ENABLED_KEY, OVERSTAY_GRACE_KEY, OVERSTAY_INTERVAL_KEY, OVERSTAY_MAX_DAYS_KEY,
+)
+
+
+def get_overstay_config(db) -> dict:
+    """Automatic overstay billing (v4b3).
+
+    ⚠️ `enabled` ships **false**. This is the only job in the system that spends a guest's
+    money unattended, so the owner arms it from the Settings screen after watching
+    `POST /reports/overstay/run?dry_run=true` for a while.
+
+    `grace_minutes` is deliberately its own key rather than reusing CARD_GRACE_MINUTES: the
+    card grace is a lock-clock drift buffer, the billing grace is a courtesy window, and a
+    hotel may well want the card to die at +60 but not bill until +90.
+    ⚠️ The grace only decides WHEN the sweep acts. The night it charges always runs from the
+    booking's own checkout moment, never from grace expiry — see overstay_billing.
+    """
+    return {
+        "enabled": _bool_or(get_setting(db, OVERSTAY_ENABLED_KEY),
+                            _env_bool("OVERSTAY_AUTO_CHARGE_ENABLED")),
+        "grace_minutes": max(0, _as_int(get_setting(db, OVERSTAY_GRACE_KEY),
+                                        _as_int(os.getenv("OVERSTAY_GRACE_MINUTES"), 60))),
+        "sweep_interval_minutes": max(1, _as_int(get_setting(db, OVERSTAY_INTERVAL_KEY),
+                                                 _as_int(os.getenv("OVERSTAY_SWEEP_INTERVAL_MINUTES"), 15))),
+        "max_auto_days": max(1, _as_int(get_setting(db, OVERSTAY_MAX_DAYS_KEY),
+                                        _as_int(os.getenv("OVERSTAY_MAX_AUTO_DAYS"), 3))),
     }
 
 
@@ -638,9 +733,43 @@ CATEGORY_FAMILIES = {
     "stock":       ["minibar", "toiletries", "linen", "supplies", "fnb", "cleaning", "other"],
     "vendor":      ["laundry", "lock_amc", "linen", "electrical", "plumbing", "it",
                     "fnb", "security", "other"],
+    # v3 item 2 — the remaining hard-coded desk dropdowns. Defaults mirror the C# arrays
+    # in ReceptionApp exactly, so an untouched install behaves byte-for-byte as before.
+    "id_type":     ["aadhaar", "passport", "driving_licence", "voter_id", "other"],
+    "booking_source": ["walk_in", "frontdesk", "agent", "makemytrip", "goibibo",
+                       "booking_com", "agoda", "yatra", "other_ota", "other"],
+    # Subset of booking_source. Exists so the desk's "is this an OTA booking?" flag stays
+    # in sync with the source list instead of being a second hard-coded array.
+    "ota_source":  ["makemytrip", "goibibo", "booking_com", "agoda", "yatra", "other_ota"],
+    "charge_type": ["food", "misc", "minibar", "laundry", "extra_bed"],
+    "priority":    ["low", "normal", "high", "urgent"],
+    # v4b8: who cleaned / who inspected, as editable NAME lists. Deliberately names rather
+    # than user accounts, so a contract cleaner can be recorded without creating them a login.
+    # ⚠️ Parallel to the login-derived name from HousekeepingTask.assigned_to — see
+    # housekeeping.inspect_room. One is "which login did the work", this is "whose name goes
+    # on the sheet". The store, endpoints and validator are already generic, so adding the
+    # families here is all that is needed server-side.
+    "cleaned_by":   ["housekeeping_team"],
+    "inspected_by": ["housekeeping_team"],
+    # NOT here, deliberately — these look like dropdowns but are contracts, and an admin
+    # adding a value would break money handling or the encoder rather than add a label:
+    #   payment / refund / collect method -> Payment.method, the cash-drawer gate
+    #     (payments.py) and the four hard-coded buckets in reports.py.
+    #   staff card scope -> the StaffCardScope enum the 32-bit encoder DLL accepts; a card
+    #     type the lock firmware does not implement cannot be cut.
+    #   bill-to scope -> a client-side behaviour switch (which lines to bill), not data.
 }
 _CATEGORY_KEY_PREFIX = "categories_"     # + family; stored as a JSON array of slugs
 _SLUG_RE = re.compile(r"^[a-z0-9_]{2,40}$")
+
+# Folio charge types the reports layer treats specially (reports.py `sales_by_date` splits
+# room revenue out and skips payment/discount rows). They are POSTED BY THE SYSTEM, never
+# chosen from the desk dropdown, so they must never enter the editable `charge_type` family
+# — an admin adding "room" there would silently corrupt every revenue report.
+RESERVED_CHARGE_TYPES = ("room", "payment", "discount")
+
+# Families that must stay a subset of another family: {family: parent_family}.
+SUBSET_FAMILIES = {"ota_source": "booking_source"}
 
 # Registration-slip rules/terms printed on the guest reg-slip (FE-2). Admin-editable text.
 REGISTRATION_RULES_KEY = "registration_rules_text"
@@ -690,6 +819,20 @@ def set_category_list(db, family: str, items, user=None, commit=False) -> list:
             cleaned.append(s)
     if not cleaned:
         raise ValueError("A category list cannot be empty.")
+    if family == "charge_type":
+        clash = [c for c in cleaned if c in RESERVED_CHARGE_TYPES]
+        if clash:
+            raise ValueError(
+                f"{', '.join(clash)} {'are' if len(clash) > 1 else 'is'} reserved for system-posted "
+                f"lines and cannot be a manual charge type.")
+    parent = SUBSET_FAMILIES.get(family)
+    if parent:
+        allowed = get_category_list(db, parent)
+        extra = [c for c in cleaned if c not in allowed]
+        if extra:
+            raise ValueError(
+                f"{', '.join(extra)} must first exist in the {parent} list "
+                f"(it currently holds: {', '.join(allowed)}).")
     set_setting(db, _CATEGORY_KEY_PREFIX + family, json.dumps(cleaned), user=user, commit=commit)
     return cleaned
 

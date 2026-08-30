@@ -72,3 +72,14 @@ export async function getCrmConfig() {
   const res = await fetch(`${BASE_URL}/crm/config`, { headers: getAuthHeader() });
   return handle(res, "Failed to load config");
 }
+
+// PUT /crm/config takes query params (loyalty_enabled, loyalty_points_per_rupee,
+// loyalty_rupee_per_point, blacklist_enforcement). Only send the keys you want to change.
+export async function updateCrmConfig(params = {}) {
+  const qs = new URLSearchParams();
+  Object.entries(params).forEach(([k, v]) => { if (v !== undefined && v !== null) qs.set(k, v); });
+  const res = await fetch(`${BASE_URL}/crm/config?${qs.toString()}`, {
+    method: "PUT", headers: getAuthHeader(),
+  });
+  return handle(res, "Failed to save config");
+}

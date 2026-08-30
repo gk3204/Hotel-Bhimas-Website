@@ -11,8 +11,8 @@ function statusChip(s) {
     assigned: "bg-blue-500/20 text-blue-300 border-blue-500/30",
     in_progress: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
     awaiting_parts: "bg-amber-500/20 text-amber-300 border-amber-500/30",
-    resolved: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30",
-    verified: "bg-green-500/20 text-green-300 border-green-500/30",
+    work_done: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30",
+    resolved: "bg-green-500/20 text-green-300 border-green-500/30",
     closed: "bg-green-500/20 text-green-300 border-green-500/30",
   };
   return map[s] || "bg-slate-600/30 text-slate-300 border-slate-600/40";
@@ -76,11 +76,11 @@ export default function MyTickets() {
     setBusyId(t.id);
     try {
       let note;
-      if (status === "resolved") {
-        note = window.prompt("Resolution note (optional):") || undefined;
+      if (status === "work_done") {
+        note = window.prompt("What did you do? (optional)") || undefined;
       }
       await updateTicketStatus(t.id, { status, note });
-      showToast(`Ticket #${t.id} → ${status.replace("_", " ")}`);
+      showToast(`Ticket #${t.id} → ${status.replace(/_/g, " ")}`);
       setDetail((d) => ({ ...d, [t.id]: null }));
       await load();
     } catch (e) {
@@ -95,7 +95,7 @@ export default function MyTickets() {
       <h1 className="text-2xl font-bold mb-1 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-2">
         <FaClipboardList /> My Tickets
       </h1>
-      <p className="text-slate-400 mb-5 text-sm">Jobs assigned to you, plus open ones you can claim. A supervisor verifies before a ticket closes.</p>
+      <p className="text-slate-400 mb-5 text-sm">Jobs assigned to you, plus open ones you can claim. Housekeeping signs off your work before a ticket is resolved.</p>
 
       {loading ? (
         <div className="p-10 text-center text-slate-400">Loading…</div>
@@ -106,7 +106,8 @@ export default function MyTickets() {
           {tickets.map((t) => {
             const busy = busyId === t.id;
             const d = detail[t.id];
-            const terminal = t.status === "verified" || t.status === "closed";
+            // v4b8: the technician is done at `work_done` — the sign-off is somebody else's.
+            const terminal = ["work_done", "resolved", "closed"].includes(t.status);
             return (
               <div key={t.id} className="bg-gradient-to-r from-slate-800/60 to-slate-700/60 border border-slate-700 rounded-2xl p-4">
                 <div className="flex items-center justify-between">
@@ -117,7 +118,7 @@ export default function MyTickets() {
                     </div>
                     <div className="text-slate-300 text-sm mt-1">{t.issue}</div>
                   </div>
-                  <span className={`px-3 py-1 rounded-full text-xs font-bold border ${statusChip(t.status)}`}>{t.status}</span>
+                  <span className={`px-3 py-1 rounded-full text-xs font-bold border ${statusChip(t.status)}`}>{t.status === "work_done" ? "work done — awaiting sign-off" : t.status}</span>
                 </div>
 
                 {!terminal && (
@@ -141,8 +142,8 @@ export default function MyTickets() {
                             Awaiting parts
                           </button>
                         )}
-                        <button disabled={busy} onClick={() => advance(t, "resolved")} className="bg-green-700 hover:bg-green-800 px-3 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50">
-                          Mark resolved
+                        <button disabled={busy} onClick={() => advance(t, "work_done")} className="bg-green-700 hover:bg-green-800 px-3 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50">
+                          Mark work done
                         </button>
                       </>
                     )}

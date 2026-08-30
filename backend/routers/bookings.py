@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-from sqlalchemy import and_, func
+from sqlalchemy import and_, func, or_
 from datetime import date, datetime
 import logging
 
@@ -131,6 +131,15 @@ def create_booking(
                 f"for {data.check_in}-{data.check_out} ({requested_rooms} rooms selected, {available_rooms} available)"
             )
 
+        # Occupancy: total adults must fit the combined max-occupancy (= max adults) of the rooms.
+        capacity = sum(item.quantity * int(room_types_map[item.room_type_id].max_occupancy or 0)
+                       for item in data.rooms)
+        if data.adults > capacity:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{data.adults} adults exceed the selected rooms' capacity ({capacity}). "
+                       f"Add a room or reduce adults.")
+
         # 4️⃣ Create guest
         guest = Guest(
             name=data.guest_name,
@@ -205,6 +214,8 @@ def create_booking(
             check_in=data.check_in,
             check_in_time=data.check_in_time,
             check_out=data.check_out,
+            adults=data.adults,
+            children=data.children,
             booking_source=data.booking_source,
             status="pending_payment",
             base_amount=total_base,
@@ -248,8 +259,10 @@ def create_booking(
             "gst_amount": float(booking.gst_amount),
             "discount_amount": float(booking.discount_amount or 0),
             "total_amount": float(booking.total_amount),
-            "convenience_fee": float(booking.convenience_fee),
-            "convenience_gst": float(booking.convenience_gst),
+            # `or 0`: both creation paths set these, but a NULL from an older row would 500
+            # the whole detail modal rather than show a zero fee.
+            "convenience_fee": float(booking.convenience_fee or 0),
+            "convenience_gst": float(booking.convenience_gst or 0),
             "grand_total": float(booking.grand_total),
             "room_count": len(booking_items_data)
         }
@@ -284,6 +297,7 @@ def read_all_bookings(
     from_date: date | None = None,
     to_date: date | None = None,
     status: str | None = None,
+    q: str | None = None,
     skip: int = 0,
     limit: int = 15,
     db: Session = Depends(get_db)
@@ -301,6 +315,20 @@ def read_all_bookings(
         query = query.filter(Booking.check_in <= to_date)
     if status:
         query = query.filter(Booking.status == status)
+
+    # Free-text search (desk Booking History): guest name / phone, the booking number, or the OTA
+    # reference. Applied server-side so it searches ALL bookings, not just the current page.
+    if q and q.strip():
+        term = q.strip()
+        like = f"%{term}%"
+        conditions = [
+            Guest.name.ilike(like),
+            Guest.phone.ilike(like),
+            Booking.ota_booking_id.ilike(like),
+        ]
+        if term.isdigit():
+            conditions.append(Booking.booking_id == int(term))
+        query = query.filter(or_(*conditions))
 
     total_count = query.count()
 
@@ -331,6 +359,17 @@ def read_all_bookings(
             "checked_out_at": booking.checked_out_at.isoformat() if booking.checked_out_at else None,
             "status": booking.status,
             "payable_amount": float(booking.grand_total),
+            # v4b9 R13: where the booking came from. The column has been on `bookings` from the
+            # start and every revenue report groups by it, but the list a human actually reads
+            # omitted it — so "how many did MakeMyTrip send us?" meant running a report.
+            "booking_source": booking.booking_source,
+            "ota_booking_id": getattr(booking, "ota_booking_id", None),
+            # v4b9 R9: a prepaid stay is the one a receptionist must NOT chase for room money.
+            "prepaid_amount": float(getattr(booking, "prepaid_amount", 0) or 0),
+            "prepaid_source": getattr(booking, "prepaid_source", None),
+            # v4b6: a giveaway belongs in the LIST — it is what an owner scans a page for.
+            "comp_mode": getattr(booking, "comp_mode", "none") or "none",
+            "comp_reason": getattr(booking, "comp_reason", None),
         })
 
     return {
@@ -440,6 +479,11 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
 
         "status": booking.status,
         "booking_source": booking.booking_source,
+        # v4b9 R13/R9: the channel's own reference and what the guest already paid it — the two
+        # things someone opening this modal about an OTA stay is actually looking for.
+        "ota_booking_id": getattr(booking, "ota_booking_id", None),
+        "prepaid_amount": float(getattr(booking, "prepaid_amount", 0) or 0),
+        "prepaid_source": getattr(booking, "prepaid_source", None),
     }
 
 

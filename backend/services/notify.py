@@ -40,6 +40,7 @@ _SUBJECTS = {
     "prearrival_link": "Complete your pre-arrival registration — Hotel Bhimas",
     "payment_link": "Your payment link — Hotel Bhimas",
     "portal_link": "Your in-room services — Hotel Bhimas",
+    "owner_approval_request": "Approval needed — Hotel Bhimas",
     "owner_otp": "Approval code — Hotel Bhimas",
     "daily_digest": "Daily digest — Hotel Bhimas",
     "weekly_digest": "Weekly digest — Hotel Bhimas",
@@ -144,6 +145,52 @@ def notify_guest(db, guest, *, template, params=None, setting_key=None, booking_
                       booking_id=booking_id, client_ref=client_ref)
     except Exception as e:
         logger.warning(f"notify_guest ({template}) failed: {e}")
+        return dict(_RESULT_NONE)
+
+
+def notify_guest_document(db, guest, *, doc_template, text_template, doc_params, text_params,
+                          pdf_path, filename, caption, setting_key=None, booking_id=None,
+                          client_ref=None):
+    """Send a system-generated PDF to the guest as a document-header template, falling back to the
+    plain text template (and from there to email) whenever the document cannot go. Never raises.
+
+    The guest gets ONE message either way. The fallback is what makes this safe to ship before Meta
+    approves a `_doc` template: an unapproved template fails the send, and the text message the
+    guest has always received goes out instead.
+
+    Both attempts deliberately share `client_ref`. send_template() deletes and reuses a prior
+    FAILED row with the same ref, so the doc-then-text pair stays idempotent as a unit and a retry
+    cannot double-send.
+    """
+    try:
+        if not guest:
+            return dict(_RESULT_NONE)
+        if setting_key and str(app_settings.get_setting(db, setting_key, "true")
+                               ).strip().lower() in ("false", "0", "no", ""):
+            return {"channel": "none", "ok": False, "detail": "This message type is switched off."}
+
+        phone = getattr(guest, "phone", None)
+        if pdf_path and phone and whatsapp_really_delivers():
+            try:
+                row = whatsapp_service.send_document(
+                    db, phone, pdf_path, filename, caption,
+                    template=doc_template, params=doc_params, client_ref=client_ref)
+                if row is not None and getattr(row, "status", None) == "sent":
+                    return {"channel": "whatsapp", "ok": True, "detail": "Sent on WhatsApp with the PDF attached."}
+                # Unapproved template, media upload failure, bad number -- all land here.
+                logger.info("notify_guest_document: %s not delivered (%s) -- falling back to %s",
+                            doc_template, getattr(row, "error", None), text_template)
+            except Exception as e:                       # pragma: no cover - defensive
+                logger.warning(f"notify_guest_document: {doc_template} raised: {e}")
+        elif not pdf_path:
+            logger.info("notify_guest_document: no PDF for %s -- sending %s instead",
+                        doc_template, text_template)
+
+        return notify_guest(db, guest, template=text_template, params=text_params,
+                            setting_key=None,            # already checked above
+                            booking_id=booking_id, client_ref=client_ref)
+    except Exception as e:
+        logger.warning(f"notify_guest_document ({doc_template}) failed: {e}")
         return dict(_RESULT_NONE)
 
 

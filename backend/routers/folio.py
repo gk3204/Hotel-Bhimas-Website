@@ -20,7 +20,7 @@ import logging
 import os
 from datetime import date, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
@@ -29,7 +29,7 @@ from database import SessionLocal
 from models import Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, Invoice, Payment, RoomType
 from schemas import (FolioBillToRequest, FolioChargeCreate, FolioDiscountRequest, FolioOpenRequest,
                      FolioVoidRequest)
-from services import company_service
+from services import company_service, room_posting
 from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import get_current_user, require_admin, require_reception_or_admin
@@ -118,6 +118,67 @@ def _ensure_editable(db: Session, folio: Folio):
         raise HTTPException(status_code=409, detail="Folio already invoiced — no further changes allowed")
 
 
+def _ensure_chargeable(db: Session, folio: Folio):
+    """`_ensure_editable`, plus the v4b6 complimentary gate.
+
+    A `comp_mode='all'` stay takes no new charges at all — the owner said everything is free,
+    so posting one and expecting somebody to notice is worse than refusing. `comp_mode='room'`
+    charges extras normally: only the room is free."""
+    _ensure_editable(db, folio)
+    booking = db.query(Booking).filter(Booking.booking_id == folio.booking_id).first()
+    if booking is not None and getattr(booking, "comp_mode", "none") == "all":
+        raise HTTPException(
+            status_code=422,
+            detail="This stay is complimentary (all charges) — nothing can be posted to it. "
+                   "Clear the complimentary status first if the guest should be billed.")
+
+
+def _overstay_slice(db: Session, booking: Booking, cfg=None) -> dict:
+    """Overstay flags for a folio-list row (v4b3). Best-effort — the stays list must not fail
+    to load because the overstay read-model hiccuped."""
+    try:
+        from services.overstay_billing import overstay_state
+        st = overstay_state(db, booking, cfg=cfg)
+        return {"overdue": st["overdue"], "nights_overdue": st["nights_overdue"],
+                "auto_charged_nights": st["auto_nights"],
+                "auto_charged_amount": st["auto_amount"],
+                "card_reencode_required": st["card_reencode_required"]}
+    except Exception as e:                                    # pragma: no cover - defensive
+        logger.warning(f"folio list overstay slice failed for {booking.booking_id}: {e}")
+        return {}
+
+
+def _void_charge_row(db: Session, charge: FolioCharge, reason: str, user) -> FolioCharge:
+    """Mark a charge void + append its reversing mirror. Never hard-deletes.
+
+    Extracted in v4b1 so the generic void endpoint, the overstay reversal (v4b3) and the
+    retro-complimentary path (v4b6) share exactly ONE implementation of what voiding means.
+    Does not commit and does not recompute — the caller owns the transaction.
+
+    ⚠️ The reversal deliberately carries NO charge_date / booking_item_id / posting_reason.
+    It is a bookkeeping mirror, not a night. Copying them would collide with the partial
+    unique index uq_folio_room_night (which excludes reversals via reversal_of_id IS NULL),
+    and would make the voided night look re-postable.
+    """
+    charge.void = True
+    charge.void_reason = reason
+    reversal = FolioCharge(
+        folio_id=charge.folio_id,
+        type=charge.type,
+        description=f"REVERSAL of #{charge.id}: {charge.description}",
+        qty=charge.qty,
+        unit_price=charge.unit_price,
+        amount=-float(charge.amount),
+        gst_percent=charge.gst_percent,
+        posted_by=_resolve_user_id(db, user),
+        void=True,
+        void_reason=f"reversal of #{charge.id}: {reason}",
+        reversal_of_id=charge.id,
+    )
+    db.add(reversal)
+    return reversal
+
+
 def _get_folio(db: Session, folio_id: int) -> Folio:
     folio = db.query(Folio).filter(Folio.id == folio_id).first()
     if not folio:
@@ -168,11 +229,21 @@ def _invoice_totals(charges):
     }
 
 
+def _room_numbers(booking) -> list:
+    """Physical room numbers on a booking, in order. A booking always reaches its rooms via
+    BookingItem.room_id (there is no Booking->Room relationship), and a room is only assigned
+    at check-in — so a confirmed-but-not-arrived stay legitimately has none."""
+    if not booking:
+        return []
+    return [bi.room.room_number for bi in booking.booking_items if bi.room]
+
+
 def _folio_detail(db: Session, folio: Folio):
     """Shared response builder: folio + booking/guest summary + all lines + GST totals."""
+    from routers.payments import prepaid_slice      # local: payments imports this module
     booking = db.query(Booking).options(
         joinedload(Booking.guest),
-        joinedload(Booking.booking_items),
+        joinedload(Booking.booking_items).joinedload(BookingItem.room),
     ).filter(Booking.booking_id == folio.booking_id).first()
     charges = db.query(FolioCharge).filter(
         FolioCharge.folio_id == folio.id
@@ -197,6 +268,10 @@ def _folio_detail(db: Session, folio: Folio):
         "guest_name": booking.guest.name if booking and booking.guest else None,
         "phone": booking.guest.phone if booking and booking.guest else None,
         "email": booking.guest.email if booking and booking.guest else None,
+        # v3 item 7: the room number is the first thing the desk looks for when a guest
+        # queries their bill. List + pre-joined label (a stay can hold several rooms).
+        "room_numbers": _room_numbers(booking),
+        "room_number": ", ".join(_room_numbers(booking)) or None,
         "check_in": str(booking.check_in) if booking else None,
         "check_out": str(booking.check_out) if booking else None,
         # Expected arrival vs what actually happened (FE-1) — the folio header is where the
@@ -205,6 +280,14 @@ def _folio_detail(db: Session, folio: Folio):
         "checked_in_at": booking.checked_in_at.isoformat() if booking and booking.checked_in_at else None,
         "checked_out_at": booking.checked_out_at.isoformat() if booking and booking.checked_out_at else None,
         "booking_status": booking.status if booking else None,
+        # v4b6: so the bill header can say "Complimentary" before anyone asks for money.
+        "comp_mode": (getattr(booking, "comp_mode", "none") or "none") if booking else "none",
+        "comp_reason": getattr(booking, "comp_reason", None) if booking else None,
+        # v4b9 (R9): a prepaid stay shows a small balance because the ROOM is already paid for.
+        # Without saying so on the header, ₹0 reads as "nothing to collect, ever" and a real
+        # extras balance reads as the whole bill.
+        "booking_source": booking.booking_source if booking else None,
+        **prepaid_slice(db, booking),
         "invoice_no": invoice.invoice_no if invoice else None,
         "invoice_date": str(invoice.invoice_date) if invoice else None,
         "charges": [{
@@ -229,23 +312,51 @@ def _folio_detail(db: Session, folio: Folio):
 # ---------------------------------------------------------------- endpoints
 
 @router.get("/")
-def list_folios(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
-    """Desk list: confirmed / in-house bookings with their folio (if opened)."""
-    rows = (
+def list_folios(db: Session = Depends(get_db), user=Depends(require_reception_or_admin),
+                scope: str = Query("inhouse", pattern="^(inhouse|history|all)$"),
+                limit: int = Query(300, ge=1, le=1000)):
+    """Desk stays list.
+
+    v4b1 (R3): the default used to be `confirmed OR folio open`, so a bill appeared on the
+    Folio screen before the guest had arrived and lingered after they left. The owner asked
+    for a folio to be there only between check-in and check-out — which is also the only
+    window in which a receptionist can act on it, since a confirmed booking has no room
+    assigned yet and a checked-out one is settled AND invoiced (frozen by _ensure_editable).
+
+    ⚠️ `scope` exists because the **Reprint** screen calls this same endpoint, not just the
+    same DTO. Narrowing the default without it would have made every settled bill and invoice
+    unreachable for reprinting — the one thing that screen is for.
+      inhouse  (default) currently checked-in stays          -> Folio screen
+      history            checked-out stays, most recent first -> Reprint screen
+      all                both                                 -> anything that wants the lot
+    """
+    q = (
         db.query(Booking, Folio)
         .outerjoin(Folio, Folio.booking_id == Booking.booking_id)
         .options(joinedload(Booking.guest),
-                 joinedload(Booking.booking_items).joinedload(BookingItem.room_type))
-        .filter((Booking.status.in_(FOLIO_BOOKING_STATUSES)) | (Folio.status == "open"))
-        .order_by(Booking.check_in, Booking.booking_id)
-        .all()
+                 joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
+                 joinedload(Booking.booking_items).joinedload(BookingItem.room))
     )
+    if scope == "inhouse":
+        rows = (q.filter(Booking.status == "checked_in")
+                 .order_by(Booking.check_in, Booking.booking_id).all())
+    elif scope == "history":
+        rows = (q.filter(Booking.status == "checked_out")
+                 .order_by(Booking.check_out.desc(), Booking.booking_id.desc())
+                 .limit(limit).all())
+    else:
+        rows = (q.filter(Booking.status.in_(["checked_in", "checked_out"]))
+                 .order_by(Booking.check_out.desc(), Booking.booking_id.desc())
+                 .limit(limit).all())
+    from routers.payments import prepaid_slice      # local: payments imports this module
+    ov_cfg = app_settings.get_overstay_config(db)   # read once for the whole list
     data = []
     for booking, folio in rows:
         invoice = _get_invoice(db, folio.id) if folio else None
         room_types = ", ".join(
             f"{bi.room_type.name} x{bi.quantity}" for bi in booking.booking_items if bi.room_type
         )
+        rooms = _room_numbers(booking)
         data.append({
             "booking_id": booking.booking_id,
             "guest_name": booking.guest.name if booking.guest else None,
@@ -253,13 +364,24 @@ def list_folios(db: Session = Depends(get_db), user=Depends(require_reception_or
             "check_in": str(booking.check_in),
             "check_out": str(booking.check_out),
             "booking_status": booking.status,
+            "comp_mode": getattr(booking, "comp_mode", "none") or "none",
+            # v4b9 R9/R13 — the stays list is scanned before the header is opened.
+            "booking_source": booking.booking_source,
+            **prepaid_slice(db, booking),
             "room_types": room_types,
+            # v3 item 7 — room NUMBER, distinct from room_types above (which is the room-type
+            # name). The desk sorts and searches its stays list by this.
+            "room_numbers": rooms,
+            "room_number": ", ".join(rooms) or None,
             "grand_total": float(booking.grand_total or 0),
             "folio_id": folio.id if folio else None,
             "folio_status": folio.status if folio else None,
             "folio_total": float(folio.total or 0) if folio else None,
             "balance": float(folio.balance or 0) if folio else None,
             "invoice_no": invoice.invoice_no if invoice else None,
+            # v4b3: a receptionist opening the Folio screen should see an overstay there too,
+            # not only on the board.
+            **_overstay_slice(db, booking, ov_cfg),
         })
     return {"total": len(data), "data": data}
 
@@ -289,26 +411,38 @@ def open_folio(data: FolioOpenRequest, db: Session = Depends(get_db),
         db.add(folio)
         db.flush()
 
-        # Room charges: split each booking item's GST-inclusive total across the
-        # nights so the folio room total equals booking.total_amount to the paisa.
+        # Room charges. The per-night split moved to services/room_posting (v4b1) so that
+        # check-in, extend-stay and the automatic overstay charge all post nights through
+        # ONE implementation with one idempotency key. price_mode="booking_split" is the
+        # historical maths, unchanged: the folio room total still equals booking.total_amount
+        # to the paisa. A complimentary stay (v4b6) posts nothing at all.
         nights = max(1, (booking.check_out - booking.check_in).days)
-        for item in booking.booking_items:
-            rt = db.query(RoomType).filter(RoomType.room_type_id == item.room_type_id).first()
-            item_total = float(item.total_amount or 0)
-            per_night = round(item_total / nights, 2)
-            for n in range(nights):
-                night = booking.check_in + timedelta(days=n)
-                line_amount = per_night if n < nights - 1 else round(item_total - per_night * (nights - 1), 2)
-                db.add(FolioCharge(
-                    folio_id=folio.id,
-                    type="room",
-                    description=f"Room {rt.name if rt else item.room_type_id} x{item.quantity} — {night:%d %b %Y}",
-                    qty=item.quantity,
-                    unit_price=round(line_amount / item.quantity, 2) if item.quantity else line_amount,
-                    amount=line_amount,
-                    gst_percent=float(rt.gst_percent) if rt else None,
-                    posted_by=uid,
-                ))
+        room_posting.post_room_nights(
+            db, booking, folio, booking.check_in, booking.check_out,
+            user=user,
+            posting_reason=room_posting.REASON_CHECKIN,
+            price_mode=room_posting.PRICE_BOOKING_SPLIT,
+            recompute=False,
+            # A brand-new folio has no lines, so there is nothing to be un-backfilled.
+            enforce_backfilled=False,
+        )
+
+        # Online (website) bookings add a convenience fee on top of the room total, and the guest
+        # paid the WHOLE grand_total to the gateway. The room lines above only cover the room total,
+        # so without posting the fee the folio would credit more than it charged and read as an
+        # overpayment the hotel must refund. Post it as a charge so the folio equals what was paid.
+        # (Desk / OTA bookings carry no convenience fee, so this is a no-op for them.)
+        conv = round(float(booking.convenience_fee or 0) + float(booking.convenience_gst or 0), 2)
+        if conv > 0:
+            db.add(FolioCharge(
+                folio_id=folio.id,
+                type="misc",
+                description="Convenience fee (online booking)",
+                qty=1,
+                unit_price=conv,
+                amount=conv,
+                posted_by=uid,
+            ))
 
         # Advance already paid (online gateway) -> credit lines.
         paid = db.query(Payment).filter(
@@ -324,6 +458,28 @@ def open_folio(data: FolioOpenRequest, db: Session = Depends(get_db),
                 qty=1,
                 unit_price=float(p.amount or 0),
                 amount=-float(p.amount or 0),
+                posted_by=uid,
+            ))
+
+        # Prepaid elsewhere (OTA channel / website) -> credit line (v4b1, R9).
+        # An OTA booking records NO Payment row — the channel took the money, not the hotel —
+        # so without this the folio showed the full room amount due and the desk collected it
+        # a SECOND time. Not modelled as a Payment on purpose: that would put money the hotel
+        # never touched into collections_summary, the cash-drawer gate and the shift variance.
+        prepaid = float(getattr(booking, "prepaid_amount", 0) or 0)
+        if prepaid > 0:
+            # Prefer the channel NAME ("makemytrip") over the generic source ("ota") — the
+            # receptionist reads this line and needs to know who is holding the money.
+            src = (booking.booking_source or booking.prepaid_source or "channel")
+            src = src.replace("_", " ").title()
+            ref = booking.ota_booking_id or f"booking {booking.booking_id}"
+            db.add(FolioCharge(
+                folio_id=folio.id,
+                type="payment",
+                description=f"Prepaid to {src} — {ref}",
+                qty=1,
+                unit_price=prepaid,
+                amount=-prepaid,
                 posted_by=uid,
             ))
 
@@ -353,15 +509,25 @@ def get_folio(folio_id: int, db: Session = Depends(get_db),
 @router.post("/{folio_id}/charge")
 def post_charge(folio_id: int, data: FolioChargeCreate, db: Session = Depends(get_db),
                 user=Depends(require_reception_or_admin)):
-    """Post a food/misc/minibar/laundry/extra-bed charge (unit_price GST-inclusive)."""
+    """Post an incidental charge (unit_price GST-inclusive). The charge type comes from the
+    admin-editable `charge_type` list (v3 item 2); the reserved system types room / payment /
+    discount are refused here as well as at the settings layer, because the reports split
+    revenue on them and a hand-posted "room" line would corrupt every revenue figure."""
     try:
         folio = _get_folio(db, folio_id)
-        _ensure_editable(db, folio)
+        # v4b6: also refuses a fully-complimentary stay.
+        _ensure_chargeable(db, folio)
+
+        if data.type in app_settings.RESERVED_CHARGE_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"'{data.type}' is posted by the system and cannot be charged by hand.")
+        charge_type = app_settings.validate_category(db, "charge_type", data.type)
 
         amount = round(data.qty * data.unit_price, 2)
         charge = FolioCharge(
             folio_id=folio.id,
-            type=data.type,
+            type=charge_type,
             description=data.description,
             qty=data.qty,
             unit_price=data.unit_price,
@@ -405,26 +571,26 @@ def void_charge(folio_id: int, charge_id: int, data: FolioVoidRequest,
             raise HTTPException(status_code=409, detail="Charge is already void")
         if charge.type == "payment":
             raise HTTPException(status_code=400, detail="Payments cannot be voided here (refunds = prompt 08)")
+        # v4b1: room nights are no longer voidable through the generic endpoint. Reversing a
+        # night is not a bookkeeping-only act — it must also move booking.check_out back and
+        # decrement grand_total, or the folio silently decouples from the booking and the
+        # contiguous-nights invariant breaks. That belongs to the dedicated reversal route.
+        if charge.type == "room":
+            raise HTTPException(
+                status_code=400,
+                detail=("Room nights cannot be voided here — reversing a night also moves the "
+                        "stay's check-out date. Use the overstay reversal (admin + owner "
+                        "approval) for an auto-charged night."))
+
+        # Owner-approval OTP: a void erases a charge, so it needs the owner's code when armed
+        # (VOID_OTP_REQUIRED, default on). Consumed here so the code is only spent on a real void.
+        if app_settings.get_fraud_config(db)["void_otp_required"]:
+            consume_otp(db, data.owner_otp_id, data.owner_otp_code, "void", user)
 
         before = {"charge_id": charge.id, "type": charge.type,
                   "description": charge.description, "amount": float(charge.amount)}
 
-        charge.void = True
-        charge.void_reason = data.reason
-        reversal = FolioCharge(
-            folio_id=folio.id,
-            type=charge.type,
-            description=f"REVERSAL of #{charge.id}: {charge.description}",
-            qty=charge.qty,
-            unit_price=charge.unit_price,
-            amount=-float(charge.amount),
-            gst_percent=charge.gst_percent,
-            posted_by=_resolve_user_id(db, user),
-            void=True,
-            void_reason=f"reversal of #{charge.id}: {data.reason}",
-            reversal_of_id=charge.id,
-        )
-        db.add(reversal)
+        reversal = _void_charge_row(db, charge, data.reason, user)
         _recompute(db, folio)
         db.commit()
 
@@ -453,19 +619,11 @@ def apply_discount(folio_id: int, data: FolioDiscountRequest, db: Session = Depe
         if data.amount > float(folio.total or 0):
             raise HTTPException(status_code=400, detail="Discount cannot exceed the folio total")
 
-        # Owner-approval OTP (prompt 11): a discount deeper than DISCOUNT_FLOOR_PERCENT of the
-        # folio total is "below floor" and needs the owner's code when the discount gate is on.
-        # Opt-in (default off) so prompt-07 behaviour is unchanged; the toggle is admin-editable
-        # in Settings (FE-12). Consumed here so the code is only spent if the discount commits.
-        if app_settings.get_fraud_config(db)["discount_otp_required"]:
-            try:
-                floor_pct = float(os.getenv("DISCOUNT_FLOOR_PERCENT", "20"))
-            except (TypeError, ValueError):
-                floor_pct = 20.0
-            total = float(folio.total or 0)
-            below_floor = total <= 0 or (data.amount / total) * 100.0 > floor_pct
-            if below_floor:
-                consume_otp(db, data.owner_otp_id, data.owner_otp_code, "discount_below_floor", user)
+        # Owner-approval OTP: when the discount gate is on (ships armed), ANY discount amount > 0
+        # needs the owner's code — the owner asked for approval on every discount, not just deep
+        # ones. Consumed here so the code is only spent if the discount commits.
+        if app_settings.get_fraud_config(db)["discount_otp_required"] and data.amount > 0:
+            consume_otp(db, data.owner_otp_id, data.owner_otp_code, "discount_below_floor", user)
 
         charge = FolioCharge(
             folio_id=folio.id,

@@ -41,13 +41,12 @@ def require_housekeeper_or_admin(user=Depends(get_current_user)):
     return user
 
 
-def require_supervisor_or_admin(user=Depends(get_current_user)):
-    """Supervisor oversight actions (F-B): housekeeping inspect, maintenance assign/verify.
-    Supervisor is a WEB-ONLY oversight role — it is deliberately NOT added to the front-desk
-    (`require_reception_or_admin`) or status-write (`require_housekeeper_or_admin`) gates."""
-    if user.get("role") not in ["admin", "supervisor"]:
-        raise HTTPException(status_code=403, detail="Supervisor or admin access required")
-    return user
+# v4b8: the `supervisor` role is GONE — merged into `housekeeper`, which now both cleans and
+# signs off (room inspection + the final approval on a maintenance ticket). The owner did not
+# want two separate housekeeping logins.
+# The old name is kept as an alias so no call site dangles, and so a future reader searching
+# for "supervisor" lands here rather than concluding the gate was dropped.
+require_supervisor_or_admin = require_housekeeper_or_admin
 
 
 def require_maintenance_or_admin(user=Depends(get_current_user)):

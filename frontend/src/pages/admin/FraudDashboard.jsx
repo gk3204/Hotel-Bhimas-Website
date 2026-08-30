@@ -260,59 +260,19 @@ const FraudDashboard = () => {
             {otps.length === 0 ? (
               <div className="p-12 text-center text-slate-400"><div className="text-5xl mb-4">📭</div><p>No {otpStatus === "all" ? "" : otpStatus} approval requests.</p></div>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-left">
-                  <thead className="bg-slate-900/80 border-b border-slate-700">
-                    <tr>
-                      <th className="px-6 py-4 font-semibold text-sm">Action</th>
-                      <th className="px-6 py-4 font-semibold text-sm">Context</th>
-                      <th className="px-6 py-4 font-semibold text-sm">Code</th>
-                      <th className="px-6 py-4 font-semibold text-sm">Expires</th>
-                      <th className="px-6 py-4 font-semibold text-sm text-right">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-700">
-                    {otps.map((o) => (
-                      <tr key={o.otp_id} className="hover:bg-slate-700/30 transition">
-                        <td className="px-6 py-4 font-medium whitespace-nowrap">{pretty(o.action)}</td>
-                        <td className="px-6 py-4 max-w-xs">
-                          <div className="flex flex-wrap gap-1">
-                            {Object.entries(o.context || {}).map(([k, v]) => (
-                              <span key={k} className="px-2 py-0.5 rounded border border-slate-600 bg-slate-800/70 text-slate-300 text-xs">
-                                {pretty(k)}: <span className="text-slate-100">{String(v)}</span>
-                              </span>
-                            ))}
-                            {!o.context && <span className="text-slate-500 text-xs">—</span>}
-                          </div>
-                        </td>
-                        <td className="px-6 py-4">
-                          {o.code
-                            ? <span className="font-mono text-2xl font-bold tracking-widest text-[#FCD34D]">{o.code}</span>
-                            : <span className="text-slate-500 text-sm">{o.used ? "used" : "expired"}</span>}
-                        </td>
-                        <td className="px-6 py-4 text-slate-400 text-sm whitespace-nowrap">{(o.expires_at || "").slice(0, 16).replace("T", " ")}</td>
-                        <td className="px-6 py-4 text-right whitespace-nowrap">
-                          {o.code && (
-                            <div className="inline-flex gap-2">
-                              <button
-                                onClick={() => copyCode(o.code)}
-                                className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 transition text-xs"
-                              >
-                                Copy
-                              </button>
-                              <button
-                                onClick={() => doResendOtp(o.otp_id)}
-                                className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 transition text-xs"
-                              >
-                                Resend
-                              </button>
-                            </div>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              // One CARD per request, not a table row. The owner reads these on a phone and
+              // needs the whole story — who, which room, how much, what changes — which does
+              // not fit in a max-w-xs cell. The old layout dumped context as raw key:value
+              // chips with no ordering and no formatting.
+              <div className="p-4 sm:p-6 space-y-4">
+                {otps.map((o) => (
+                  <ApprovalCard
+                    key={o.otp_id}
+                    otp={o}
+                    onCopy={copyCode}
+                    onResend={doResendOtp}
+                  />
+                ))}
               </div>
             )}
           </div>
@@ -427,6 +387,174 @@ const FraudDashboard = () => {
           </div>
         )}
     </PageShell>
+  );
+};
+
+// ---------------------------------------------------------------------------
+// Owner approval card (v4b0)
+// ---------------------------------------------------------------------------
+// The backend now writes a `summary` sentence and a structured envelope into each OTP's
+// context (utils/owner_otp.build_context), so this renders a decision, not a data dump.
+// Rows created before v4b0 have no summary — they fall back to the action name and the
+// generic chip list rather than showing a blank card.
+
+const REASON_LABEL = {
+  alt_room_type: "Alternate room type",
+  ac_downgrade: "A/C → non-A/C",
+};
+
+// Keys the card renders explicitly; everything else falls through to the extras chips so a
+// new action's fields are never silently swallowed.
+const HANDLED_CONTEXT_KEYS = new Set([
+  "action", "summary", "reasons", "requested_by", "requested_at",
+  "booking", "guest", "rooms", "amount",
+]);
+
+const useCountdown = (iso) => {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  if (!iso) return null;
+  // Backend timestamps are naive UTC; append Z so the browser does not read them as local.
+  const ms = new Date(/[Zz]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : `${iso}Z`).getTime() - now;
+  if (Number.isNaN(ms)) return null;
+  if (ms <= 0) return "expired";
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return `${m}:${String(s).padStart(2, "0")}`;
+};
+
+const BeforeAfter = ({ label, before, after }) => (
+  <div className="text-sm">
+    <span className="text-slate-400">{label}: </span>
+    <span className="text-slate-300 line-through decoration-slate-500">{String(before)}</span>
+    <span className="text-slate-500 mx-1.5">→</span>
+    <span className="text-[#FCD34D] font-semibold">{String(after)}</span>
+  </div>
+);
+
+const ApprovalCard = ({ otp, onCopy, onResend }) => {
+  const ctx = otp.context || {};
+  const b = ctx.booking || {};
+  const g = ctx.guest || {};
+  const rooms = ctx.rooms || [];
+  const countdown = useCountdown(otp.expires_at);
+  const live = Boolean(otp.code);
+  const amount = ctx.amount;
+
+  const extras = Object.entries(ctx).filter(
+    ([k, v]) => !HANDLED_CONTEXT_KEYS.has(k) && v !== null && v !== undefined && typeof v !== "object"
+  );
+
+  return (
+    <div className={`rounded-2xl border p-5 ${live ? "bg-slate-800/60 border-[#E5C07B]/30" : "bg-slate-800/30 border-slate-700"}`}>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0 flex-1">
+          {/* The headline. This is the whole point — one sentence the owner can act on. */}
+          <p className="text-base font-semibold text-white leading-snug">
+            {otp.summary || ctx.summary || pretty(otp.action)}
+          </p>
+
+          <div className="flex flex-wrap items-center gap-2 mt-2">
+            <span className="px-2 py-0.5 rounded border border-slate-600 bg-slate-900/60 text-slate-300 text-xs">
+              {pretty(otp.action)}
+            </span>
+            {(ctx.reasons || []).map((r) => (
+              <span key={r} className="px-2 py-0.5 rounded border border-amber-500/40 bg-amber-500/10 text-amber-200 text-xs">
+                {REASON_LABEL[r] || pretty(r)}
+              </span>
+            ))}
+            {rooms.map((r) => (
+              <span key={r.room_id || r.room_number} className="px-2 py-0.5 rounded border border-slate-600 bg-slate-900/60 text-slate-200 text-xs">
+                Room {r.room_number}{r.room_type_name ? ` · ${r.room_type_name}` : ""}
+              </span>
+            ))}
+          </div>
+
+          <div className="mt-3 grid gap-x-8 gap-y-1 sm:grid-cols-2">
+            {(g.name || g.phone) && (
+              <p className="text-sm text-slate-300">
+                {g.name || "Guest"}{g.phone ? <span className="text-slate-500"> · {g.phone}</span> : null}
+              </p>
+            )}
+            {b.booking_id && (
+              <p className="text-sm text-slate-400">
+                Booking #{b.booking_id}
+                {b.booking_source ? ` · ${pretty(b.booking_source)}` : ""}
+                {b.status ? ` · ${pretty(b.status)}` : ""}
+              </p>
+            )}
+            {amount !== null && amount !== undefined && (
+              <p className="text-sm">
+                <span className="text-slate-400">Amount: </span>
+                <span className={`font-semibold ${Number(amount) < 0 ? "text-red-300" : "text-[#FCD34D]"}`}>
+                  {fmt(Math.abs(amount))}
+                </span>
+                {Number(amount) < 0 && <span className="text-slate-500 text-xs"> (money leaving)</span>}
+              </p>
+            )}
+            {b.folio_balance !== null && b.folio_balance !== undefined && (
+              <p className="text-sm text-slate-400">Folio balance: {fmt(b.folio_balance)}</p>
+            )}
+            {/* Before → after is what turns an approval from a rubber stamp into a decision. */}
+            {b.check_out && b.check_out_after && (
+              <BeforeAfter label="Check-out" before={b.check_out} after={b.check_out_after} />
+            )}
+            {ctx.booked_type?.name && ctx.physical_type?.name && (
+              <BeforeAfter label="Room type" before={ctx.physical_type.name} after={ctx.booked_type.name} />
+            )}
+            {ctx.quoted_amount !== undefined && ctx.applied_amount !== undefined && (
+              <BeforeAfter label="Charge" before={fmt(ctx.quoted_amount)} after={fmt(ctx.applied_amount)} />
+            )}
+          </div>
+
+          {extras.length > 0 && (
+            <div className="flex flex-wrap gap-1 mt-3">
+              {extras.map(([k, v]) => (
+                <span key={k} className="px-2 py-0.5 rounded border border-slate-700 bg-slate-900/50 text-slate-400 text-xs">
+                  {pretty(k)}: <span className="text-slate-200">{String(v)}</span>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <p className="text-xs text-slate-500 mt-3">
+            Requested by {ctx.requested_by || "—"}
+            {otp.created_at ? ` · ${String(otp.created_at).slice(0, 16).replace("T", " ")}` : ""}
+            {otp.used && otp.used_at ? ` · used ${String(otp.used_at).slice(0, 16).replace("T", " ")}` : ""}
+          </p>
+        </div>
+
+        <div className="text-right shrink-0">
+          {live ? (
+            <>
+              <button
+                onClick={() => onCopy(otp.code)}
+                title="Click to copy"
+                className="font-mono text-3xl font-bold tracking-widest text-[#FCD34D] hover:text-[#E5C07B] transition"
+              >
+                {otp.code}
+              </button>
+              <p className={`text-xs mt-1 ${countdown === "expired" ? "text-red-300" : "text-slate-400"}`}>
+                {countdown === "expired" ? "expired" : `expires in ${countdown}`}
+              </p>
+              <div className="inline-flex gap-2 mt-2">
+                <button onClick={() => onCopy(otp.code)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 transition text-xs">Copy</button>
+                <button onClick={() => onResend(otp.otp_id)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 transition text-xs">Resend</button>
+              </div>
+            </>
+          ) : (
+            <span className={`px-3 py-1 rounded-full text-sm ${otp.used ? "bg-green-500/15 text-green-300 border border-green-500/30" : "bg-slate-700/50 text-slate-400 border border-slate-600"}`}>
+              {otp.used ? "used" : "expired"}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
   );
 };
 

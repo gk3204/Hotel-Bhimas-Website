@@ -11,9 +11,11 @@ import {
   FaConciergeBell, FaPrint, FaSyncAlt, FaCheck, FaTimes, FaPlus, FaMinus, FaBell, FaBellSlash,
 } from "react-icons/fa";
 import * as api from "../../api/roomService";
+import { requestOtp } from "../../api/fraud";
 import { KotSheet, BillSheet } from "../../components/ThermalPrint";
 import { prettyCategory } from "../../utils/useCategoryList";
 import { playChime, unlockAudio, isAudioBlocked } from "../../utils/alertSound";
+import usePoll from "../../utils/usePoll";
 
 const money = (v) => `₹${Number(v || 0).toFixed(2)}`;
 
@@ -46,6 +48,13 @@ export default function RoomService() {
   const [cart, setCart] = useState({});           // menuItemId -> qty
   const [note, setNote] = useState("");
   const [placing, setPlacing] = useState(false);
+
+  // Cancel dialog (v4b5): a reason is mandatory, and the owner may have to approve.
+  const [cancelTarget, setCancelTarget] = useState(null);
+  const [cancelReason, setCancelReason] = useState("");
+  const [cancelOtpRequired, setCancelOtpRequired] = useState(false);
+  const [cancelOtpId, setCancelOtpId] = useState(null);
+  const [cancelOtpCode, setCancelOtpCode] = useState("");
 
   // What is currently being sent to the printer (one at a time).
   const [printKot, setPrintKot] = useState(null);
@@ -131,11 +140,9 @@ export default function RoomService() {
     })();
   }, [loadBoard]);
 
-  // Keep the board live without hammering the API.
-  useEffect(() => {
-    const id = window.setInterval(() => loadBoard(true), POLL_MS);
-    return () => window.clearInterval(id);
-  }, [loadBoard]);
+  // Keep the board live without hammering the API. The shared poller (v3 item 5) also
+  // refreshes the instant the tablet is woken, which is exactly when a missed order matters.
+  usePoll(useCallback(() => loadBoard(true), [loadBoard]), POLL_MS);
 
   // Orders the kitchen hasn't been told about yet. Drives both the banner and the re-chime.
   const awaitingKot = useMemo(
@@ -208,6 +215,11 @@ export default function RoomService() {
     return g;
   }, [menu]);
 
+  // v4b5 (R1): ONE press — order, kitchen docket, charge and guest bill.
+  // Staff are standing at the counter with the guest, so the old two-step "place now, come
+  // back and deliver later" dance was pure friction for an order they take themselves. Both
+  // documents come back in the SAME response, so this prints twice with no extra round trip.
+  // (A guest's own QR order keeps its separate Deliver — see the board below.)
   const place = async () => {
     if (!bookingId) { showToast("Pick a room first", "error"); return; }
     if (cartCount === 0) { showToast("Add at least one item", "error"); return; }
@@ -217,14 +229,14 @@ export default function RoomService() {
         booking_id: Number(bookingId),
         items: Object.entries(cart).map(([id, qty]) => ({ menu_item_id: Number(id), qty })),
         note: note || null,
+        deliver_now: true,
         client_ref: `rs-desk-${bookingId}-${Date.now()}`,
       });
       setCart({});
       setNote("");
-      showToast(`Order placed — ${order.kot_no}`);
-      // Straight to the kitchen.
-      const kot = await api.getKot(order.id, true);
-      setPrintKot(kot);
+      showToast(`${order.kot_no} — ${money(order.bill?.total)} charged to room ${order.room_number}`);
+      if (order.kot) setPrintKot(order.kot);
+      if (order.bill) setPrintBill(order.bill);
       await loadBoard(false);
       setTab("board");
     } catch (e) {
@@ -263,15 +275,63 @@ export default function RoomService() {
     }
   };
 
-  const cancel = async (o) => {
-    if (!window.confirm(`Cancel order ${o.kot_no || `#${o.id}`}? The kitchen may already be cooking.`)) return;
-    setBusyId(o.id);
+  // v4b5 (R5): cancelling needs a reason, and an owner code when the gate is armed. Before
+  // this, any tablet login could silently dismiss an order that already had a KOT number
+  // against it — no reason, no approval, no trace beyond the status flip.
+  const cancel = (o) => {
+    setCancelTarget(o);
+    setCancelReason("");
+    setCancelOtpRequired(false);
+    setCancelOtpId(null);
+    setCancelOtpCode("");
+  };
+
+  const requestCancelApproval = async () => {
+    if (!cancelTarget) return;
     try {
-      await api.cancelOrder(o.id);
-      showToast("Order cancelled");
-      await loadBoard(false);
+      const res = await requestOtp({
+        action: "room_service_cancel",
+        booking_id: cancelTarget.booking_id,
+        amount: cancelTarget.amount,
+        context: { kot_no: cancelTarget.kot_no },
+      });
+      setCancelOtpId(res.otp_id);
+      showToast("Approval requested — ask the owner for the code", "info");
     } catch (e) {
       showToast(e.message, "error");
+    }
+  };
+
+  const confirmCancel = async () => {
+    const o = cancelTarget;
+    if (!o) return;
+    if (cancelReason.trim().length < 3) {
+      showToast("A reason is required", "error");
+      return;
+    }
+    setBusyId(o.id);
+    try {
+      await api.cancelOrder(o.id, {
+        reason: cancelReason.trim(),
+        owner_otp_id: cancelOtpRequired ? cancelOtpId : null,
+        owner_otp_code: cancelOtpRequired ? cancelOtpCode.trim() : null,
+      });
+      showToast("Order cancelled");
+      setCancelTarget(null);
+      setCancelReason("");
+      setCancelOtpRequired(false);
+      setCancelOtpId(null);
+      setCancelOtpCode("");
+      await loadBoard(false);
+    } catch (e) {
+      // Same handshake as the desk: the server refuses, we reveal the approval panel and
+      // keep the dialog open so the typed reason survives.
+      if (String(e.message || "").toLowerCase().includes("owner_otp")) {
+        setCancelOtpRequired(true);
+        showToast("Owner approval needed to cancel this order", "info");
+      } else {
+        showToast(e.message, "error");
+      }
     } finally {
       setBusyId(null);
     }
@@ -283,7 +343,8 @@ export default function RoomService() {
         <FaConciergeBell /> Room Service
       </h1>
       <p className="text-slate-400 mb-4 text-sm">
-        Take an order, send it to the kitchen, then deliver — the charges land on the guest's room bill.
+        Take an order in one press — kitchen docket, guest bill and the charge on the room, together.
+        Orders guests place themselves still need a Deliver.
       </p>
 
       {/* Waiting-for-kitchen banner. The chime is the prompt; this is the action, and it still
@@ -468,11 +529,79 @@ export default function RoomService() {
           <div className="sticky bottom-3">
             <button onClick={place} disabled={placing || cartCount === 0 || !bookingId}
                     className="w-full bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-bold py-4 rounded-xl text-lg disabled:opacity-50 shadow-xl">
-              {placing ? "Placing…" : `Place order · ${cartCount} item(s) · ${money(cartTotal)}`}
+              {placing
+                ? "Sending…"
+                : `Order · KOT · Bill — ${cartCount} item(s) · ${money(cartTotal)}`}
             </button>
             <p className="text-slate-500 text-xs text-center mt-2">
-              The kitchen docket prints straight after. Nothing is charged until you deliver.
+              One press: the kitchen docket and the guest's bill both print, and the amount goes
+              on the room.
             </p>
+          </div>
+        </div>
+      )}
+
+      {/* Cancel an order (v4b5): reason always, owner code when the gate is armed. */}
+      {cancelTarget && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-4">
+          <div className="w-full max-w-md rounded-2xl bg-slate-800 border border-slate-700 p-5">
+            <h3 className="text-lg font-bold text-white">
+              Cancel {cancelTarget.kot_no || `#${cancelTarget.id}`}?
+            </h3>
+            <p className="text-slate-400 text-sm mt-1">
+              Room {cancelTarget.room_number} · {money(cancelTarget.amount)}
+              {cancelTarget.printed_kot_at
+                ? " · the kitchen already has the docket, so the food may exist"
+                : " · the docket has not printed yet"}
+            </p>
+
+            <label className="block mt-4 text-sm font-semibold text-slate-300" htmlFor="rs-cancel-reason">
+              Reason (required)
+            </label>
+            <input
+              id="rs-cancel-reason"
+              value={cancelReason}
+              onChange={(e) => setCancelReason(e.target.value)}
+              placeholder="e.g. guest changed their mind, out of stock"
+              className="mt-1 w-full px-4 py-2 bg-slate-900/60 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]"
+            />
+
+            {cancelOtpRequired && (
+              <div className="mt-4 rounded-xl border border-amber-500/40 bg-amber-500/10 p-3">
+                <p className="text-amber-200 text-sm">Cancelling this order needs owner approval.</p>
+                <div className="flex gap-2 mt-2">
+                  <button
+                    onClick={requestCancelApproval}
+                    className="px-3 py-2 rounded-lg bg-slate-700 hover:bg-slate-600 text-sm whitespace-nowrap"
+                  >
+                    Request approval
+                  </button>
+                  <input
+                    value={cancelOtpCode}
+                    onChange={(e) => setCancelOtpCode(e.target.value)}
+                    placeholder="6-digit code"
+                    inputMode="numeric"
+                    className="flex-1 min-w-0 px-3 py-2 bg-slate-900/60 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]"
+                  />
+                </div>
+              </div>
+            )}
+
+            <div className="flex gap-2 mt-5">
+              <button
+                onClick={confirmCancel}
+                disabled={busyId === cancelTarget.id}
+                className="flex-1 px-4 py-3 rounded-xl bg-red-900/70 hover:bg-red-900 text-white font-semibold disabled:opacity-50"
+              >
+                Cancel order
+              </button>
+              <button
+                onClick={() => setCancelTarget(null)}
+                className="px-4 py-3 rounded-xl bg-slate-700 hover:bg-slate-600 text-white"
+              >
+                Keep it
+              </button>
+            </div>
           </div>
         </div>
       )}

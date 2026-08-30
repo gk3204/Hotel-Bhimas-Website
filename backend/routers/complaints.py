@@ -32,9 +32,10 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/complaints", tags=["Complaints"])
 
-# Complaint handling is a front-desk (reception) AND supervisor-oversight (F-B) activity; admin too.
+# Complaint handling is a front-desk (reception) activity; admin too. v4b8 retired the
+# separate supervisor role, so oversight sits with admin.
 # Config / compensation / escalation-run stay admin-only below.
-staff = require_roles("admin", "reception", "supervisor")
+staff = require_roles("admin", "reception")
 
 # Statuses at which a complaint is still "open" and its SLA clock runs.
 OPEN_STATUSES = ("open", "assigned", "in_progress", "awaiting_parts")
@@ -162,6 +163,7 @@ def create_complaint(data: ComplaintCreate, db: Session = Depends(get_db),
     try:
         from routers.maintenance import create_guest_ticket
         category = app_settings.validate_category(db, "complaint", data.category)   # editable list (F-A)
+        priority = app_settings.validate_category(db, "priority", data.priority)    # editable list (v3 item 2)
         if data.room_id is not None and not db.query(Room).filter(Room.room_id == data.room_id).first():
             raise HTTPException(status_code=404, detail="Room not found")
         if data.booking_id is not None and not db.query(Booking).filter(
@@ -176,7 +178,7 @@ def create_complaint(data: ComplaintCreate, db: Session = Depends(get_db),
         ticket = create_guest_ticket(
             db, issue=data.issue, booking_id=data.booking_id, room_id=data.room_id,
             category="other" if data.category not in ("maintenance",) else "other",
-            priority=data.priority, client_ref=data.client_ref, commit=False)
+            priority=priority, client_ref=data.client_ref, commit=False)
         # Store the guest-facing complaint category in area (the ticket's category enum is the
         # maintenance taxonomy; complaints use their own — kept in `area` so both stay valid).
         if ticket.area is None:
@@ -335,13 +337,14 @@ def resolve_complaint(complaint_id: int, data: ComplaintResolve, db: Session = D
 def bulk_resolve_complaints(data: ComplaintBulkResolve, db: Session = Depends(get_db),
                             user=Depends(staff)):
     """Resolve several guest complaints at once (clear a backlog). Skips any that aren't guest
-    complaints or are already resolved/verified/closed. Audited per ticket, same as single resolve."""
+    complaints or are already resolved/closed. Audited per ticket, same as single resolve."""
+    from routers.maintenance import TERMINAL_STATUSES   # local: routers import each other
     resolved, skipped = 0, 0
     try:
         for cid in data.ids:
             t = db.query(MaintenanceTicket).filter(
                 MaintenanceTicket.id == cid, MaintenanceTicket.source == "guest").first()
-            if t is None or t.status in ("resolved", "verified", "closed"):
+            if t is None or t.status in TERMINAL_STATUSES:
                 skipped += 1
                 continue
             t.status = "resolved"

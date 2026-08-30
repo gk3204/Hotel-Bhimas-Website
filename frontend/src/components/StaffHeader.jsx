@@ -21,16 +21,36 @@ const StaffHeader = () => {
     navigate("/admin-login");
   };
 
-  const links =
-    role === "maintenance"
-      ? [
-          { to: "/staff", label: "Home" },
-          { to: "/staff/tickets", label: "My Tickets" },
-        ]
-      : [
-          { to: "/staff", label: "Home" },
-          { to: "/staff/rooms", label: "My Rooms" },
-        ];
+  // Per-role title + links. `roomservice` used to fall through to the housekeeper branch:
+  // titled "Housekeeping", with a My Rooms link it has no business seeing (v4b8).
+  // The housekeeper now also carries the merged supervisor duties, so it gets the admin
+  // Housekeeping board — that is where a room is inspected and made re-sellable.
+  const SHELLS = {
+    maintenance: {
+      title: "Maintenance",
+      links: [
+        { to: "/staff", label: "Home" },
+        { to: "/staff/tickets", label: "My Tickets" },
+      ],
+    },
+    roomservice: {
+      title: "Room Service",
+      links: [
+        { to: "/staff", label: "Home" },
+        { to: "/staff/room-service", label: "Orders" },
+      ],
+    },
+    housekeeper: {
+      title: "Housekeeping",
+      links: [
+        { to: "/staff", label: "Home" },
+        { to: "/staff/rooms", label: "My Rooms" },
+        { to: "/admin/housekeeping", label: "Board" },
+      ],
+    },
+  };
+  const shell = SHELLS[role] || SHELLS.housekeeper;
+  const links = shell.links;
 
   return (
     <>
@@ -39,7 +59,7 @@ const StaffHeader = () => {
           <div className="flex items-center space-x-3">
             <img src={logo} alt="Logo" className="h-9 w-auto" />
             <h1 className="text-lg font-bold text-[#E5C07B]">
-              {role === "maintenance" ? "Maintenance" : "Housekeeping"}
+              {shell.title}
             </h1>
           </div>
 

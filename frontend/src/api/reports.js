@@ -55,6 +55,10 @@ export const getTravelAgents = (p) => getReport("travel-agents", p);
 export const getOta = (p) => getReport("ota", p);
 export const getGst = (p) => getReport("gst", p);
 export const getCashShift = (p) => getReport("cash-shift", p);
+// v3 items 4 & 6 — room-service sales (day-wise + product-wise) and the shift payment split.
+export const getRoomServiceDaily = (p) => getReport("room-service/daily", p);
+export const getRoomServiceItems = (p) => getReport("room-service/items", p);
+export const getShiftPayments = (p) => getReport("shift-payments", p);
 export const getCardAudit = (p) => getReport("card-audit", p);
 export const getFraudSummary = (p) => getReport("fraud-summary", p);
 
@@ -70,6 +74,26 @@ export async function runDayClose(date) {
     `${BASE_URL}/reports/day-close/run${date ? `?date=${date}` : ""}`,
     { method: "POST", headers: authHeaders() }
   );
+  return handle(res);
+}
+
+// ---- automatic overstay billing (v4b3) ----
+export const getOverstayConfig = () => getReport("overstay/config");
+
+export async function updateOverstayConfig(body) {
+  const res = await fetch(`${BASE_URL}/reports/overstay/config`, {
+    method: "PUT",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return handle(res);
+}
+
+/** Defaults to a DRY RUN — reports who would be charged without touching anything. */
+export async function runOverstaySweep(dryRun = true) {
+  const res = await fetch(`${BASE_URL}/reports/overstay/run?dry_run=${dryRun}`, {
+    method: "POST", headers: authHeaders(),
+  });
   return handle(res);
 }
 

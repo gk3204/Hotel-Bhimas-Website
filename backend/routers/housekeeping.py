@@ -1,11 +1,12 @@
 """Housekeeping endpoints (prompt 13): room cleaning status, cleaning tasks, minibar
-restock, and the supervisor 'inspected' re-sale gate.
+restock, and the 'inspected' re-sale gate.
+v4b8: the separate `supervisor` role is gone — `housekeeper` both cleans and inspects.
 
 Anti-fraud design:
 - Cleaning status is set ONLY by the HOUSEKEEPER role (reception has no route here) so
   reception can't "park a room in cleaning" to hide it. The desktop shows housekeeping
   status READ-ONLY via GET /reception/board.
-- A room becomes re-sellable only after a supervisor/admin marks it INSPECTED
+- A room becomes re-sellable only after a housekeeper/admin marks it INSPECTED
   (POST /housekeeping/rooms/{id}/inspect), which flips the coarse Room.status back to
   'vacant'. A merely-cleaned room stays Room.status='cleaning' (not bookable). The
   `housekeeping_auto_inspect` config (admin, app_settings) makes 'mark clean' also inspect.
@@ -29,11 +30,12 @@ from schemas import (HousekeepingConfigUpdate, HousekeepingStatusUpdate, Inspect
 from utils.auth_utils import (require_admin, require_housekeeper_or_admin,
                               require_supervisor_or_admin, require_roles)
 
-# Housekeeping board is readable by the housekeeper who works it, plus admin/supervisor oversight (F-B).
-_board_viewer = require_roles("admin", "housekeeper", "supervisor")
+# Housekeeping board is readable by the housekeeper who works it, plus admin.
+_board_viewer = require_roles("admin", "housekeeper")
 from utils.audit import write_audit, _resolve_user_id
 from utils.housekeeping import set_hk_status
-from utils.settings import HK_AUTO_INSPECT_KEY, get_housekeeping_config, set_setting
+from utils.settings import (HK_AUTO_INSPECT_KEY, get_housekeeping_config, set_setting,
+                            validate_category)
 from routers.folio import _recompute
 
 logger = logging.getLogger(__name__)
@@ -82,6 +84,30 @@ def _task_dict(db: Session, t: HousekeepingTask, room: Room = None) -> dict:
     }
 
 
+def _is_cleaning_record(t: HousekeepingTask) -> bool:
+    """True when this task carries a record of somebody actually working the room.
+
+    Deliberately NOT `done_at is not None`: inspect_room closes every open task for the room,
+    stamping done_at on tasks nobody ever touched. Only a picked cleaner name, an assignee or
+    a start time means real work.
+    """
+    return bool(t.cleaned_by_name) or t.assigned_to is not None or t.started_at is not None
+
+
+def _cleaning_record(tasks) -> HousekeepingTask:
+    """The task that answers 'who cleaned this room', from a newest-first list.
+
+    A room can hold a NEWER task that nobody has worked yet — a touch-up raised minutes after
+    the checkout clean was finished. Taking the newest task of any status would let that empty
+    row shadow the completed clean and report the room as cleaned by nobody, so prefer the
+    newest worked task and fall back to the newest task only when none has been worked.
+    """
+    for t in tasks:
+        if _is_cleaning_record(t):
+            return t
+    return tasks[0] if tasks else None
+
+
 def _get_task(db: Session, task_id: int) -> HousekeepingTask:
     t = db.query(HousekeepingTask).filter(HousekeepingTask.id == task_id).first()
     if not t:
@@ -104,9 +130,11 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
 
     # open task per room (pending/in_progress) + most-recent task per room (any status,
     # for the 'cleaned by' name), both newest-first / first-wins.
-    open_tasks, last_tasks = {}, {}
+    open_tasks, last_tasks, worked_tasks = {}, {}, {}
     for t in db.query(HousekeepingTask).order_by(HousekeepingTask.created_at.desc()).all():
         last_tasks.setdefault(t.room_id, t)
+        if _is_cleaning_record(t):
+            worked_tasks.setdefault(t.room_id, t)   # see _cleaning_record()
         if t.status in ("pending", "in_progress"):
             open_tasks.setdefault(t.room_id, t)
 
@@ -121,7 +149,7 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
         task = open_tasks.get(r.room_id)
         if mine and task is not None and task.assigned_to not in (None, me):
             continue
-        last = last_tasks.get(r.room_id)
+        last = worked_tasks.get(r.room_id) or last_tasks.get(r.room_id)
         out.append({
             "room_id": r.room_id,
             "room_number": r.room_number,
@@ -131,6 +159,9 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
             "photo_url": hk.photo_url if hk else None,
             "open_task": _task_dict(db, task, r) if task else None,
             "cleaned_by": _name(last.assigned_to) if last and last.assigned_to else None,  # ALT-7
+            # v4b8: the PICKED names, shown as their own columns on the housekeeping board.
+            "cleaned_by_name": last.cleaned_by_name if last else None,
+            "inspected_by_name": last.inspected_by_name if last else None,
         })
     return {"rooms": out, "config": get_housekeeping_config(db)}
 
@@ -196,6 +227,10 @@ def complete_task(task_id: int, data: TaskCompleteRequest, db: Session = Depends
         t.photo_url = photo
     if data.client_ref:
         t.client_ref = data.client_ref
+    # v4b8: the NAME the housekeeper picked, validated against the admin-editable list.
+    # Kept alongside `assigned_to` (the login), not instead of it.
+    if data.cleaned_by_name:
+        t.cleaned_by_name = validate_category(db, "cleaned_by", data.cleaned_by_name)
 
     set_hk_status(db, t.room_id, "clean", user=user, photo_url=photo)
 
@@ -255,12 +290,21 @@ def inspect_room(room_id: int, data: InspectRequest, db: Session = Depends(get_d
 
     # cleaned-by: the housekeeper on the room's most recent cleaning task (ALT-7). Captured
     # before we close tasks so the inspection records who actually cleaned the room.
-    last_task = (db.query(HousekeepingTask)
-                 .filter(HousekeepingTask.room_id == room_id)
-                 .order_by(HousekeepingTask.created_at.desc()).first())
+    last_task = _cleaning_record(
+        db.query(HousekeepingTask)
+        .filter(HousekeepingTask.room_id == room_id)
+        .order_by(HousekeepingTask.created_at.desc()).all())
     cleaned_by_id = last_task.assigned_to if last_task else None
     cleaned_by = _staff_name(db, cleaned_by_id)
     supervisor = _staff_name(db, _resolve_user_id(db, user))
+    # v4b8: the PICKED names, validated against the admin-editable lists. These are a parallel
+    # record to the login-derived ones above — "whose name goes on the sheet" vs "which login
+    # did it" — so both are kept and neither overwrites the other.
+    cleaned_by_name = (validate_category(db, "cleaned_by", data.cleaned_by_name)
+                       if data.cleaned_by_name else
+                       (last_task.cleaned_by_name if last_task else None))
+    inspected_by_name = (validate_category(db, "inspected_by", data.inspected_by_name)
+                         if data.inspected_by_name else None)
 
     set_hk_status(db, room_id, "inspected", user=user)
     before = room.status
@@ -276,15 +320,26 @@ def inspect_room(room_id: int, data: InspectRequest, db: Session = Depends(get_d
         if t.done_at is None:
             t.done_at = datetime.utcnow()
 
+    # Stamp the sign-off onto the room's most recent task, so the board can show it.
+    if last_task is not None:
+        if cleaned_by_name:
+            last_task.cleaned_by_name = cleaned_by_name
+        last_task.inspected_by_name = inspected_by_name
+        last_task.inspected_at = datetime.utcnow()
+
     db.commit()
     write_audit(db, user, "housekeeping.inspect", "room", room_id,
                 before={"room_status": before},
                 after={"room_status": room.status, "note": data.note,
                        "cleaned_by": cleaned_by, "cleaned_by_id": cleaned_by_id,
-                       "supervisor": supervisor},
+                       "supervisor": supervisor,
+                       "cleaned_by_name": cleaned_by_name,
+                       "inspected_by_name": inspected_by_name},
                 client="web", commit=True)
     return {"room_id": room_id, "housekeeping_status": "inspected", "room_status": room.status,
-            "cleaned_by": cleaned_by, "supervisor": supervisor, "note": data.note}
+            "cleaned_by": cleaned_by, "supervisor": supervisor,
+            "cleaned_by_name": cleaned_by_name, "inspected_by_name": inspected_by_name,
+            "note": data.note}
 
 
 # ---------------------------------------------------------------- minibar -> folio
@@ -304,6 +359,10 @@ def minibar_restock(data: MinibarRestockRequest, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail="No folio for this stay")
     if folio.status != "open":
         raise HTTPException(status_code=409, detail="Folio is settled — cannot post a charge")
+    # v4b6: a fully complimentary stay is charged nothing. The stock ledger below still moves —
+    # the bottle physically left the fridge whether or not anyone paid for it.
+    booking = db.query(Booking).filter(Booking.booking_id == item.booking_id).first()
+    comped = booking is not None and getattr(booking, "comp_mode", "none") == "all"
 
     if data.client_ref:
         marker = f"[{data.client_ref}] {data.description}"
@@ -314,15 +373,17 @@ def minibar_restock(data: MinibarRestockRequest, db: Session = Depends(get_db),
             return {"charge_id": dup.id, "duplicate": True, "folio_id": folio.id,
                     "balance": float(folio.balance or 0)}
 
-    amount = round(data.qty * data.unit_price, 2)
+    amount = 0.0 if comped else round(data.qty * data.unit_price, 2)
     desc = f"[{data.client_ref}] {data.description}" if data.client_ref else data.description
-    charge = FolioCharge(
-        folio_id=folio.id, type="minibar", description=desc,
-        qty=data.qty, unit_price=data.unit_price, amount=amount,
-        gst_percent=data.gst_percent, posted_by=_resolve_user_id(db, user),
-    )
-    db.add(charge)
-    _recompute(db, folio)   # flushes, so charge.id is available for the movement link below
+    charge = None
+    if not comped:
+        charge = FolioCharge(
+            folio_id=folio.id, type="minibar", description=desc,
+            qty=data.qty, unit_price=data.unit_price, amount=amount,
+            gst_percent=data.gst_percent, posted_by=_resolve_user_id(db, user),
+        )
+        db.add(charge)
+        _recompute(db, folio)   # flushes, so charge.id is available for the movement link below
 
     # Inventory (prompt 18c slice 8): if this minibar line names a stock item, record the
     # consumption on the stock ledger so the item's quantity decrements. Best-effort and
@@ -338,18 +399,23 @@ def minibar_restock(data: MinibarRestockRequest, db: Session = Depends(get_db),
         if stock_item is not None:
             mv = record_movement(db, stock_item, "consume", -abs(data.qty), user=user,
                                  reason=f"Minibar — room {data.room_id}",
-                                 folio_charge_id=charge.id,
-                                 client_ref=f"minibar_consume:{charge.id}", commit=False)
+                                 folio_charge_id=(charge.id if charge else None),
+                                 client_ref=(f"minibar_consume:{charge.id}" if charge
+                                             else f"minibar_comp:{item.booking_id}:{data.room_id}:"
+                                                  f"{(data.description or '').strip()}"),
+                                 commit=False)
             stock_item_id = stock_item.id
     except Exception as e:  # inventory is a soft add-on; never fail a folio post over it
         logger.warning(f"minibar stock consume skipped: {e}")
 
     db.commit()
     write_audit(db, user, "housekeeping.minibar_restock", "folio", folio.id,
-                after={"charge_id": charge.id, "room_id": data.room_id, "amount": amount,
+                after={"charge_id": (charge.id if charge else None), "room_id": data.room_id,
+                       "amount": amount, "complimentary": comped,
                        "description": data.description, "stock_item_id": stock_item_id},
                 client="housekeeper", commit=True)
-    return {"charge_id": charge.id, "duplicate": False, "folio_id": folio.id,
+    return {"charge_id": (charge.id if charge else None), "duplicate": False,
+            "folio_id": folio.id, "complimentary": comped,
             "amount": amount, "balance": float(folio.balance or 0),
             "stock_item_id": stock_item_id}
 

@@ -28,10 +28,13 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import (Booking, BookingItem, CardIssuance, CashShift, FolioCharge,
-                    FraudAlert, Guest, MaintenanceTicket, Payment, Room, RoomType,
-                    User, DayCloseSummary)
+                    FraudAlert, Guest, GuestRequest, MaintenanceTicket, MenuItem,
+                    Payment, Room, RoomType, User, DayCloseSummary, PAYMENT_METHODS)
+from schemas import OverstayConfigUpdate
+from utils.audit import write_audit
 from utils.auth_utils import require_admin
 from utils.settings import get_reports_config
+from services import ota_service
 
 logger = logging.getLogger(__name__)
 
@@ -39,8 +42,10 @@ router = APIRouter(prefix="/reports", tags=["Reports"])
 
 # Booking statuses that count as a real (non-cancelled) stay.
 _LIVE_STATUSES = ("confirmed", "checked_in", "checked_out")
-# OTA channels recognised today (prompt 05 booking_source vocab; prompt 17 adds the commission model).
-OTA_SOURCES = ("makemytrip", "goibibo", "booking_com", "agoda", "other_ota")
+# OTA channels: services.ota_service is the single authority (admin-editable `ota_source`
+# family since v3). This module used to keep its own copy of the tuple, which could silently
+# disagree with the one the commission maths uses — re-exported here only for back-compat.
+OTA_SOURCES = ota_service.OTA_SOURCES
 
 
 def get_db():
@@ -183,29 +188,87 @@ def _sum_charges(db, day, types=None, exclude=None):
     return float(q.scalar() or 0)
 
 
+def _room_service_filters(day=None, dfrom=None, dto=None):
+    """The room-service revenue predicate (v3 item 4): non-void folio lines carrying a menu
+    link. `menu_item_id` is written by services/room_service.post_to_folio and nowhere else,
+    so this is exactly the room-service sales — no description matching, and a voided line
+    drops out on its own."""
+    conds = [FolioCharge.void == False,          # noqa: E712
+             FolioCharge.menu_item_id.isnot(None)]
+    if day is not None:
+        conds.append(func.date(FolioCharge.posted_at) == day)
+    if dfrom is not None:
+        conds.append(func.date(FolioCharge.posted_at) >= dfrom)
+    if dto is not None:
+        conds.append(func.date(FolioCharge.posted_at) <= dto)
+    return conds
+
+
+def _room_service_revenue(db, day) -> float:
+    return float(db.query(func.coalesce(func.sum(FolioCharge.amount), 0))
+                 .filter(*_room_service_filters(day=day)).scalar() or 0)
+
+
 def sales_by_date(db, dfrom, dto):
     """Per-day recognised sales from non-void folio charges posted that day: room revenue,
     other revenue (food/minibar/laundry/extra_bed/misc), discounts (negative), gross, and the
-    GST split. Returns {rows, totals}."""
+    GST split. Returns {rows, totals}.
+
+    `room_service` (v3 item 4) is the slice of `other_revenue` that came from the room-service
+    menu — it is INCLUDED in other_revenue, not additional to it, so do not add the two.
+    """
     rows = []
     for day in _days(dfrom, dto):
         room_rev = round(_sum_charges(db, day, types=("room",)), 2)
         other_rev = round(_sum_charges(db, day, exclude=("room", "payment", "discount")), 2)
+        rs_rev = round(_room_service_revenue(db, day), 2)
         discount = round(_sum_charges(db, day, types=("discount",)), 2)  # negative
         _rows, taxable, cgst, sgst, gross = _gst_split(_charge_pairs(db, day))
         rows.append({"date": str(day), "room_revenue": room_rev, "other_revenue": other_rev,
+                     "room_service": rs_rev,
                      "discount": discount, "gross_sales": gross, "taxable": taxable,
-                     "cgst": cgst, "sgst": sgst})
+                     "cgst": cgst, "sgst": sgst,
+                     # v4b6 — see comp_room_value() below. NOT part of gross_sales.
+                     "comp_room_value": round(comp_room_value(db, day), 2)})
     totals = {
         "room_revenue": round(sum(r["room_revenue"] for r in rows), 2),
         "other_revenue": round(sum(r["other_revenue"] for r in rows), 2),
+        "room_service": round(sum(r["room_service"] for r in rows), 2),
         "discount": round(sum(r["discount"] for r in rows), 2),
         "gross_sales": round(sum(r["gross_sales"] for r in rows), 2),
         "taxable": round(sum(r["taxable"] for r in rows), 2),
         "cgst": round(sum(r["cgst"] for r in rows), 2),
         "sgst": round(sum(r["sgst"] for r in rows), 2),
+        "comp_room_value": round(sum(r["comp_room_value"] for r in rows), 2),
     }
     return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
+
+
+def comp_room_value(db, day) -> float:
+    """What was GIVEN AWAY on this business date (v4b6).
+
+    A complimentary stay posts no charges at all — suppression, not a 100% discount, because
+    posting a taxable line and discounting it away would create an output-tax liability on a
+    supply with no consideration. That keeps every GST figure honest, but it means the revenue
+    simply is not there, so ADR and RevPAR understate.
+
+    ⚠️ This number is reported ALONGSIDE the day's revenue and is never added into
+    `gross_sales`, `taxable` or the tax split. It exists purely to answer "how much did we comp
+    this month, and to whom?" — otherwise suppression is a blind spot.
+
+    Valued from `Booking.grand_total` (which a comp deliberately does not zero) pro-rated per
+    night across the stay, so a 3-night comp shows a third on each day rather than a lump.
+    """
+    total = 0.0
+    rows = (db.query(Booking)
+              .filter(Booking.comp_mode.in_(["all", "room"]),
+                      Booking.status.in_(["confirmed", "checked_in", "checked_out"]),
+                      Booking.check_in <= day, Booking.check_out > day)
+              .all())
+    for b in rows:
+        nights = max(1, (b.check_out - b.check_in).days)
+        total += float(b.grand_total or 0) / nights
+    return total
 
 
 def collections_summary(db, dfrom, dto):
@@ -236,6 +299,115 @@ def payments_by_day(db, dfrom, dto):
         })
     keys = ("cash", "card", "upi", "bank", "collected", "refunds", "net")
     totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
+    return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
+
+
+# =====================================================================
+# ROOM-SERVICE SALES (v3 item 4)
+# Both reports read FolioCharge, not the order payload, so they follow the same revenue-
+# recognition rule as every other report here (posted_at, non-void) and reconcile against
+# sales/daily's `room_service` column. An order that was placed but never delivered has no
+# folio line and correctly contributes nothing.
+# =====================================================================
+
+def room_service_by_date(db, dfrom, dto):
+    """Day-wise room-service sales: orders, items sold, gross, GST split, net."""
+    rows = []
+    for day in _days(dfrom, dto):
+        pairs = [(g, a) for g, a in
+                 db.query(FolioCharge.gst_percent, FolioCharge.amount)
+                 .filter(*_room_service_filters(day=day)).all()]
+        _r, taxable, cgst, sgst, gross = _gst_split(pairs)
+        items = float(db.query(func.coalesce(func.sum(FolioCharge.qty), 0))
+                      .filter(*_room_service_filters(day=day)).scalar() or 0)
+        # An order posts all its lines in one transaction and stores its FIRST charge id, so
+        # counting requests whose anchor charge landed today counts orders, not lines.
+        # The void filter is deliberately NOT applied here: an order that was delivered and
+        # then had a line voided still happened, and coupling the two would report "0 orders,
+        # Rs 120 of sales" whenever the voided line happened to be the first one. A wholly
+        # voided order therefore shows as 1 order with 0 gross — which is worth seeing.
+        day_charges = (db.query(FolioCharge.id)
+                       .filter(FolioCharge.menu_item_id.isnot(None),
+                               func.date(FolioCharge.posted_at) == day).subquery())
+        orders = int(db.query(func.count(GuestRequest.id))
+                     .filter(GuestRequest.folio_charge_id.in_(db.query(day_charges.c.id)))
+                     .scalar() or 0)
+        rows.append({"date": str(day), "orders": orders, "items": round(items, 2),
+                     "gross": gross, "taxable": taxable, "cgst": cgst, "sgst": sgst,
+                     "net": taxable})
+    keys = ("orders", "items", "gross", "taxable", "cgst", "sgst", "net")
+    totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
+    totals["orders"] = int(totals["orders"])
+    return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
+
+
+def room_service_by_item(db, dfrom, dto):
+    """Product-wise room-service sales: what actually sells, best first.
+
+    Grouped on the menu item itself, so renaming a dish keeps its history together. Items
+    deleted from the menu keep their sales (the FK is retained); a charge posted before
+    migration 027 has no link and is absent — run scripts/backfill_menu_item_id.py for those.
+    """
+    q = (db.query(MenuItem.id, MenuItem.name, MenuItem.category,
+                  func.coalesce(func.sum(FolioCharge.qty), 0),
+                  func.coalesce(func.sum(FolioCharge.amount), 0))
+         .join(FolioCharge, FolioCharge.menu_item_id == MenuItem.id)
+         .filter(*_room_service_filters(dfrom=dfrom, dto=dto))
+         .group_by(MenuItem.id, MenuItem.name, MenuItem.category)
+         .order_by(func.coalesce(func.sum(FolioCharge.amount), 0).desc()))
+    raw = q.all()
+    gross_total = round(sum(float(g or 0) for _i, _n, _c, _q, g in raw), 2)
+    rows = []
+    for item_id, name, category, qty, gross in raw:
+        qty = round(float(qty or 0), 2)
+        gross = round(float(gross or 0), 2)
+        rows.append({
+            "menu_item_id": item_id, "item": name, "category": category,
+            "qty": qty, "gross": gross,
+            "avg_price": round(gross / qty, 2) if qty else 0.0,
+            "share_percent": round(gross / gross_total * 100, 2) if gross_total else 0.0,
+        })
+    totals = {"qty": round(sum(r["qty"] for r in rows), 2), "gross": gross_total,
+              "share_percent": 100.0 if rows else 0.0, "items": len(rows)}
+    return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
+
+
+# =====================================================================
+# SHIFT-WISE PAYMENT SPLIT (v3 item 6)
+# =====================================================================
+
+def shift_payments_data(db, dfrom, dto):
+    """Per-shift collections split by payment method, alongside the drawer reconciliation.
+
+    Cash appears in BOTH halves and means different things: under `cash` it is money taken by
+    that method; under `counted_cash`/`variance` it is what was physically in the drawer. The
+    split comes from routers/cash_shift._totals_by_method, so this report and the printed
+    shift receipt can never disagree.
+    """
+    from routers.cash_shift import _serialize
+    shifts = (db.query(CashShift)
+              .filter(func.date(CashShift.opened_at) >= dfrom,
+                      func.date(CashShift.opened_at) <= dto)
+              .order_by(CashShift.opened_at, CashShift.id).all())
+    rows = []
+    for s in shifts:
+        d = _serialize(db, s)
+        bm = d.get("by_method") or {}
+        rows.append({
+            "shift_id": d["id"], "station_id": d["station_id"], "status": d["status"],
+            "staff_name": d["staff_name"],
+            "opened_at": d["opened_at"], "closed_at": d["closed_at"],
+            **{m: bm.get(m, 0.0) for m in PAYMENT_METHODS},
+            "total_collected": bm.get("total_collected", 0.0),
+            "refunds": bm.get("refunds", 0.0),
+            "net_collected": bm.get("net_collected", 0.0),
+            "counted_cash": d["counted_cash"],
+            "variance": d["variance"],
+        })
+    money_keys = tuple(PAYMENT_METHODS) + ("total_collected", "refunds", "net_collected")
+    totals = {k: round(sum(float(r[k] or 0) for r in rows), 2) for k in money_keys}
+    totals["variance"] = round(sum(float(r["variance"] or 0) for r in rows), 2)
+    totals["shifts"] = len(rows)
     return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
 
 
@@ -318,21 +490,34 @@ def ota_data(db, dfrom, dto):
     treated as a full payout (0 commission). Settlement matching (expected vs actual bank payouts)
     lives at GET /ota/reconciliation."""
     rows = []
-    for src in OTA_SOURCES:
+    for src in ota_service.ota_sources(db):
+        # v4b2: commission is owed on what the CHANNEL SOLD, which stopped being
+        # total_amount the moment a stay could be extended at the desk. Extra nights sold
+        # face-to-face are a DIRECT hotel sale — the guest pays us, the OTA is owed nothing.
+        # Deriving commission_est from revenue would have reported the entire extension as
+        # commission payable. prepaid_amount is the OTA gross and an extension never touches
+        # it; NULLIF(...,0) makes pre-028 rows fall back to total_amount, so historic figures
+        # are unchanged. room_revenue stays the REAL revenue, extension included.
+        ota_basis = func.coalesce(func.nullif(Booking.prepaid_amount, 0), Booking.total_amount)
         q = db.query(
             func.count(Booking.booking_id),
             func.coalesce(func.sum(Booking.total_amount), 0),
             func.coalesce(func.sum(func.coalesce(Booking.ota_net_payout, Booking.total_amount)), 0),
+            func.coalesce(func.sum(ota_basis), 0),
         ).filter(Booking.booking_source == src, Booking.status.in_(_LIVE_STATUSES),
                  Booking.check_in >= dfrom, Booking.check_in <= dto)
-        count, revenue, net_payout = q.one()
+        count, revenue, net_payout, sold_via_ota = q.one()
         revenue = round(float(revenue or 0), 2)
         net_payout = round(float(net_payout or 0), 2)
+        sold_via_ota = round(float(sold_via_ota or 0), 2)
         rows.append({"ota": src, "bookings": int(count), "room_revenue": revenue,
-                     "commission_est": round(revenue - net_payout, 2),
+                     # what the channel sold, vs what the stay ended up being worth
+                     "sold_via_ota": sold_via_ota,
+                     "commission_est": round(max(0.0, sold_via_ota - net_payout), 2),
                      "net_payout": net_payout})
     totals = {"bookings": sum(r["bookings"] for r in rows),
               "room_revenue": round(sum(r["room_revenue"] for r in rows), 2),
+              "sold_via_ota": round(sum(r["sold_via_ota"] for r in rows), 2),
               "commission_est": round(sum(r["commission_est"] for r in rows), 2),
               "net_payout": round(sum(r["net_payout"] for r in rows), 2)}
     return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals,
@@ -605,14 +790,69 @@ def daily_sales_report(from_: str | None = Query(None, alias="from"), to: str | 
                        format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
     data = sales_by_date(db, dfrom, dto)
-    cols = ["Date", "Room Revenue", "Other Revenue", "Discount", "Gross Sales", "Taxable", "CGST", "SGST"]
-    rows = [[r["date"], r["room_revenue"], r["other_revenue"], r["discount"], r["gross_sales"],
-             r["taxable"], r["cgst"], r["sgst"]] for r in data["rows"]]
+    # "Room Service" is a breakdown OF "Other Revenue", not a further column of income —
+    # placed straight after it and labelled so, because summing the row would double-count.
+    cols = ["Date", "Room Revenue", "Other Revenue", "(of which Room Service)", "Discount",
+            "Gross Sales", "Taxable", "CGST", "SGST"]
+    rows = [[r["date"], r["room_revenue"], r["other_revenue"], r["room_service"], r["discount"],
+             r["gross_sales"], r["taxable"], r["cgst"], r["sgst"]] for r in data["rows"]]
     t = data["totals"]
-    totals = ["TOTAL", t["room_revenue"], t["other_revenue"], t["discount"], t["gross_sales"],
-              t["taxable"], t["cgst"], t["sgst"]]
+    totals = ["TOTAL", t["room_revenue"], t["other_revenue"], t["room_service"], t["discount"],
+              t["gross_sales"], t["taxable"], t["cgst"], t["sgst"]]
     return _export_or_json(format, data, title="Daily Sales Report", columns=cols, rows=rows,
                            totals_row=totals, meta=_meta(dfrom, dto), filename="daily_sales")
+
+
+@router.get("/room-service/daily", dependencies=[Depends(require_admin)])
+def room_service_daily_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                              format: str = Query("json"), db: Session = Depends(get_db)):
+    """Day-wise room-service sales (v3 item 4). Reconciles with the Room Service column on
+    the Daily Sales report — both read the same non-void, menu-linked folio lines."""
+    dfrom, dto = _range(from_, to)
+    data = room_service_by_date(db, dfrom, dto)
+    cols = ["Date", "Orders", "Items", "Gross", "Taxable", "CGST", "SGST"]
+    rows = [[r["date"], r["orders"], r["items"], r["gross"], r["taxable"], r["cgst"], r["sgst"]]
+            for r in data["rows"]]
+    t = data["totals"]
+    totals = ["TOTAL", t["orders"], t["items"], t["gross"], t["taxable"], t["cgst"], t["sgst"]]
+    return _export_or_json(format, data, title="Room Service Sales — Day-wise", columns=cols,
+                           rows=rows, totals_row=totals, meta=_meta(dfrom, dto),
+                           filename="room_service_daily")
+
+
+@router.get("/room-service/items", dependencies=[Depends(require_admin)])
+def room_service_items_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                              format: str = Query("json"), db: Session = Depends(get_db)):
+    """Product-wise room-service sales (v3 item 4) — which dishes sell, best first."""
+    dfrom, dto = _range(from_, to)
+    data = room_service_by_item(db, dfrom, dto)
+    cols = ["Item", "Category", "Qty Sold", "Gross", "Avg Price", "% of RS Sales"]
+    rows = [[r["item"], r["category"], r["qty"], r["gross"], r["avg_price"], r["share_percent"]]
+            for r in data["rows"]]
+    t = data["totals"]
+    totals = ["TOTAL", "", t["qty"], t["gross"], "", t["share_percent"]]
+    return _export_or_json(format, data, title="Room Service Sales — Product-wise", columns=cols,
+                           rows=rows, totals_row=totals, meta=_meta(dfrom, dto),
+                           filename="room_service_items")
+
+
+@router.get("/shift-payments", dependencies=[Depends(require_admin)])
+def shift_payments_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                          format: str = Query("json"), db: Session = Depends(get_db)):
+    """Shift-wise collections split by payment method (v3 item 6). Shifts are selected by the
+    date they were OPENED, so an overnight shift reports under the day it started."""
+    dfrom, dto = _range(from_, to)
+    data = shift_payments_data(db, dfrom, dto)
+    cols = ["Shift", "Station", "Staff", "Opened", "Closed", "Cash", "Card", "UPI", "Bank",
+            "Collected", "Refunds", "Net", "Counted Cash", "Variance"]
+    rows = [[r["shift_id"], r["station_id"], r["staff_name"], r["opened_at"], r["closed_at"],
+             r["cash"], r["card"], r["upi"], r["bank"], r["total_collected"], r["refunds"],
+             r["net_collected"], r["counted_cash"], r["variance"]] for r in data["rows"]]
+    t = data["totals"]
+    totals = ["TOTAL", "", "", "", "", t["cash"], t["card"], t["upi"], t["bank"],
+              t["total_collected"], t["refunds"], t["net_collected"], "", t["variance"]]
+    return _export_or_json(format, data, title="Shift-wise Payment Split", columns=cols, rows=rows,
+                           totals_row=totals, meta=_meta(dfrom, dto), filename="shift_payments")
 
 
 @router.get("/payments-daily", dependencies=[Depends(require_admin)])
@@ -791,13 +1031,27 @@ def owner_dashboard(db: Session = Depends(get_db)):
         open_alerts.append({"id": a.id, "type": a.type, "severity": a.severity,
                             "detected_at": a.detected_at.isoformat() if a.detected_at else None})
 
-    # Overdue = still checked in but the check-out date has already passed (should have left).
+    # Overdue = past the actual checkout MOMENT plus the grace window.
+    # v4b3: this used to be `check_out < today`, which in 24h mode flags a 22:00 check-in a
+    # full 22 hours early — a guest with hours left to run showed as overdue on the owner's
+    # dashboard. It now uses the same read-model the automatic biller does, so the dashboard,
+    # the desk board and the job can never disagree about who is overdue.
+    from services.overstay_billing import overstay_state
+    from utils.settings import get_overstay_config
+    ov_cfg = get_overstay_config(db)
     overdue = []
-    for b in (db.query(Booking).filter(Booking.status == "checked_in", Booking.check_out < today)
+    for b in (db.query(Booking).filter(Booking.status == "checked_in",
+                                       Booking.check_out <= today)
               .order_by(Booking.check_out).all()):
+        st = overstay_state(db, b, cfg=ov_cfg)
+        if not st["overdue"]:
+            continue
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
         overdue.append({"booking_id": b.booking_id, "guest_name": guest.name if guest else None,
-                        "check_out": str(b.check_out)})
+                        "check_out": str(b.check_out), "due_at": st["due_at"],
+                        "nights_overdue": st["nights_overdue"],
+                        "auto_charged_nights": st["auto_nights"],
+                        "auto_charged_amount": st["auto_amount"]})
 
     return {
         "date": str(today),
@@ -861,8 +1115,12 @@ def weekly_trends(db: Session = Depends(get_db)):
 
     # Open maintenance tickets by age bucket.
     buckets = {"0-2d": 0, "3-7d": 0, "8-30d": 0, "30d+": 0}
+    from routers.maintenance import TERMINAL_STATUSES   # local: routers import each other
+    # v4b8: `verified` no longer exists (migration 031 renamed it to `resolved`), and
+    # `work_done` is NOT closed — the job is finished but nobody has signed it off yet, so it
+    # belongs in this ageing report. One source of truth for what "done" means.
     open_tickets = db.query(MaintenanceTicket).filter(
-        MaintenanceTicket.status.notin_(("verified", "closed"))).all()
+        MaintenanceTicket.status.notin_(TERMINAL_STATUSES)).all()
     now = datetime.utcnow()
     for t in open_tickets:
         age_days = (now - t.created_at).days if t.created_at else 0
@@ -926,6 +1184,58 @@ def run_day_close(date_: str | None = Query(None, alias="date"), user=Depends(re
     return result
 
 
+@router.get("/overstay/config", dependencies=[Depends(require_admin)])
+def overstay_config(db: Session = Depends(get_db)):
+    """Automatic overstay-billing settings (v4b3)."""
+    from utils.settings import get_overstay_config
+    return get_overstay_config(db)
+
+
+@router.put("/overstay/config")
+def update_overstay_config(data: OverstayConfigUpdate, db: Session = Depends(get_db),
+                           user=Depends(require_admin)):
+    """Edit the overstay-billing settings. Audited — arming an unattended charge is exactly
+    the kind of change an owner should be able to see who made and when."""
+    from utils import settings as s
+    before = s.get_overstay_config(db)
+    changes = data.model_dump(exclude_unset=True)
+    if not changes:
+        return before
+    key_map = {
+        "enabled": s.OVERSTAY_ENABLED_KEY,
+        "grace_minutes": s.OVERSTAY_GRACE_KEY,
+        "sweep_interval_minutes": s.OVERSTAY_INTERVAL_KEY,
+        "max_auto_days": s.OVERSTAY_MAX_DAYS_KEY,
+    }
+    for field, value in changes.items():
+        key = key_map.get(field)
+        if not key:
+            continue
+        stored = ("true" if value else "false") if isinstance(value, bool) else str(value)
+        s.set_setting(db, key, stored, user=user, commit=False)
+    db.commit()
+    after = s.get_overstay_config(db)
+    write_audit(db, user, "settings.overstay_update", "app_settings", None,
+                before=before, after=after, client="web", commit=True)
+    # The interval is read once at startup, so a change to it needs a restart to take effect.
+    after["note"] = ("Interval changes apply after the next backend restart; the enabled "
+                     "flag and grace take effect on the very next sweep.")
+    return after
+
+
+@router.post("/overstay/run", dependencies=[Depends(require_admin)])
+def run_overstay_sweep(dry_run: bool = Query(True), db: Session = Depends(get_db)):
+    """Run the automatic overstay sweep now (v4b3).
+
+    **Defaults to a DRY RUN** — it reports who is past their checkout moment + grace and what
+    each would be charged, without touching anything. That is how the owner should watch this
+    for a week before arming `overstay_auto_charge_enabled`.
+
+    A dry run works even while auto-charge is switched off; a real run does not."""
+    from services.overstay_billing import sweep_overstays
+    return sweep_overstays(db, dry_run=dry_run, generated_by="manual")
+
+
 def _serialize_day_close(row: DayCloseSummary) -> dict:
     def _f(v):
         return float(v) if v is not None else None
@@ -936,6 +1246,8 @@ def _serialize_day_close(row: DayCloseSummary) -> dict:
         "room_revenue": _f(row.room_revenue), "other_revenue": _f(row.other_revenue),
         "total_sales": _f(row.total_sales), "taxable_total": _f(row.taxable_total),
         "cgst_total": _f(row.cgst_total), "sgst_total": _f(row.sgst_total),
+        # v4b6: given away, reported alongside the revenue above — never inside it.
+        "comp_room_value": _f(row.comp_room_value),
         "cash_collected": _f(row.cash_collected), "cash_expected": _f(row.cash_expected),
         "cash_variance": _f(row.cash_variance),
         "arrivals": row.arrivals, "departures": row.departures, "open_alerts": row.open_alerts,

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from "react";
 import { getRoomTypes } from "../../api/roomTypes";
 import ImageWithSpinner from "../../components/ImageWithSpinner";
+import OffersBanner from "../../components/OffersBanner";
 
 import doubleOrdinary from "./images/rooms/double-ordinary.png";
 import doubleDeluxe from "./images/rooms/double-deluxe.png";
@@ -135,6 +136,9 @@ const Rooms = () => {
           Discover our carefully curated selection of comfortable and luxurious rooms
         </p>
       </div>
+
+      {/* ================= CURRENT OFFERS ================= */}
+      <OffersBanner />
 
       {/* ================= ROOM LIST ================= */}
       <div className="grid md:grid-cols-2 gap-10 max-w-6xl mx-auto">

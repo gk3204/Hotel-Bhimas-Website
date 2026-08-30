@@ -1,10 +1,13 @@
 """Maintenance ticket endpoints (prompt 13).
 
 Tickets are raisable by housekeeping/reception/admin (and guests via WhatsApp in prompt 15;
-room_id is optional so common areas work). An admin/supervisor assigns a ticket to a
-`maintenance` user (electrician/plumber/AC tech...), who tracks it
-in_progress -> awaiting_parts -> resolved and lists the required parts (ticket_items).
-A ticket only reaches 'verified' (its terminal/closed state) after supervisor verification.
+room_id is optional so common areas work). An admin/housekeeper assigns a ticket to a
+`maintenance` user (electrician/plumber/AC tech...) — or, from v4b8, the ticket auto-assigns to
+the technician designated in Settings — who tracks it in_progress -> awaiting_parts ->
+work_done and lists the required parts (ticket_items).
+A ticket only reaches 'resolved' (its terminal state) once a housekeeper/admin signs the work
+off; the technician's own terminal step is 'work_done'. `verified_by` / `verified_at` record
+that sign-off, kept under their original column names.
 Admin approves items; a purchased item can post to `expenses` (prompt 12) so parts spend
 hits the shift ledger + P&L.
 
@@ -16,6 +19,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
@@ -34,8 +38,46 @@ router = APIRouter(prefix="/maintenance", tags=["Maintenance"])
 
 # Interim overdue thresholds (days open) by priority; WhatsApp escalation = prompt 15.
 OVERDUE_DAYS = {"urgent": 1, "high": 2, "normal": 4, "low": 7}
-# A ticket is "closed" (no more work) once verified.
-TERMINAL_STATUSES = ("verified", "closed")
+# v4b8 lifecycle: open -> assigned -> in_progress | awaiting_parts -> work_done -> resolved.
+# The technician marks WORK_DONE; only the sign-off (POST /verify) marks it RESOLVED, which is
+# terminal. Before this, a technician could call their own job resolved.
+TERMINAL_STATUSES = ("resolved", "closed")
+def _default_assignee(db):
+    """v4b8: the technician every new ticket is handed to automatically.
+
+    The owner chose ONE designated person over round-robin — a small hotel has one maintenance
+    man, and "whose job is it?" should never be a question. Falls back to unassigned (and the
+    existing self-claim button) when unset, when the user is gone, deactivated, or is no longer
+    a maintenance user. ⚠️ Never raises: a bad setting must not stop a ticket being raised.
+    """
+    try:
+        from utils.settings import get_backoffice_config
+        uid = get_backoffice_config(db).get("maintenance_default_assignee_id") or 0
+        if not uid:
+            return None
+        u = db.query(User).filter(User.user_id == uid).first()
+        if u and u.role == "maintenance" and getattr(u, "is_active", True) is not False:
+            return u.user_id
+        logger.warning(f"maintenance default assignee {uid} is not an active maintenance user "
+                       f"— leaving the ticket unassigned")
+    except Exception as e:
+        logger.warning(f"maintenance default assignee lookup failed: {e}")
+    return None
+
+
+def _auto_assign(db) -> dict:
+    """The status/assignee kwargs for a NEW ticket (v4b8).
+
+    With a designated technician configured, a ticket is born ASSIGNED to them — the owner's
+    point being that "whose job is it?" should never be a question. Without one it is born
+    `open` and unassigned exactly as before, and the self-claim button still works.
+    """
+    uid = _default_assignee(db)
+    if uid:
+        return {"status": "assigned", "assignee": uid, "assigned_at": datetime.utcnow()}
+    return {"status": "open"}
+
+
 # role -> ticket source (source vocab: guest|reception|housekeeping|admin)
 _ROLE_SOURCE = {"admin": "admin", "reception": "reception",
                 "housekeeper": "housekeeping", "maintenance": "housekeeping"}
@@ -65,7 +107,7 @@ def _age_days(t: MaintenanceTicket) -> int:
 
 
 def _is_overdue(t: MaintenanceTicket) -> bool:
-    if t.status in TERMINAL_STATUSES or t.status == "resolved":
+    if t.status in TERMINAL_STATUSES or t.status == "work_done":
         return False
     return _age_days(t) > OVERDUE_DAYS.get(t.priority, 4)
 
@@ -128,7 +170,7 @@ def _raise_ac_ticket(db: Session, booking_id, room, *, turning_on: bool, commit=
         # Turning the AC ON is guest comfort and blocks the stay starting well; turning it
         # OFF is energy saving on an empty room, so it does not need to jump the queue.
         priority="high" if turning_on else "normal",
-        status="open", booking_id=booking_id,
+        **_auto_assign(db), booking_id=booking_id,
         source="reception", client_ref=client_ref,
     )
     db.add(t)
@@ -163,7 +205,7 @@ def create_guest_ticket(db: Session, issue: str, booking_id=None, room_id=None,
             return dup
     t = MaintenanceTicket(
         room_id=room_id, category=category, issue=(issue or "Guest complaint")[:500],
-        priority=priority, status="open", booking_id=booking_id, source="guest",
+        priority=priority, **_auto_assign(db), booking_id=booking_id, source="guest",
         client_ref=client_ref,
     )
     db.add(t)
@@ -181,7 +223,7 @@ def create_guest_ticket(db: Session, issue: str, booking_id=None, room_id=None,
 @router.post("/tickets")
 def create_ticket(data: MaintenanceTicketCreate,
                   db: Session = Depends(get_db),
-                  user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance", "supervisor"))):
+                  user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance"))):
     """Raise a ticket. Source is derived from the caller's role."""
     if data.client_ref:
         dup = db.query(MaintenanceTicket).filter(MaintenanceTicket.client_ref == data.client_ref).first()
@@ -191,10 +233,11 @@ def create_ticket(data: MaintenanceTicketCreate,
         if not db.query(Room).filter(Room.room_id == data.room_id).first():
             raise HTTPException(status_code=404, detail="Room not found")
     category = validate_category(db, "maintenance", data.category)   # against the editable list (F-A)
+    priority = validate_category(db, "priority", data.priority)      # editable list (v3 item 2)
 
     t = MaintenanceTicket(
         room_id=data.room_id, area=data.area, category=category, issue=data.issue,
-        priority=data.priority, status="open", booking_id=data.booking_id,
+        priority=priority, **_auto_assign(db), booking_id=data.booking_id,
         source=_ROLE_SOURCE.get(user.get("role"), "reception"),
         photo_url=data.photo_ref, raised_by=_resolve_user_id(db, user),
         client_ref=data.client_ref,
@@ -213,11 +256,15 @@ def create_ticket(data: MaintenanceTicketCreate,
 def list_tickets(status: str = Query(None), category: str = Query(None),
                  assignee: int = Query(None), overdue: bool = Query(False),
                  db: Session = Depends(get_db),
-                 user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance", "supervisor"))):
+                 user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance"))):
     """List tickets with filters. A `maintenance` user sees only their own assigned tickets."""
     q = db.query(MaintenanceTicket)
     if user.get("role") == "maintenance":
-        q = q.filter(MaintenanceTicket.assignee == _resolve_user_id(db, user))
+        # A technician sees their OWN assigned tickets PLUS unassigned ones they can self-claim.
+        # Without the unassigned half, an open job never reached the staff app and the "Claim this
+        # job" button could never appear.
+        me = _resolve_user_id(db, user)
+        q = q.filter(or_(MaintenanceTicket.assignee == me, MaintenanceTicket.assignee.is_(None)))
     if status:
         q = q.filter(MaintenanceTicket.status == status)
     if category:
@@ -238,7 +285,7 @@ def list_tickets(status: str = Query(None), category: str = Query(None),
 
 @router.get("/tickets/{ticket_id}")
 def get_ticket(ticket_id: int, db: Session = Depends(get_db),
-               user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance", "supervisor"))):
+               user=Depends(require_roles("admin", "reception", "housekeeper", "maintenance"))):
     t = _get_ticket(db, ticket_id)
     if user.get("role") == "maintenance" and t.assignee != _resolve_user_id(db, user):
         raise HTTPException(status_code=403, detail="Not your ticket")
@@ -319,9 +366,10 @@ def claim_ticket(ticket_id: int, db: Session = Depends(get_db),
 @router.post("/tickets/{ticket_id}/status")
 def update_status(ticket_id: int, data: TicketStatusUpdate, db: Session = Depends(get_db),
                   user=Depends(require_maintenance_or_admin)):
-    """Assignee advances the ticket (in_progress|awaiting_parts|resolved). Every transition
-    is timestamped + audited. A maintenance user may only update their own ticket, and cannot
-    self-close (verification is admin-only)."""
+    """Assignee advances the ticket (in_progress | awaiting_parts | work_done). Every
+    transition is timestamped + audited. A maintenance user may only update their own ticket.
+    v4b8: their last step is WORK_DONE — `resolved` belongs to the sign-off, so a technician
+    still cannot close their own job."""
     t = _get_ticket(db, ticket_id)
     me = _resolve_user_id(db, user)
     if user.get("role") == "maintenance" and t.assignee != me:
@@ -332,10 +380,18 @@ def update_status(ticket_id: int, data: TicketStatusUpdate, db: Session = Depend
         raise HTTPException(status_code=409, detail=f"Ticket is {t.status}")
     before = t.status
     t.status = data.status
-    if data.status == "resolved":
+    if data.status == "work_done":
+        # `resolved_at` still records when the WORK finished; the sign-off has verified_at.
         t.resolved_at = datetime.utcnow()
         if data.note:
             t.resolution_notes = data.note
+        # The auto-raised "turn on/off AC" task (client_ref 'ac-…') is a trivial, self-evident job
+        # that does NOT need a housekeeper sign-off — marking it done closes it outright. Every
+        # other ticket still stops at work_done for the verify step.
+        if (t.client_ref or "").startswith("ac-"):
+            t.status = "resolved"
+            t.verified_by = me
+            t.verified_at = datetime.utcnow()
     db.commit()
     write_audit(db, user, "maintenance.status", "maintenance_ticket", t.id,
                 before={"status": before}, after={"status": t.status, "note": data.note},
@@ -346,19 +402,24 @@ def update_status(ticket_id: int, data: TicketStatusUpdate, db: Session = Depend
 @router.post("/tickets/{ticket_id}/verify")
 def verify_ticket(ticket_id: int, data: TicketVerifyRequest, db: Session = Depends(get_db),
                   user=Depends(require_supervisor_or_admin)):
-    """Supervisor/admin verifies a resolved ticket -> verified (terminal/closed)."""
+    """Housekeeper/admin signs a finished job off -> RESOLVED (terminal).
+
+    v4b8: this is the step that resolves a ticket. The technician marks `work_done`; the
+    sign-off here is what closes it, so nobody approves their own work."""
     t = _get_ticket(db, ticket_id)
-    if t.status != "resolved":
-        raise HTTPException(status_code=409, detail="Only a resolved ticket can be verified")
-    t.status = "verified"
+    if t.status != "work_done":
+        raise HTTPException(
+            status_code=409,
+            detail="Only a ticket the technician has marked 'work done' can be signed off")
+    t.status = "resolved"
     t.verified_by = _resolve_user_id(db, user)
     t.verified_at = datetime.utcnow()
     if data.resolution_notes:
         t.resolution_notes = data.resolution_notes
     db.commit()
     write_audit(db, user, "maintenance.verify", "maintenance_ticket", t.id,
-                after={"status": "verified", "verified_by": t.verified_by}, client="web", commit=True)
-    logger.info(f"✅ Ticket #{t.id} verified & closed")
+                after={"status": "resolved", "verified_by": t.verified_by}, client="web", commit=True)
+    logger.info(f"✅ Ticket #{t.id} signed off & resolved")
     return _ticket_dict(db, t)
 
 

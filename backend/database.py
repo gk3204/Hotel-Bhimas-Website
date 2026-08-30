@@ -7,7 +7,10 @@ from dotenv import load_dotenv
 
 load_dotenv()  # load .env
 
-# Support both formats: DATABASE_URL (Fly.io) and individual variables (local dev)
+# Support both formats: DATABASE_URL (Railway supplies this) and individual variables
+# (local dev). NOTE: we deploy on RAILWAY — scalar config such as TZ goes in the Railway
+# service variables, not into a file. A stale fly.toml from an earlier hosting plan was
+# removed in v4b0; don't reintroduce one.
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not DATABASE_URL:

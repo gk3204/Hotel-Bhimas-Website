@@ -711,6 +711,14 @@ def generate_registration_slip_pdf(slip_data):
 
     # Occupant roster (FE-3): list every guest with masked ID when there is more than the lead.
     guests = slip_data.get("guests") or []
+    _ad = slip_data.get("adults")
+    if _ad is not None:
+        _ch = slip_data.get("children") or 0
+        elements.append(Paragraph(
+            f"<b>Occupancy:</b> {_ad} adult{'s' if _ad != 1 else ''}"
+            f"{f', {_ch} child' + ('ren' if _ch != 1 else '') if _ch else ''}",
+            styles["Normal"]))
+        elements.append(Spacer(1, 0.08 * inch))
     if len(guests) > 1:
         elements.append(Paragraph("<b>Guests in the room</b>", styles["Normal"]))
         elements.append(Spacer(1, 0.06 * inch))
@@ -721,7 +729,11 @@ def generate_registration_slip_pdf(slip_data):
                 (g.get("name") or "") + ("  (primary)" if g.get("is_primary") else ""),
                 (g.get("id_type") or "").replace("_", " ").title() or "—",
                 g.get("id_number_masked") or "—",
-                "Yes" if g.get("has_scan") else "—",
+                # Front and back are captured as two flatbed passes (migration 026); the slip
+                # says which sides are actually on file, so a missing reverse is visible.
+                ("Front+Back" if g.get("has_scan") and g.get("has_scan_back")
+                 else "Back" if g.get("has_scan_back")
+                 else "Front" if g.get("has_scan") else "—"),
             ])
         g_table = Table(g_rows, colWidths=[24, 190, 90, 100, 60])
         g_table.setStyle(TableStyle([
@@ -938,7 +950,10 @@ def generate_shift_report_pdf(shift_data):
             id, station_id, period, status, staff_name, closed_by_name, opened_at, closed_at,
             opening_balance, collections_cash, expenses_total, payouts_total, expected_cash,
             counted_cash, variance, close_note, denominations ({"500": 3, ...} or None),
-            expenses ([{category, description, amount, created_at}])
+            expenses ([{category, description, amount, created_at}]),
+            by_method ({cash, card, upi, bank, total_collected, refunds, net_collected}) —
+              collections split by payment method; distinct from the cash-drawer figures
+              above, which count only what physically sits in the drawer.
     Returns the generated file path (temp dir).
     """
     import tempfile
@@ -1043,6 +1058,34 @@ def generate_shift_report_pdf(shift_data):
     ]))
     elements.append(var_table)
     elements.append(Spacer(1, 0.25 * inch))
+
+    # Collections by method (v3 item 6). The reconciliation block above is the CASH DRAWER —
+    # it deliberately ignores card/UPI, which never enter the drawer. This block is what the
+    # owner reconciles against the bank/settlement statements, so the two must not be merged.
+    by_method = shift_data.get("by_method") or {}
+    if by_method:
+        from models import PAYMENT_METHODS      # local, to keep this module import-light
+        elements.append(Paragraph("<b>Collections by payment method</b>", styles["Heading2"]))
+        method_rows = [["Method", "Amount"]]
+        for m in PAYMENT_METHODS:
+            method_rows.append([m.upper(), _rs(by_method.get(m))])
+        method_rows.append(["Total collected", _rs(by_method.get("total_collected"))])
+        if float(by_method.get("refunds") or 0):
+            method_rows.append(["- Refunds paid out", _rs(by_method.get("refunds"))])
+            method_rows.append(["Net collected", _rs(by_method.get("net_collected"))])
+        method_table = Table(method_rows, colWidths=[300, 140])
+        method_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f5f5f5")),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
+            ('LINEABOVE', (0, len(PAYMENT_METHODS) + 1), (-1, len(PAYMENT_METHODS) + 1), 0.7, colors.black),
+            ('FONTNAME', (0, len(PAYMENT_METHODS) + 1), (-1, len(PAYMENT_METHODS) + 1), 'Helvetica-Bold'),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
+            ('TOPPADDING', (0, 0), (-1, -1), 3),
+            ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
+        ]))
+        elements.append(method_table)
+        elements.append(Spacer(1, 0.25 * inch))
 
     # Expenses breakdown
     expenses = shift_data.get("expenses") or []

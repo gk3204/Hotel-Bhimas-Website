@@ -12,8 +12,9 @@ import {
   Stat, Tabs, fmtDate, inputCls, money, useToast,
 } from "../../components/admin/BackofficeUI";
 
-// Complaints already resolved/verified/closed can't be bulk-resolved again.
-const DONE_STATUSES = ["resolved", "verified", "closed"];
+// Complaints already resolved/closed can't be bulk-resolved again. (`verified` was renamed
+// to `resolved` by migration 031 — v4b8 — and no longer exists.)
+const DONE_STATUSES = ["resolved", "closed"];
 const isResolvable = (c) => !DONE_STATUSES.includes(c.status);
 
 const TABS = [
@@ -26,14 +27,14 @@ const TABS = [
 const PRIORITY_TONE = { urgent: "danger", high: "warn", normal: "info", low: "neutral" };
 const STATUS_TONE = {
   open: "warn", assigned: "info", in_progress: "info", awaiting_parts: "warn",
-  resolved: "ok", verified: "ok", closed: "neutral",
+  resolved: "ok", work_done: "warn", closed: "neutral",
 };
 
 function StatusChip({ c }) {
   return <Chip tone={STATUS_TONE[c.status] || "neutral"}>{c.status.replace(/_/g, " ")}</Chip>;
 }
 function SlaChip({ c }) {
-  if (c.status === "resolved" || c.status === "verified" || c.status === "closed")
+  if (DONE_STATUSES.includes(c.status))
     return <Chip tone="ok">met</Chip>;
   if (c.resolve_breached) return <Chip tone="danger">resolve overdue</Chip>;
   if (c.response_breached) return <Chip tone="warn">response overdue</Chip>;
@@ -262,7 +263,7 @@ function ComplaintDetail({ id, onClose, showToast, onChanged }) {
     setComp({ amount: "", reason: "" });
   };
 
-  const isOpen = c && !["resolved", "verified", "closed"].includes(c.status);
+  const isOpen = c && !DONE_STATUSES.includes(c.status);
 
   return (
     <Modal title={c ? `Complaint #${c.id}` : "Complaint"} onClose={onClose} wide>

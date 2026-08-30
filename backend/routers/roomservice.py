@@ -21,11 +21,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import GuestRequest, MenuItem
-from schemas import DeskRoomServiceOrder
+from models import Booking, GuestRequest, MenuItem
+from schemas import DeskRoomServiceOrder, RoomServiceCancel
 from services import room_service
+from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_roomservice
+from utils.owner_otp import consume_otp
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +42,33 @@ def get_db():
         db.close()
 
 
-def _get_order(db: Session, order_id: int) -> GuestRequest:
+def _get_order(db: Session, order_id: int, *, require_in_house: bool = True) -> GuestRequest:
+    """Load a room-service order.
+
+    v4b5 (R4): **nothing may be done to an order once the guest has checked out.** Only
+    `create_desk_order` checked the stay before; deliver / cancel / kot did not — so a
+    post-checkout deliver failed deep inside `post_to_folio` with an incidental
+    *"folio is settled"* 409 and left the order stranded in `acknowledged`. The stay is the
+    real precondition, so it is checked here, once, for every route.
+
+    `require_in_house=False` is for reprint-style reads that should still work on a finished
+    stay (the guest's bill copy).
+    """
     r = (db.query(GuestRequest)
          .filter(GuestRequest.id == order_id,
                  GuestRequest.type == "room_service").first())
     if not r:
         raise HTTPException(status_code=404, detail="Order not found")
+    if require_in_house:
+        booking = (db.query(Booking).filter(Booking.booking_id == r.booking_id).first()
+                   if r.booking_id else None)
+        if not booking:
+            raise HTTPException(status_code=409, detail="That order has no stay attached")
+        if booking.status != "checked_in":
+            raise HTTPException(
+                status_code=409,
+                detail=("That guest has already checked out — room-service orders can no "
+                        "longer be changed. Correct it on the folio instead."))
     return r
 
 
@@ -106,9 +129,38 @@ def create_order(data: DeskRoomServiceOrder, db: Session = Depends(get_db),
                                            client_ref=data.client_ref)
         write_audit(db, user, "room_service.order", "guest_request", r.id,
                     after={"kot_no": r.kot_no, "booking_id": r.booking_id,
-                           "amount": float(r.amount or 0)},
+                           "amount": float(r.amount or 0),
+                           "deliver_now": bool(data.deliver_now)},
                     client="tablet", commit=True)
-        return _order_dict(db, r)
+
+        out = _order_dict(db, r)
+
+        # v4b5 (R1): ONE press = order + kitchen docket + charge + guest bill.
+        # The owner's decision: for an order STAFF take, the two-step "place, then deliver
+        # later" dance was pure friction — they are standing at the counter with the guest.
+        # Both documents come back in this one response so the client prints twice without a
+        # second round trip.
+        # ⚠️ Guest QR-portal orders deliberately keep their separate Deliver: the GUEST placed
+        # those, so a human still has to confirm the food reached the room before it is billed.
+        out["kot"] = room_service.kot_payload(db, r)
+        out["kot"]["reprint"] = False
+        if data.deliver_now:
+            room_service.post_to_folio(db, r, user)
+            r.status = "completed"
+            r.handled_by = _resolve_user_id(db, user)
+            r.updated_at = datetime.utcnow()
+            room_service.mark_printed(db, r, kot=True, bill=True)
+            db.commit()
+            db.refresh(r)
+            write_audit(db, user, "room_service.deliver", "guest_request", r.id,
+                        after={"kot_no": r.kot_no, "folio_charge_id": r.folio_charge_id,
+                               "amount": float(r.amount or 0), "one_shot": True},
+                        client="tablet", commit=True)
+            out = _order_dict(db, r)
+            out["kot"] = room_service.kot_payload(db, r)
+            out["kot"]["reprint"] = False
+            out["bill"] = room_service.bill_payload(db, r)
+        return out
     except HTTPException:
         raise
     except Exception as e:
@@ -169,8 +221,13 @@ def deliver_order(order_id: int, db: Session = Depends(get_db),
 def get_bill(order_id: int, mark: bool = Query(False),
              db: Session = Depends(get_db), user=Depends(require_roomservice)):
     """The guest's copy of a delivered order. NOT a tax invoice — the stay's GST invoice at
-    checkout is, and these lines are already part of it."""
-    r = _get_order(db, order_id)
+    checkout is, and these lines are already part of it.
+
+    ⚠️ Deliberately readable AFTER checkout (`require_in_house=False`). This is the one
+    room-service route that changes nothing: a guest asking for another copy of last night's
+    docket on their way out must not be told the stay is closed. Everything that MUTATES an
+    order is locked once they check out."""
+    r = _get_order(db, order_id, require_in_house=False)
     payload = room_service.bill_payload(db, r)
     payload["reprint"] = bool(r.printed_bill_at)
     if mark:
@@ -179,20 +236,36 @@ def get_bill(order_id: int, mark: bool = Query(False),
 
 
 @router.post("/orders/{order_id}/cancel")
-def cancel_order(order_id: int, db: Session = Depends(get_db),
+def cancel_order(order_id: int, data: RoomServiceCancel, db: Session = Depends(get_db),
                  user=Depends(require_roomservice)):
     """Cancel an order that hasn't been delivered. A delivered order is NOT cancellable here —
     its charges are on the folio, and reversing those is a void (reason + audit) on the folio
-    itself, not a quiet delete."""
+    itself, not a quiet delete.
+
+    v4b5 (R5): this was the weakest gate in the module — no reason, no role escalation, no
+    approval, so any tablet login could silently dismiss an order that already had a KOT
+    number against it. It now needs a **reason** and, when the gate is armed, an **owner
+    approval code**.
+    """
     r = _get_order(db, order_id)
     if r.status == "completed":
         raise HTTPException(
             status_code=409,
             detail="That order was already delivered and billed — void the folio line instead")
+    if r.status == "dismissed":
+        raise HTTPException(status_code=409, detail="That order is already cancelled")
+
+    if app_settings.get_fraud_config(db).get("rs_cancel_otp_required"):
+        consume_otp(db, data.owner_otp_id, data.owner_otp_code, "room_service_cancel", user)
+
     r.status = "dismissed"
     r.handled_by = _resolve_user_id(db, user)
     r.updated_at = datetime.utcnow()
     db.commit()
     write_audit(db, user, "room_service.cancel", "guest_request", r.id,
-                after={"kot_no": r.kot_no}, client="tablet", commit=True)
+                after={"kot_no": r.kot_no, "reason": data.reason,
+                       "amount": float(r.amount or 0),
+                       "kot_printed": bool(r.printed_kot_at),
+                       "otp_id": data.owner_otp_id},
+                client="tablet", commit=True)
     return _order_dict(db, r)

@@ -1,5 +1,5 @@
 from typing import List, Optional
-from pydantic import BaseModel, Field, EmailStr, field_validator
+from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
 from datetime import date, time, datetime
 
 # Editable category families (F-A) accept any lowercase slug here; the fixed enum-regexes
@@ -10,7 +10,7 @@ CATEGORY_SLUG_RE = "^[a-z0-9_]{2,40}$"
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8, max_length=100)
-    role: str = Field(..., pattern="^(admin|reception|housekeeper|maintenance|supervisor|roomservice|user)$")
+    role: str = Field(..., pattern="^(admin|reception|housekeeper|maintenance|roomservice|user)$")
 
     @field_validator('username')
     @classmethod
@@ -22,7 +22,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     password: Optional[str] = Field(None, min_length=8, max_length=100)
-    role: Optional[str] = Field(None, pattern="^(admin|reception|housekeeper|maintenance|supervisor|roomservice|user)$")
+    role: Optional[str] = Field(None, pattern="^(admin|reception|housekeeper|maintenance|roomservice|user)$")
 
 
 class UserResponse(BaseModel):
@@ -77,6 +77,9 @@ class RoomCreate(BaseModel):
     floor: int = Field(default=1, ge=1, le=99)
     max_cards: int = Field(default=4, ge=1, le=20)
     lock_no: Optional[str] = Field(None, max_length=20)
+    # v4b7: a second type this physical room may be sold as (Room 47 = Triple A/C by default,
+    # also lettable as Triple Non-A/C). Only used when the booked type has run out.
+    alt_room_type_id: Optional[int] = Field(None, ge=1)
     is_active: bool = Field(default=True)
     status: Optional[str] = Field(
         default="vacant",
@@ -91,6 +94,9 @@ class RoomUpdate(BaseModel):
     floor: Optional[int] = Field(None, ge=1, le=99)
     max_cards: Optional[int] = Field(None, ge=1, le=20)
     lock_no: Optional[str] = Field(None, max_length=20)
+    # v4b7. ge=0 rather than ge=1 deliberately: in this PATCH-style update `null` means
+    # "leave it alone", so **0** is how the admin screen CLEARS an alternate that was set.
+    alt_room_type_id: Optional[int] = Field(None, ge=0)
     is_active: Optional[bool] = None
     status: Optional[str] = Field(
         None, pattern="^(vacant|occupied|cleaning|inspected|maintenance|blocked)$"
@@ -118,6 +124,9 @@ class BookingCreate(BaseModel):
     check_in: date
     check_in_time: time  # Required: guest's expected arrival time ("HH:MM")
     check_out: date
+    # Occupancy: adults count against the rooms' max_occupancy; children are separate.
+    adults: int = Field(1, ge=1, le=40)
+    children: int = Field(0, ge=0, le=40)
     booking_source: str = Field("online", pattern="^(online|frontdesk|website)$")
 
     @field_validator('check_out')
@@ -137,15 +146,27 @@ class DeskBookingCreate(BaseModel):
     check_in: date
     check_in_time: time
     check_out: date
-    booking_source: str = Field(
-        "walk_in",
-        pattern="^(walk_in|frontdesk|agent|makemytrip|goibibo|booking_com|agoda|other_ota|other)$",
-    )
+    # Occupancy: total adults must be <= combined max_occupancy of the rooms booked (checked at
+    # the endpoint); children are separate.
+    adults: int = Field(1, ge=1, le=40)
+    children: int = Field(0, ge=0, le=40)
+    # Complimentary at booking (desk only). `none` = normal. Setting all/room requires a reason
+    # and the owner OTP (consumed at the endpoint); reuses the v4b6 suppression downstream.
+    comp_mode: str = Field("none", pattern="^(none|all|room)$")
+    comp_reason: Optional[str] = Field(None, max_length=200)
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+    # editable list (v3 item 2, family `booking_source`); membership checked at the endpoint
+    booking_source: str = Field("walk_in", pattern=CATEGORY_SLUG_RE)
     agent_id: Optional[int] = Field(None, gt=0)  # prompt 10: price from this travel agent's rate + accrue commission
     # prompt 17: OTA tracking — set when booking_source is an OTA channel. commission % defaults to
     # the per-OTA config (ota_channels) when not supplied; net payout is computed server-side.
     ota_booking_id: Optional[str] = Field(None, max_length=80)
     ota_commission_percent: Optional[float] = Field(None, ge=0, le=100)
+    # Actual commission (incl GST) + net payout read from the OTA voucher — preferred over %×gross
+    # when present (the OTA email states them per booking). See ota_service.apply_ota_fields.
+    ota_commission_amount: Optional[float] = Field(None, ge=0)
+    ota_net_payout: Optional[float] = Field(None, ge=0)
     # prompt 18 slice 7: corporate bill-to. `company` bills the whole stay to the employer,
     # `split` bills the room and leaves incidentals with the guest. Ignored without company_id.
     company_id: Optional[int] = Field(None, gt=0)
@@ -191,6 +212,8 @@ class OtaDraftConfirm(BaseModel):
     check_in: Optional[date] = None
     check_out: Optional[date] = None
     check_in_time: Optional[time] = None
+    adults: Optional[int] = Field(None, ge=1, le=40)
+    children: Optional[int] = Field(None, ge=0, le=40)
     ota_commission_percent: Optional[float] = Field(None, ge=0, le=100)
 
 
@@ -200,7 +223,9 @@ class FolioOpenRequest(BaseModel):
 
 class FolioChargeCreate(BaseModel):
     """Post a food/misc charge to a folio. unit_price is GST-inclusive (menu price)."""
-    type: str = Field(..., pattern="^(food|misc|minibar|laundry|extra_bed)$")
+    # editable list (v3 item 2, family `charge_type`); membership checked at the endpoint,
+    # which also rejects the reserved system types (room / payment / discount).
+    type: str = Field(..., pattern=CATEGORY_SLUG_RE)
     description: str = Field(..., min_length=1, max_length=200)
     qty: float = Field(default=1, gt=0, le=999)
     unit_price: float = Field(..., ge=0, le=1000000)
@@ -209,6 +234,10 @@ class FolioChargeCreate(BaseModel):
 
 class FolioVoidRequest(BaseModel):
     reason: str = Field(..., min_length=3, max_length=200)
+    # Owner-approval OTP: required when VOID_OTP_REQUIRED is on (ships armed).
+    # Obtain via POST /fraud/otp/request (action="void").
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
 
 
 class FolioDiscountRequest(BaseModel):
@@ -273,23 +302,67 @@ class CheckinAssignment(BaseModel):
 class GuestKycEntry(BaseModel):
     """One occupant's KYC captured at check-in (FE-3). `id_number` is masked server-side (raw
     never persisted). `id_scan_ref` is the encrypted-scan reference returned by the scan-upload
-    endpoint (never a public URL)."""
+    endpoint (never a public URL).
+
+    An **adult** (`is_minor=False`) MUST have an `id_type` + `id_number`. A **minor** may be
+    recorded by name alone (children rarely carry an ID)."""
     name: str = Field(..., min_length=1, max_length=100)
-    id_type: str = Field(..., pattern="^(aadhaar|passport|driving_licence|voter_id|other)$")
-    id_number: str = Field(..., min_length=4, max_length=30)   # stored masked; raw never persisted
+    # editable list (v3 item 2, family `id_type`); membership checked at the endpoint.
+    # Optional so a minor can be recorded with no ID; a non-minor is validated below.
+    id_type: Optional[str] = Field(None, pattern=CATEGORY_SLUG_RE)
+    id_number: Optional[str] = Field(None, min_length=4, max_length=30)   # stored masked; raw never persisted
     id_scan_ref: Optional[str] = Field(None, max_length=120)
     id_scan_mime: Optional[str] = Field(None, max_length=40)
+    # Reverse of the ID — a second flatbed pass, since the desk MFP has no duplex (migration 026).
+    id_scan_back_ref: Optional[str] = Field(None, max_length=120)
+    id_scan_back_mime: Optional[str] = Field(None, max_length=40)
     is_primary: bool = False
+    is_minor: bool = False   # a child — recorded by name, ID optional
+
+    @model_validator(mode="after")
+    def _adult_needs_id(self):
+        if not self.is_minor and (not self.id_type or not self.id_number):
+            raise ValueError("An adult guest needs an ID type and number")
+        return self
+
+    @model_validator(mode="after")
+    def _scan_fields_are_wellformed(self):
+        """Both scan refs must have the stored shape, and both mimes must be on the allowlist.
+
+        These four fields are the only ones on this payload the desk does not type in — they are
+        echoed back from the scan-upload response, so nothing had ever checked them. An arbitrary
+        `id_scan_mime` becomes the Content-Type of the decrypted image later; a malformed ref just
+        404s at read time, but it should not reach the database at all. Which BOOKING a ref belongs
+        to is checked at the endpoint, where the booking id is known."""
+        from utils import secure_id_store
+        for field in ("id_scan_ref", "id_scan_back_ref"):
+            ref = getattr(self, field)
+            if ref and not secure_id_store.valid_ref(ref):
+                raise ValueError(f"{field} is not a valid ID-scan reference")
+        for field in ("id_scan_mime", "id_scan_back_mime"):
+            mime = getattr(self, field)
+            if mime and not secure_id_store.allowed_mime(mime):
+                raise ValueError(f"{field} must be one of: "
+                                 + ", ".join(sorted(secure_id_store.ALLOWED_MIME)))
+        return self
 
 
 class CheckinRequest(BaseModel):
     booking_id: int = Field(..., gt=0)
     assignments: list[CheckinAssignment] = Field(..., min_length=1, max_length=10)
-    id_type: str = Field(..., pattern="^(aadhaar|passport|driving_licence|voter_id|other)$")
+    id_type: str = Field(..., pattern=CATEGORY_SLUG_RE)   # editable list; checked at the endpoint
     id_number: str = Field(..., min_length=4, max_length=30)  # stored masked; raw value never persisted
+    # OTA bookings mask the guest phone/email (a placeholder is stamped at confirm), so the desk
+    # captures the real contact when the guest arrives. Optional — only updates the guest when sent.
+    phone: Optional[str] = Field(None, min_length=7, max_length=15)
+    email: Optional[EmailStr] = None
     # FE-3: full occupant roster (lead + companions), each with masked ID + optional encrypted scan.
     # Backward-compatible: empty ⇒ old single-guest behaviour (lead from id_type/id_number above).
     additional_guests: list[GuestKycEntry] = Field(default_factory=list, max_length=20)
+    # v4b7: ONE owner approval covers every alternate-type room in this check-in. Three codes
+    # for a three-room family is unusable and staff would route around it.
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     client_ref: Optional[str] = Field(None, max_length=64)
 
 
@@ -302,7 +375,7 @@ class CardIssueRequest(BaseModel):
     room_code: str = Field(..., min_length=8, max_length=16)  # BBFFRRAA
     valid_from: datetime
     valid_to: datetime
-    issue_type: str = Field("checkin", pattern="^(checkin|extra|lost_reissue|shift)$")
+    issue_type: str = Field("checkin", pattern="^(checkin|extra|lost_reissue|shift|extend)$")
     lost_card_id: Optional[int] = Field(None, gt=0)           # issuance to mark "lost" on lost_reissue
     owner_otp_id: Optional[int] = Field(None, gt=0)           # owner approval for extra/lost_reissue (ALT-1)
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
@@ -318,6 +391,15 @@ class CheckoutRequest(BaseModel):
     override: bool = False                                    # settle despite non-zero balance
     override_reason: Optional[str] = Field(None, min_length=3, max_length=200)
     client_ref: Optional[str] = Field(None, max_length=64)
+    # --- v4b4: the guest's key card(s), read and wiped on the encoder at the desk ---
+    # Card UIDs the desk actually erased. RECORDED ALWAYS, even while the gate below is off,
+    # so the owner can see how often cards really come back before making it blocking.
+    cards_erased: Optional[List[str]] = None
+    # Set when the encoder itself is dead at this station (audited, so a desk that "always"
+    # bypasses is visible). Not a way around a guest who lost their card — that needs the OTP.
+    encoder_unavailable: bool = False
+    owner_otp_id: Optional[int] = Field(None, gt=0)           # approval when no card came back
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
 
 
 class RoomShiftRequest(BaseModel):
@@ -334,6 +416,75 @@ class RoomShiftRequest(BaseModel):
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     dry_run: bool = False
     client_ref: Optional[str] = Field(None, max_length=64)
+
+
+class ExtendStayRequest(BaseModel):
+    """Extend an in-house guest's stay (v4b2). Sibling of RoomShiftRequest on purpose: same
+    dry-run-then-commit shape, same "the SERVER prices it, the desktop never computes money"
+    rule, and the same CardEncodeInfo return so the desk reuses its existing encode pipeline.
+
+    ⚠️ `new_check_out` is an ABSOLUTE target, not "+N nights", and that is a design decision.
+    Extending is not naturally idempotent — a desk outbox re-flush of "+1 night" would extend
+    twice. With an absolute target a replay lands in the `already: true` branch and changes
+    nothing. Free idempotency, no dedupe column.
+
+    applied_amount None = accept the server's quote. Charging LESS needs a reason, and admin
+    + owner approval when EXTEND_WAIVE_REQUIRES_ADMIN is on. Charging MORE is refused — extra
+    money is a folio charge, the same rule /reception/shift enforces.
+    """
+    booking_id: int = Field(..., gt=0)
+    new_check_out: date
+    applied_amount: Optional[float] = Field(None, ge=0, le=10_000_000)
+    reason: Optional[str] = Field(None, min_length=3, max_length=200)
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+    dry_run: bool = False
+    client_ref: Optional[str] = Field(None, max_length=64)
+
+
+class ComplimentaryRequest(BaseModel):
+    """Make a stay complimentary, or take that away (v4b6).
+
+    `all` = room rent AND every folio extra free; `room` = room rent free, extras still billed;
+    `none` = clear it. Clearing needs the owner's code too — un-gated clearing would let
+    someone comp a stay, post charges against the free flag and then un-comp, laundering a
+    discount through a route with no floor and no approval."""
+    mode: str = Field(..., pattern="^(none|all|room)$")
+    reason: str = Field(..., min_length=5, max_length=200)
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+
+
+class OverstayConfigUpdate(BaseModel):
+    """Automatic overstay-billing settings (v4b3). Every field optional — only what is sent
+    changes. `enabled` is the one that starts spending the guest's money unattended."""
+    enabled: Optional[bool] = None
+    grace_minutes: Optional[int] = Field(None, ge=0, le=1440)
+    sweep_interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
+    max_auto_days: Optional[int] = Field(None, ge=1, le=60)
+
+
+class ReverseOverstayRequest(BaseModel):
+    """Undo an automatically-charged overstay night (v4b3). Admin + owner approval.
+
+    Deliberately NOT a generic folio void: reversing a night must also move check_out back
+    and decrement grand_total, or the folio silently decouples from the booking and the
+    contiguous-nights invariant breaks. Only the most recent auto-charged night is reversible.
+    """
+    night_date: date
+    reason: str = Field(..., min_length=3, max_length=200)
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+
+
+class EarlyCheckoutRequest(BaseModel):
+    """Shorten an in-house stay when the guest leaves early (v4). Voids the unused future
+    room-nights and moves check_out back so the guest is billed only for nights stayed; the
+    resulting overpayment is settled by the normal checkout return-excess/refund flow.
+    `dry_run` previews the credit without mutating. `new_check_out` defaults to today."""
+    booking_id: int = Field(..., gt=0)
+    new_check_out: Optional[date] = None
+    dry_run: bool = False
 
 
 class PromotionCreate(BaseModel):
@@ -496,10 +647,24 @@ class AgentBulkPayment(BaseModel):
 
 class OtpRequest(BaseModel):
     """Request an owner-approval one-time code for a sensitive action.
-    The code is delivered on-screen (admin Approvals inbox) + server log in this build;
-    prompt 15 swaps in WhatsApp delivery. The code is never returned from this endpoint."""
-    action: str = Field(..., pattern="^(refund|discount_below_floor|void|off_hours_issue)$")
-    context: Optional[dict] = None   # free-form JSON: what's being approved (booking/payment/amount)
+    The code is delivered on-screen (admin Approvals inbox) + WhatsApp/email; it is never
+    returned from this endpoint.
+
+    ⚠️ `action` deliberately carries NO regex. It used to, and the pattern had gone stale:
+    it allowed only refund/discount_below_floor/void/off_hours_issue while the desk was
+    already sending "card_issue" (ALT-1) and "ac_downgrade" (FE-10), so both 422'd here and
+    those two gates were UNREACHABLE from the front desk. The vocabulary now lives in
+    `utils.owner_otp.OTP_ACTIONS`, next to the code that consumes it, and the endpoint
+    validates against that — one list, no drift."""
+    action: str = Field(..., min_length=2, max_length=40)
+    # v4b0: the desk sends IDs; the SERVER loads the rows and writes the context the owner
+    # reads. Previously `context` was whatever free-form dict the client posted, so the owner
+    # approved text the client wrote and nothing tied it to the enforcement site's data.
+    booking_id: Optional[int] = Field(None, gt=0)
+    room_ids: Optional[List[int]] = None
+    folio_id: Optional[int] = Field(None, gt=0)
+    amount: Optional[float] = None
+    context: Optional[dict] = None   # action-specific extras only (kot_no, night_date, ...)
 
 
 class OtpVerify(BaseModel):
@@ -573,12 +738,20 @@ class TaskCompleteRequest(BaseModel):
     """Mark a cleaning task done (room -> clean; auto-inspected if config on)."""
     checklist: Optional[list] = None                           # [{"item": "Bed", "done": true}, ...]
     photo_ref: Optional[str] = Field(None, max_length=500)
+    # v4b8: WHO cleaned it, picked from the admin-editable `cleaned_by` name list — so a
+    # contract cleaner is recorded without needing a login.
+    cleaned_by_name: Optional[str] = Field(None, pattern=CATEGORY_SLUG_RE)
     client_ref: Optional[str] = Field(None, max_length=80)     # idempotency for offline double-submit
 
 
 class InspectRequest(BaseModel):
-    """Supervisor/admin marks a cleaned room inspected -> re-sellable (Room.status=vacant)."""
+    """Housekeeper/admin marks a cleaned room inspected -> re-sellable (Room.status=vacant).
+    v4b8: the separate `supervisor` role was merged into `housekeeper`."""
     note: Optional[str] = Field(None, max_length=300)
+    # v4b8: names from the admin-editable lists. Both optional — an install that has not set
+    # the lists up keeps the old login-derived behaviour untouched.
+    cleaned_by_name: Optional[str] = Field(None, pattern=CATEGORY_SLUG_RE)
+    inspected_by_name: Optional[str] = Field(None, pattern=CATEGORY_SLUG_RE)
 
 
 class MinibarRestockRequest(BaseModel):
@@ -602,7 +775,7 @@ class MaintenanceTicketCreate(BaseModel):
     area: Optional[str] = Field(None, max_length=100)
     category: str = Field(default="other", pattern=CATEGORY_SLUG_RE)   # membership checked at the endpoint
     issue: str = Field(..., min_length=3, max_length=500)
-    priority: str = Field(default="normal", pattern="^(low|normal|high|urgent)$")
+    priority: str = Field(default="normal", pattern=CATEGORY_SLUG_RE)  # editable list; checked at the endpoint
     booking_id: Optional[int] = None
     photo_ref: Optional[str] = Field(None, max_length=500)
     client_ref: Optional[str] = Field(None, max_length=80)
@@ -614,8 +787,12 @@ class TicketAssignRequest(BaseModel):
 
 
 class TicketStatusUpdate(BaseModel):
-    """Assignee advances a ticket: in_progress|awaiting_parts|resolved."""
-    status: str = Field(..., pattern="^(in_progress|awaiting_parts|resolved)$")
+    """Assignee advances a ticket: in_progress | awaiting_parts | work_done.
+
+    v4b8: the technician's terminal step is **work_done**, not `resolved`. The owner wanted
+    the sign-off — not the technician's own say-so — to be what marks a ticket resolved, so
+    `resolved` is now set only by POST /tickets/{id}/verify."""
+    status: str = Field(..., pattern="^(in_progress|awaiting_parts|work_done)$")
     note: Optional[str] = Field(None, max_length=500)
 
 
@@ -645,7 +822,7 @@ class TicketItemPurchase(BaseModel):
 # =====================================================================
 # CUSTOMER / GUEST CRM (prompt 14)
 # =====================================================================
-_ID_TYPE_PATTERN = "^(aadhaar|passport|driving_licence|voter_id|other)$"
+_ID_TYPE_PATTERN = CATEGORY_SLUG_RE   # editable list (F-A/v3); membership checked at the endpoint
 
 
 class GuestProfileUpdate(BaseModel):
@@ -733,6 +910,7 @@ class WhatsAppConfigUpdate(BaseModel):
     confirmation_enabled: Optional[bool] = None
     receipt_enabled: Optional[bool] = None
     room_ready_enabled: Optional[bool] = None
+    portal_link_enabled: Optional[bool] = None
     review_enabled: Optional[bool] = None
     review_delay_hours: Optional[float] = Field(None, ge=0, le=168)
     owner_alerts_enabled: Optional[bool] = None
@@ -741,6 +919,8 @@ class WhatsAppConfigUpdate(BaseModel):
     google_review_url: Optional[str] = Field(None, max_length=300)
     job_interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
     daily_digest_hour: Optional[int] = Field(None, ge=0, le=23)
+    weekly_digest_enabled: Optional[bool] = None
+    weekly_digest_weekday: Optional[int] = Field(None, ge=0, le=6)   # 0=Mon … 6=Sun
 
 
 class OptOutCreate(BaseModel):
@@ -753,6 +933,14 @@ class WhatsAppTestSend(BaseModel):
     """Send one template to a number for manual verification."""
     to: str = Field(..., min_length=6, max_length=20)
     template: str = Field(..., min_length=1, max_length=60)
+    params: Optional[dict] = None
+
+
+class WhatsAppReplyRequest(BaseModel):
+    """Inbox reply: free-text (within the 24h window) OR an approved template (any time / new chat).
+    Exactly one of `text` / `template` is expected."""
+    text: Optional[str] = Field(None, min_length=1, max_length=4096)
+    template: Optional[str] = Field(None, min_length=1, max_length=60)
     params: Optional[dict] = None
 
 
@@ -989,6 +1177,9 @@ class BackofficeConfigUpdate(BaseModel):
     roster_default_shift_type: Optional[str] = Field(None, pattern=SHIFT_TYPE_RE)
     attendance_pin_enabled: Optional[bool] = None
     attendance_auto_close_hours: Optional[int] = Field(None, ge=1, le=48)
+    # v4b8 (R20): every new maintenance ticket auto-assigns to this technician. 0 = nobody,
+    # which keeps the old behaviour (the ticket stays open for a technician to claim).
+    maintenance_default_assignee_id: Optional[int] = Field(None, ge=0)
 
 
 # =====================================================================
@@ -998,13 +1189,23 @@ class FraudConfigUpdate(BaseModel):
     """Admin-editable anti-fraud thresholds + approval gates (backlog v2 FE-12).
     Every field optional — only what's sent is changed."""
     cleaning_max_hours: Optional[int] = Field(None, ge=0, le=168)
+    inspection_max_hours: Optional[int] = Field(None, ge=0, le=168)
     allowed_issue_hours: Optional[str] = Field(None, pattern=r"^\d{1,2}-\d{1,2}$")
     allowed_stations: Optional[List[str]] = None      # [] = no station fencing
     repeat_refund_threshold: Optional[int] = Field(None, ge=1, le=100)
     refund_requires_owner_otp: Optional[bool] = None
     discount_otp_required: Optional[bool] = None
+    void_otp_required: Optional[bool] = None
     card_issue_otp_required: Optional[bool] = None
     owner_otp_ttl_minutes: Optional[int] = Field(None, ge=1, le=1440)
+    # v4b0 gates. ac_downgrade was env-only (os.getenv at reception.py) and therefore had
+    # no switch on this screen at all — one of the reasons FE-10 appeared not to work.
+    ac_downgrade_otp_required: Optional[bool] = None
+    alt_room_type_otp_required: Optional[bool] = None
+    comp_otp_required: Optional[bool] = None
+    overstay_reverse_otp_required: Optional[bool] = None
+    rs_cancel_otp_required: Optional[bool] = None
+    checkout_no_card_otp_required: Optional[bool] = None
 
 
 STOCK_CATEGORY_RE = CATEGORY_SLUG_RE   # editable list (F-A/FE-6); membership checked at the endpoint
@@ -1108,7 +1309,7 @@ class LinenSetUpdate(BaseModel):
 # GUEST COMPLAINTS (prompt 18c, slice 11) — a view over source='guest' tickets
 # =====================================================================
 COMPLAINT_CATEGORY_RE = CATEGORY_SLUG_RE   # editable list (F-A); membership checked at the endpoint
-COMPLAINT_PRIORITY_RE = "^(low|normal|high|urgent)$"
+COMPLAINT_PRIORITY_RE = CATEGORY_SLUG_RE   # editable list (v3, family `priority`); checked at the endpoint
 
 
 class ComplaintCreate(BaseModel):
@@ -1187,6 +1388,20 @@ class DeskRoomServiceOrder(BaseModel):
     items: List[RoomServiceLine] = Field(..., min_length=1)
     note: Optional[str] = Field(None, max_length=300)
     client_ref: Optional[str] = Field(None, max_length=80)
+    # v4b5 (R1): one press = order + kitchen docket + charge + guest bill. Staff are standing
+    # at the counter with the guest, so the two-step "place now, deliver later" dance was pure
+    # friction for an order THEY take. Guest QR-portal orders keep their separate Deliver —
+    # the guest placed those, so someone must still confirm the food arrived before billing.
+    deliver_now: bool = False
+
+
+class RoomServiceCancel(BaseModel):
+    """Cancel an undelivered room-service order (v4b5). A reason is mandatory, and an owner
+    code is required when `rs_cancel_otp_required` is armed — before this, any tablet login
+    could silently dismiss an order that already had a KOT number against it."""
+    reason: str = Field(..., min_length=3, max_length=200)
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
 
 
 class WakeupRequest(BaseModel):
@@ -1219,6 +1434,12 @@ class RequestActionRequest(BaseModel):
     code: Optional[str] = Field(None, max_length=40)   # WiFi voucher code issued on manual fulfil
 
 
+class MenuTimeWindow(BaseModel):
+    """A time-of-day window a menu item is orderable in (IST, 24h HH:MM)."""
+    start: str = Field(..., pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    end: str = Field(..., pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+
+
 class MenuItemCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=150)
     description: Optional[str] = Field(None, max_length=300)
@@ -1226,6 +1447,7 @@ class MenuItemCreate(BaseModel):
     price: float = Field(..., ge=0, le=1_000_000)
     gst_percent: Optional[float] = Field(None, ge=0, le=100)
     is_available: bool = True
+    available_windows: Optional[List[MenuTimeWindow]] = None   # empty/None = all day
     sort_order: int = Field(default=0, ge=0, le=10_000)
     stock_item_id: Optional[int] = Field(None, gt=0)
 
@@ -1237,8 +1459,14 @@ class MenuItemUpdate(BaseModel):
     price: Optional[float] = Field(None, ge=0, le=1_000_000)
     gst_percent: Optional[float] = Field(None, ge=0, le=100)
     is_available: Optional[bool] = None
+    available_windows: Optional[List[MenuTimeWindow]] = None
     sort_order: Optional[int] = Field(None, ge=0, le=10_000)
     stock_item_id: Optional[int] = Field(None, gt=0)
+
+
+class MenuAvailabilityUpdate(BaseModel):
+    """Reception's quick on/off toggle for a menu item (windows stay admin-managed)."""
+    is_available: bool
 
 
 class PortalSessionRequest(BaseModel):

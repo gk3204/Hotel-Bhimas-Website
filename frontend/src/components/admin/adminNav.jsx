@@ -19,8 +19,8 @@ export const NAV_GROUPS = [
       { to: "/admin/room-availability", label: "Availability", icon: FaCalendarAlt },
       { to: "/admin/rooms", label: "Rooms", icon: FaDoorOpen },
       { to: "/admin/room-types", label: "Room Types", icon: FaBed },
-      { to: "/admin/housekeeping", label: "Housekeeping", icon: FaBroom, roles: ["admin", "supervisor"] },
-      { to: "/admin/maintenance", label: "Maintenance", icon: FaTools, roles: ["admin", "supervisor"] },
+      { to: "/admin/housekeeping", label: "Housekeeping", icon: FaBroom, roles: ["admin", "housekeeper"] },
+      { to: "/admin/maintenance", label: "Maintenance", icon: FaTools, roles: ["admin", "housekeeper"] },
     ],
   },
   {
@@ -31,7 +31,7 @@ export const NAV_GROUPS = [
       { to: "/admin/messaging", label: "WhatsApp", icon: FaWhatsapp },
       { to: "/admin/reviews", label: "Reviews", icon: FaStar },
       { to: "/admin/guest-portal", label: "Guest Portal", icon: FaMobileAlt },
-      { to: "/admin/complaints", label: "Complaints", icon: FaBullhorn, roles: ["admin", "supervisor"] },
+      { to: "/admin/complaints", label: "Complaints", icon: FaBullhorn, roles: ["admin", "housekeeper"] },
     ],
   },
   {
@@ -86,9 +86,11 @@ export const NAV_ITEMS = NAV_GROUPS.flatMap((g) =>
   g.items.map((it) => ({ ...it, group: g.label }))
 );
 
-// F-B: routes a supervisor may reach (untagged items are admin-only).
-export const SUPERVISOR_PATHS = NAV_ITEMS
-  .filter((it) => it.roles && it.roles.includes("supervisor"))
+// v4b8: routes a housekeeper may reach in web admin (untagged items are admin-only).
+// The `supervisor` role was merged into `housekeeper` — one role cleans, inspects and signs
+// off maintenance, so it needs these oversight screens.
+export const HOUSEKEEPER_PATHS = NAV_ITEMS
+  .filter((it) => it.roles && it.roles.includes("housekeeper"))
   .map((it) => it.to);
 
 // Nav groups visible to a given role. Admin sees everything; other roles see only tagged items.

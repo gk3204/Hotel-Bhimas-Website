@@ -203,7 +203,7 @@ function RequestDetail({ request: r, onClose, showToast, onChanged }) {
 
 /* ------------------------------------------------------------------ menu */
 
-const EMPTY_MENU = { name: "", description: "", category: "food", price: "", gst_percent: "", is_available: true, sort_order: 0 };
+const EMPTY_MENU = { name: "", description: "", category: "food", price: "", gst_percent: "", is_available: true, sort_order: 0, available_windows: [] };
 const MENU_CATEGORIES = ["food", "beverage", "snack", "service"];
 
 function MenuTab({ showToast }) {
@@ -297,6 +297,8 @@ function MenuForm({ value, onClose, onSaved, showToast }) {
       const payload = {
         name: form.name.trim(), category: form.category, price: Number(form.price),
         sort_order: Number(form.sort_order) || 0, is_available: form.is_available !== false,
+        // Only complete windows; empty list = available all day (server stores NULL).
+        available_windows: (form.available_windows || []).filter((w) => w.start && w.end),
       };
       if (form.description) payload.description = form.description;
       if (form.gst_percent !== "" && form.gst_percent != null) payload.gst_percent = Number(form.gst_percent);
@@ -327,6 +329,45 @@ function MenuForm({ value, onClose, onSaved, showToast }) {
       </div>
       <Field label="Description"><textarea rows={2} className={inputCls} value={form.description ?? ""}
         onChange={(e) => setForm({ ...form, description: e.target.value })} /></Field>
+
+      {/* Availability time windows — multiple per day. Empty list = orderable all day. */}
+      <div className="mt-2">
+        <div className="flex items-center justify-between">
+          <label className="text-slate-300 text-sm font-medium">Available times</label>
+          <button type="button"
+            onClick={() => setForm({ ...form, available_windows: [...(form.available_windows || []), { start: "12:00", end: "15:00" }] })}
+            className="text-sky-300 hover:underline text-xs">+ Add window</button>
+        </div>
+        <p className="text-xs text-slate-500 mt-1">
+          Leave empty = orderable all day. Add windows (e.g. 12:00–15:00 and 19:00–22:00); outside them guests see it as unavailable.
+        </p>
+        <div className="mt-2 space-y-2">
+          {(form.available_windows || []).length === 0 && (
+            <div className="text-xs text-slate-400">All day.</div>
+          )}
+          {(form.available_windows || []).map((w, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input type="time" className={inputCls} value={w.start || ""}
+                onChange={(e) => {
+                  const next = [...form.available_windows];
+                  next[i] = { ...next[i], start: e.target.value };
+                  setForm({ ...form, available_windows: next });
+                }} />
+              <span className="text-slate-400">–</span>
+              <input type="time" className={inputCls} value={w.end || ""}
+                onChange={(e) => {
+                  const next = [...form.available_windows];
+                  next[i] = { ...next[i], end: e.target.value };
+                  setForm({ ...form, available_windows: next });
+                }} />
+              <button type="button"
+                onClick={() => setForm({ ...form, available_windows: form.available_windows.filter((_, j) => j !== i) })}
+                className="text-red-300 hover:underline text-xs">Remove</button>
+            </div>
+          ))}
+        </div>
+      </div>
+
       <div className="flex gap-3 mt-6">
         <PrimaryButton onClick={save} disabled={saving}><FaSave size={14} /> {saving ? "Saving…" : "Save"}</PrimaryButton>
         <GhostButton onClick={onClose}>Cancel</GhostButton>

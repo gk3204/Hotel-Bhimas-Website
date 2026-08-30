@@ -42,6 +42,37 @@ export async function getTemplates() {
   return handle(res);
 }
 
+// ---- Inbox (two-way conversations) ----
+export async function getConversations() {
+  const res = await fetch(`${BASE_URL}/whatsapp/conversations`, { headers: authHeaders() });
+  return handle(res);
+}
+
+export async function getThread(phone) {
+  const res = await fetch(`${BASE_URL}/whatsapp/conversations/${encodeURIComponent(phone)}`, { headers: authHeaders() });
+  return handle(res);
+}
+
+export async function markConversationRead(phone) {
+  const res = await fetch(`${BASE_URL}/whatsapp/conversations/${encodeURIComponent(phone)}/read`, {
+    method: "POST", headers: authHeaders(),
+  });
+  return handle(res);
+}
+
+export async function sendReply(phone, body) {
+  // body = { text } OR { template, params }
+  const res = await fetch(`${BASE_URL}/whatsapp/conversations/${encodeURIComponent(phone)}/reply`, {
+    method: "POST", headers: authHeaders(), body: JSON.stringify(body),
+  });
+  return handle(res);
+}
+
+export async function getUnreadCount() {
+  const res = await fetch(`${BASE_URL}/whatsapp/unread-count`, { headers: authHeaders() });
+  return handle(res);
+}
+
 export async function getMessages({ status, direction, limit = 100 } = {}) {
   const params = new URLSearchParams();
   if (status) params.set("status", status);

@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { FaGlobe, FaSyncAlt, FaSave, FaEnvelopeOpenText, FaBalanceScale, FaListUl } from "react-icons/fa";
+import { createPortal } from "react-dom";
+import { FaGlobe, FaSyncAlt, FaSave, FaEnvelopeOpenText, FaBalanceScale, FaListUl, FaFileCsv } from "react-icons/fa";
 import { PageShell } from "../../components/admin/BackofficeUI";
 import {
   getChannels, updateChannel, getOtaBookings, getReconciliation,
@@ -18,7 +19,7 @@ const inputCls =
 const iso = (d) => d.toISOString().slice(0, 10);
 const CHANNEL_LABEL = {
   makemytrip: "MakeMyTrip", goibibo: "Goibibo", booking_com: "Booking.com",
-  agoda: "Agoda", other_ota: "Other OTA",
+  agoda: "Agoda", yatra: "Yatra (Travelguru)", other_ota: "Other OTA",
 };
 
 const OtaChannels = () => {
@@ -201,6 +202,33 @@ const BookingsTab = ({ showToast }) => {
   };
   useEffect(() => { load(); }, []); // eslint-disable-line
 
+  // Client-side CSV of the currently-loaded rows (no backend round-trip).
+  const exportCsv = () => {
+    if (rows.length === 0) { showToast("Nothing to export", "error"); return; }
+    const cols = [
+      ["Booking #", (r) => r.booking_id],
+      ["Guest", (r) => r.guest_name || ""],
+      ["Channel", (r) => CHANNEL_LABEL[r.source] || r.source || ""],
+      ["OTA ID", (r) => r.ota_booking_id || ""],
+      ["Check-in", (r) => r.check_in || ""],
+      ["Check-out", (r) => r.check_out || ""],
+      ["Gross", (r) => r.gross ?? ""],
+      ["Commission %", (r) => r.commission_percent ?? ""],
+      ["Commission", (r) => r.commission_amount ?? ""],
+      ["Net payout", (r) => r.net_payout ?? ""],
+    ];
+    const esc = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+    const lines = [cols.map((c) => c[0]).join(",")];
+    rows.forEach((r) => lines.push(cols.map((c) => esc(c[1](r))).join(",")));
+    const blob = new Blob(["﻿" + lines.join("\r\n")], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `ota-bookings_${source || "all"}_${from}_to_${to}.csv`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
+
   return (
     <Card className="overflow-hidden">
       <div className="px-6 py-4 border-b border-slate-700 flex flex-wrap items-end gap-3">
@@ -215,6 +243,10 @@ const BookingsTab = ({ showToast }) => {
           </select></div>
         <button onClick={load} className="bg-slate-700 hover:bg-slate-600 font-semibold px-5 py-2.5 rounded-lg transition flex items-center gap-2">
           <FaSyncAlt size={13} /> Apply
+        </button>
+        <button onClick={exportCsv} disabled={rows.length === 0}
+          className="ml-auto bg-slate-700 hover:bg-slate-600 font-semibold px-5 py-2.5 rounded-lg transition flex items-center gap-2 disabled:opacity-50">
+          <FaFileCsv size={13} /> Export CSV
         </button>
       </div>
       {loading ? <Spinner /> : rows.length === 0 ? <Empty text="No OTA bookings in this range." /> : (
@@ -429,16 +461,35 @@ const DraftsTab = ({ showToast }) => {
   };
   useEffect(() => { load(); }, []); // eslint-disable-line
 
+  // Best-effort map the OTA's room wording (e.g. "Double Non AC Room") to a PMS room type,
+  // weighting the bed-size word most (it's the strongest signal). Falls back to the first type.
+  const pickRoomType = (hint) => {
+    if (!hint || roomTypes.length === 0) return roomTypes[0]?.room_type_id || "";
+    const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+    const strong = ["single", "double", "triple", "twin", "quad", "family", "deluxe", "deeluxe", "suite", "standard"];
+    const hintWords = norm(hint).split(" ").filter(Boolean);
+    let best = roomTypes[0], bestScore = -1;
+    for (const t of roomTypes) {
+      const tw = new Set(norm(t.name).split(" ").filter(Boolean));
+      let score = 0;
+      for (const w of hintWords) if (tw.has(w)) score += strong.includes(w) ? 3 : 1;
+      if (score > bestScore) { bestScore = score; best = t; }
+    }
+    return best.room_type_id;
+  };
+
   const openConfirm = (d) => {
     setConfirmFor(d);
     setCform({
-      room_type_id: roomTypes[0]?.room_type_id || "",
+      room_type_id: pickRoomType(d.room_type_hint),
       quantity: 1,
       guest_name: d.guest_name || "",
       phone: d.phone || "",
       email: d.email || "",
       check_in: d.check_in || "",
       check_out: d.check_out || "",
+      adults: d.adults || 1,
+      children: d.children ?? 0,
     });
   };
 
@@ -453,6 +504,8 @@ const DraftsTab = ({ showToast }) => {
         email: cform.email || null,
         check_in: cform.check_in || null,
         check_out: cform.check_out || null,
+        adults: Number(cform.adults) || 1,
+        children: Number(cform.children) || 0,
       };
       const res = await confirmDraft(confirmFor.id, payload);
       showToast(`Booking #${res.booking?.booking_id} created`);
@@ -545,14 +598,20 @@ const DraftsTab = ({ showToast }) => {
         </div>
       )}
 
-      {confirmFor && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4">
-          <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg p-6">
+      {confirmFor && createPortal(
+        <div className="fixed inset-0 z-[100] flex items-start sm:items-center justify-center bg-black/60 p-4 overflow-y-auto">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg p-6 my-8 max-h-[90vh] overflow-y-auto">
             <h3 className="text-xl font-bold text-[#E5C07B] mb-1">Confirm OTA booking</h3>
-            <p className="text-slate-400 text-sm mb-4">
+            <p className="text-slate-400 text-sm mb-2">
               {CHANNEL_LABEL[confirmFor.channel_code]} · {confirmFor.ota_booking_id || "no OTA id"} — creates a real
               booking that consumes availability. Pick the PMS room type.
             </p>
+            {(confirmFor.commission_amount != null || confirmFor.net_payout != null) && (
+              <p className="text-xs text-slate-500 mb-4">
+                From voucher: gross {fmt(confirmFor.amount)} · commission {fmt(confirmFor.commission_amount)} · net payout{" "}
+                <span className="text-[#E5C07B] font-semibold">{fmt(confirmFor.net_payout)}</span>
+              </p>
+            )}
             <div className="grid grid-cols-2 gap-3">
               <div className="flex flex-col col-span-2"><label className="text-xs text-slate-400 mb-1">Room type</label>
                 <select value={cform.room_type_id} onChange={(e) => setCform({ ...cform, room_type_id: e.target.value })} className={inputCls}>
@@ -562,7 +621,11 @@ const DraftsTab = ({ showToast }) => {
               </div>
               <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Quantity</label>
                 <input type="number" min="1" max="5" value={cform.quantity} onChange={(e) => setCform({ ...cform, quantity: e.target.value })} className={inputCls} /></div>
-              <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Phone</label>
+              <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Adults</label>
+                <input type="number" min="1" max="40" value={cform.adults} onChange={(e) => setCform({ ...cform, adults: e.target.value })} className={inputCls} /></div>
+              <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Children</label>
+                <input type="number" min="0" max="40" value={cform.children} onChange={(e) => setCform({ ...cform, children: e.target.value })} className={inputCls} /></div>
+              <div className="flex flex-col col-span-2"><label className="text-xs text-slate-400 mb-1">Phone <span className="text-slate-500">(optional — OTA masks it)</span></label>
                 <input value={cform.phone} onChange={(e) => setCform({ ...cform, phone: e.target.value })} className={inputCls} /></div>
               <div className="flex flex-col col-span-2"><label className="text-xs text-slate-400 mb-1">Guest name</label>
                 <input value={cform.guest_name} onChange={(e) => setCform({ ...cform, guest_name: e.target.value })} className={inputCls} /></div>
@@ -581,7 +644,8 @@ const DraftsTab = ({ showToast }) => {
               </button>
             </div>
           </div>
-        </div>
+        </div>,
+        document.body
       )}
     </Card>
   );

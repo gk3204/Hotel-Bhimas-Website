@@ -26,7 +26,14 @@ def get_db():
         db.close()
 
 
-def _serialize(r: Room) -> dict:
+def _type_names(db) -> dict:
+    """{room_type_id: name} — built once per call site so a room LIST does not N+1.
+    Deliberately not memoised at module level: a renamed room type would then show the old
+    name until the process restarted."""
+    return dict(db.query(RoomType.room_type_id, RoomType.name).all())
+
+
+def _serialize(r: Room, type_names: dict | None = None) -> dict:
     return {
         "room_id": r.room_id,
         "room_number": r.room_number,
@@ -35,6 +42,9 @@ def _serialize(r: Room) -> dict:
         "floor": r.floor,
         "max_cards": r.max_cards,
         "lock_no": r.lock_no,
+        # v4b7: the second type this room may be sold as, plus its name for the admin list.
+        "alt_room_type_id": r.alt_room_type_id,
+        "alt_room_type_name": (type_names or {}).get(r.alt_room_type_id),
         "is_active": r.is_active,
         "status": r.status,
     }
@@ -44,7 +54,8 @@ def _serialize(r: Room) -> dict:
 @router.get("/", dependencies=[Depends(require_reception_or_admin)])
 def list_rooms(db: Session = Depends(get_db)):
     rooms = db.query(Room).order_by(Room.room_number).all()
-    return [_serialize(r) for r in rooms]
+    names = _type_names(db)
+    return [_serialize(r, names) for r in rooms]
 
 
 # CREATE room — admin only
@@ -127,14 +138,16 @@ def create_room(data: RoomCreate, db: Session = Depends(get_db)):
             floor=data.floor,
             max_cards=data.max_cards,
             lock_no=data.lock_no,
+            alt_room_type_id=data.alt_room_type_id,
             is_active=data.is_active,
             status=data.status or "vacant",
         )
         db.add(room)
         db.commit()
         db.refresh(room)
-        write_audit(db, None, "room.create", "room", room.room_id, after=_serialize(room), client="web", commit=True)
-        return _serialize(room)
+        names = _type_names(db)
+        write_audit(db, None, "room.create", "room", room.room_id, after=_serialize(room, names), client="web", commit=True)
+        return _serialize(room, names)
     except HTTPException:
         raise
     except Exception as e:
@@ -163,13 +176,31 @@ def update_room(room_id: int, data: RoomUpdate, db: Session = Depends(get_db)):
         if "room_type_id" in update_data:
             if not db.query(RoomType).filter(RoomType.room_type_id == update_data["room_type_id"]).first():
                 raise HTTPException(status_code=400, detail="Room type not found")
+        # v4b7: 0 clears the alternate; otherwise it must exist, be active, and differ from
+        # the room's own type (also enforced by ck_rooms_alt_differs at the DB level).
+        if "alt_room_type_id" in update_data:
+            alt = update_data["alt_room_type_id"]
+            if not alt:
+                update_data["alt_room_type_id"] = None
+            else:
+                alt_rt = db.query(RoomType).filter(RoomType.room_type_id == alt).first()
+                if not alt_rt:
+                    raise HTTPException(status_code=400, detail="Alternate room type not found")
+                if not alt_rt.is_active:
+                    raise HTTPException(status_code=400, detail="Alternate room type is inactive")
+                own = update_data.get("room_type_id", room.room_type_id)
+                if alt == own:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="The alternate type must differ from the room's own type")
 
         for key, value in update_data.items():
             setattr(room, key, value)
         db.commit()
         db.refresh(room)
-        write_audit(db, None, "room.update", "room", room.room_id, before=before, after=_serialize(room), client="web", commit=True)
-        return _serialize(room)
+        names = _type_names(db)
+        write_audit(db, None, "room.update", "room", room.room_id, before=before, after=_serialize(room, names), client="web", commit=True)
+        return _serialize(room, names)
     except HTTPException:
         raise
     except Exception as e:

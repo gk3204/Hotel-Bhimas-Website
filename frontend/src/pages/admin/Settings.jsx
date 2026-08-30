@@ -11,6 +11,8 @@ import {
   Card, GhostButton, PageShell, PrimaryButton, Tabs, inputCls, useToast,
 } from "../../components/admin/BackofficeUI";
 import ConfigPanel from "../../components/admin/ConfigPanel";
+import BackupsPanel from "../../components/admin/BackupsPanel";
+import LoyaltyPanel from "../../components/admin/LoyaltyPanel";
 import { SETTINGS_GROUPS } from "../../components/admin/settingsGroups";
 import {
   getCategories, setCategoryList, getRegistrationRules, setRegistrationRules,
@@ -23,24 +25,71 @@ const FAMILY_META = {
   menu: { label: "Room-service menu categories", hint: "Sections your room-service menu items are grouped under." },
   stock: { label: "Inventory categories", hint: "How stock items are grouped on the Inventory screen." },
   vendor: { label: "Vendor categories", hint: "Types of supplier on the Vendors screen." },
+  // v3 item 2 — the last of the reception app's hard-coded dropdowns. The desk reads these
+  // at startup, so a change here reaches the front desk on its next launch, with no rebuild.
+  id_type: {
+    label: "ID types",
+    hint: "Government IDs the desk can record at check-in, for the lead guest and every occupant.",
+  },
+  booking_source: {
+    label: "Booking sources",
+    hint: "Where a booking came from. Shown on the desk's New Booking screen and used by the revenue reports.",
+  },
+  ota_source: {
+    label: "OTA channels",
+    hint: "Which booking sources are online travel agents — these get commission tracking and payout reconciliation. Every value must also exist in Booking sources above.",
+  },
+  charge_type: {
+    label: "Folio charge types",
+    hint: "Incidental charges the desk can post to a bill. 'room', 'payment' and 'discount' are posted by the system and cannot be added here.",
+  },
+  // v4b8 (R19) — who cleaned / who inspected. Names, not logins: a contract cleaner goes on
+  // the sheet without anyone creating them a user account.
+  cleaned_by: {
+    label: "Cleaned by (names)",
+    hint: "Who housekeeping can record as having cleaned a room. Names, not logins — a contract cleaner needs no user account.",
+  },
+  inspected_by: {
+    label: "Inspected by (names)",
+    hint: "Who can be recorded as having inspected a room before it is put back on sale.",
+  },
+  priority: {
+    label: "Ticket & complaint priorities",
+    hint: "Urgency levels for maintenance tickets and guest complaints. The SLA timers are configured for low / normal / high / urgent — any priority you add beyond those uses the 'normal' SLA.",
+  },
 };
 
-const TABS = [["lists", "Lists & printed text"], ...SETTINGS_GROUPS.map((g) => [g.key, g.label])];
+// Families whose members must already exist in another family (mirrors SUBSET_FAMILIES on the
+// backend). Surfaced in the UI so the admin sees the rule before the save is rejected.
+const SUBSET_OF = { ota_source: "booking_source" };
+
+// v4b10: Backups is an action + a status, not a load/save config group, so it is its own tab
+// rather than a SETTINGS_GROUPS entry that ConfigPanel could not render.
+const TABS = [["lists", "Lists & printed text"], ...SETTINGS_GROUPS.map((g) => [g.key, g.label]),
+              ["loyalty", "Loyalty"], ["backups", "Backups"]];
 
 // A category is stored as a lowercase slug; show it title-cased for readability.
 const pretty = (s) => (s || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
 const toSlug = (s) => (s || "").trim().toLowerCase().replace(/[\s-]+/g, "_").replace(/[^a-z0-9_]/g, "");
 
-function CategoryEditor({ family, meta, items, defaults, onSave }) {
+function CategoryEditor({ family, meta, items, defaults, onSave, parentFamily, parentItems }) {
   const [list, setList] = useState(items);
   const [draft, setDraft] = useState("");
   const [saving, setSaving] = useState(false);
+  const [err, setErr] = useState("");
 
-  useEffect(() => { setList(items); }, [items]);
+  useEffect(() => { setList(items); setErr(""); }, [items]);
 
   const dirty = useMemo(
     () => JSON.stringify(list) !== JSON.stringify(items),
     [list, items],
+  );
+
+  // Subset families (OTA channels ⊂ booking sources): flag the offenders as they are typed
+  // rather than letting the admin hit Save and read a 422. The backend still enforces it.
+  const orphans = useMemo(
+    () => (parentItems ? list.filter((c) => !parentItems.includes(c)) : []),
+    [list, parentItems],
   );
 
   const add = () => {
@@ -56,8 +105,13 @@ function CategoryEditor({ family, meta, items, defaults, onSave }) {
   const save = async () => {
     if (list.length === 0) return;
     setSaving(true);
+    setErr("");
     try {
       await onSave(family, list);
+    } catch (e) {
+      // Keep the reason on screen: the reserved-type and subset rules are worth reading
+      // twice, and a toast is gone before the admin has worked out what to change.
+      setErr(e.message || "Save failed.");
     } finally {
       setSaving(false);
     }
@@ -110,6 +164,13 @@ function CategoryEditor({ family, meta, items, defaults, onSave }) {
         {draft && !toSlug(draft) && (
           <p className="text-amber-300 text-xs mt-2">Use letters, numbers and underscores only.</p>
         )}
+        {orphans.length > 0 && (
+          <p className="text-amber-300 text-xs mt-2">
+            {orphans.map(pretty).join(", ")} {orphans.length === 1 ? "is" : "are"} not in{" "}
+            {FAMILY_META[parentFamily]?.label || parentFamily} — add {orphans.length === 1 ? "it" : "them"} there first.
+          </p>
+        )}
+        {err && <p className="text-red-300 text-xs mt-2">{err}</p>}
       </div>
     </Card>
   );
@@ -178,6 +239,10 @@ export default function Settings() {
 
       {activeGroup && <ConfigPanel key={activeGroup.key} group={activeGroup} showToast={showToast} />}
 
+      {tab === "loyalty" && <LoyaltyPanel showToast={showToast} />}
+
+      {tab === "backups" && <BackupsPanel showToast={showToast} />}
+
       {tab === "lists" && <ListsTab
         error={error} families={families} defaults={defaults}
         saveCategory={saveCategory} rules={rules} setRules={setRules}
@@ -210,6 +275,8 @@ function ListsTab({ error, families, defaults, saveCategory, rules, setRules,
             items={families[family] || []}
             defaults={defaults[family] || []}
             onSave={saveCategory}
+            parentFamily={SUBSET_OF[family]}
+            parentItems={SUBSET_OF[family] ? families[SUBSET_OF[family]] : undefined}
           />
         ))
       )}

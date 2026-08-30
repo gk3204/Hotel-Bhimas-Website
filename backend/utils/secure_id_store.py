@@ -23,8 +23,11 @@ logger = logging.getLogger(__name__)
 _BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # .../backend
 _SECURE_DIR = os.getenv("ID_SCAN_DIR") or os.path.join(_BASE_DIR, "secure_id_scans")
 
-# Content types we accept for an ID scan (kept small — these are ID documents).
-_ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "application/pdf", "image/heic"}
+# Content types we accept for an ID scan (kept small — these are ID documents). PUBLIC because
+# it is the one allowlist: the upload endpoint checks it, the check-in schema checks the mime the
+# desk sends back, and the read path clamps to it before setting a Content-Type header.
+ALLOWED_MIME = {"image/jpeg", "image/png", "image/webp", "application/pdf", "image/heic"}
+_ALLOWED_MIME = ALLOWED_MIME   # legacy alias
 _MAX_BYTES = 8 * 1024 * 1024  # 8 MB, mirrors the CRM upload cap
 
 # A stored ref is exactly "booking_<digits>/<hex-or-safe>.enc" — anything else is rejected on read
@@ -51,7 +54,44 @@ def is_configured() -> bool:
 
 
 def allowed_mime(content_type: str | None) -> bool:
-    return (content_type or "").lower() in _ALLOWED_MIME
+    return (content_type or "").lower() in ALLOWED_MIME
+
+
+def safe_media_type(content_type: str | None) -> str:
+    """The Content-Type it is safe to serve a decrypted scan with.
+
+    `id_scan_mime` reaches us on the check-in payload, i.e. from the client. Anything outside the
+    allowlist is served as an opaque download instead: the admin renders a scan into a blob: URL,
+    which inherits the ADMIN ORIGIN, so a stored `text/html` would be a same-origin script the day
+    that viewer previews anything other than a PDF. Rows written before this was validated can
+    still hold whatever the desk sent, so the clamp lives here on the read path as well."""
+    ct = (content_type or "").lower()
+    return ct if ct in ALLOWED_MIME else "application/octet-stream"
+
+
+# Extension per allowed type, for the download filename (never built from a guest's name).
+_EXT_FOR_MIME = {"image/jpeg": "jpg", "image/png": "png", "image/webp": "webp",
+                 "application/pdf": "pdf", "image/heic": "heic"}
+
+
+def extension_for(content_type: str | None) -> str:
+    return _EXT_FOR_MIME.get((content_type or "").lower(), "bin")
+
+
+def valid_ref(ref: str | None) -> bool:
+    """True when `ref` has the exact stored shape booking_<digits>/<safe>.enc."""
+    return bool(ref and _REF_RE.match(ref))
+
+
+def ref_belongs_to(ref: str | None, booking_id: int) -> bool:
+    """True when `ref` is well-formed AND lives under this booking's own folder.
+
+    Scans are namespaced by the booking they were uploaded against, but the ref travels back to
+    us on the check-in payload, where nothing re-checked it. Reusing one guest's ref for the whole
+    roster made three occupants read "ID on file" from a single scan — and made `id.view` audit the
+    wrong guest. Checking the prefix is what ties a stored image back to the booking it was taken
+    for."""
+    return valid_ref(ref) and ref.split("/", 1)[0] == f"booking_{int(booking_id)}"
 
 
 def save_scan(booking_id: int, data: bytes, content_type: str | None = None) -> str:

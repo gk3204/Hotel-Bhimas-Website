@@ -116,7 +116,7 @@ const RoomTypes = () => {
             />
 
             <InputField
-              label="Max Occupancy"
+              label="Max Adults"
               name="occupancy"
               type="number"
               placeholder="e.g., 4"
@@ -177,7 +177,7 @@ const RoomTypes = () => {
                     <th className="px-6 py-4 font-semibold text-sm">Name</th>
                     <th className="px-6 py-4 font-semibold text-sm">Price/Night</th>
                     <th className="px-6 py-4 font-semibold text-sm">GST</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Occupancy</th>
+                    <th className="px-6 py-4 font-semibold text-sm">Max adults</th>
                     <th className="px-6 py-4 font-semibold text-sm">Total Rooms</th>
                     <th className="px-6 py-4 font-semibold text-sm">Status</th>
                     <th className="px-6 py-4 font-semibold text-sm">Actions</th>
@@ -201,7 +201,7 @@ const RoomTypes = () => {
                       </td>
                       <td className="px-6 py-4 text-[#E5C07B] font-bold">₹{room.price_per_night}</td>
                       <td className="px-6 py-4 text-slate-300">{room.gst_percent}%</td>
-                      <td className="px-6 py-4 text-slate-300">{room.max_occupancy} guests</td>
+                      <td className="px-6 py-4 text-slate-300">{room.max_occupancy} adults</td>
                       <td className="px-6 py-4 text-slate-300 font-semibold">{room.total_rooms}</td>
                       <td className="px-6 py-4">
                         <span
@@ -292,7 +292,7 @@ const RoomTypes = () => {
                 />
 
                 <InputField
-                  label="Max Occupancy"
+                  label="Max Adults"
                   type="number"
                   value={editingRoom.max_occupancy}
                   onChange={(e) =>

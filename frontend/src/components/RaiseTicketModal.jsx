@@ -1,9 +1,13 @@
 import React, { useState } from "react";
 import { FaTimes, FaWrench } from "react-icons/fa";
 import { createTicket } from "../api/maintenance";
+import { useCategoryList, prettyCategory } from "../utils/useCategoryList";
 
-const CATEGORIES = ["electrical", "plumbing", "carpentry", "appliance", "lock", "other"];
-const PRIORITIES = ["low", "normal", "high", "urgent"];
+// Shipped defaults only — the live lists are edited in admin Settings and win (F-A / FE-6).
+// This modal used to hard-code them, so a category the admin added never reached the staff
+// tablet and one they removed was still offered here.
+const CATEGORY_DEFAULTS = ["electrical", "plumbing", "carpentry", "appliance", "lock", "other"];
+const PRIORITY_DEFAULTS = ["low", "normal", "high", "urgent"];
 
 const inputCls =
   "w-full px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -18,6 +22,14 @@ export default function RaiseTicketModal({ open, onClose, onRaised, rooms = [], 
   const [issue, setIssue] = useState("");
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
+  const categories = useCategoryList("maintenance", CATEGORY_DEFAULTS);
+  const priorities = useCategoryList("priority", PRIORITY_DEFAULTS);
+
+  // The shipped default may not survive an admin edit, so fall back to the list's first
+  // entry — derived at render rather than written back into state, which would fight the
+  // user's own selection on every re-render.
+  const effCategory = categories.includes(category) ? category : (categories[0] || category);
+  const effPriority = priorities.includes(priority) ? priority : (priorities[0] || priority);
 
   if (!open) return null;
 
@@ -32,8 +44,8 @@ export default function RaiseTicketModal({ open, onClose, onRaised, rooms = [], 
       await createTicket({
         room_id: roomId ? Number(roomId) : null,
         area: area || null,
-        category,
-        priority,
+        category: effCategory,
+        priority: effPriority,
         issue: issue.trim(),
       });
       setSaving(false);
@@ -78,20 +90,20 @@ export default function RaiseTicketModal({ open, onClose, onRaised, rooms = [], 
         <div className="grid grid-cols-2 gap-3 mb-3">
           <div>
             <label className="block mb-1 text-sm font-semibold text-slate-300">Category</label>
-            <select className={inputCls} value={category} onChange={(e) => setCategory(e.target.value)}>
-              {CATEGORIES.map((c) => (
+            <select className={inputCls} value={effCategory} onChange={(e) => setCategory(e.target.value)}>
+              {categories.map((c) => (
                 <option key={c} value={c}>
-                  {c}
+                  {prettyCategory(c)}
                 </option>
               ))}
             </select>
           </div>
           <div>
             <label className="block mb-1 text-sm font-semibold text-slate-300">Priority</label>
-            <select className={inputCls} value={priority} onChange={(e) => setPriority(e.target.value)}>
-              {PRIORITIES.map((p) => (
+            <select className={inputCls} value={effPriority} onChange={(e) => setPriority(e.target.value)}>
+              {priorities.map((p) => (
                 <option key={p} value={p}>
-                  {p}
+                  {prettyCategory(p)}
                 </option>
               ))}
             </select>

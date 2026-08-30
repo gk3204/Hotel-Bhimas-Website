@@ -927,3 +927,40 @@ def send_prearrival_link_email(guest_email, guest_name, link, hotel_name="Hotel 
     except Exception as e:
         logger.error(f"❌ Pre-arrival email error: {str(e)}")
         raise
+
+
+def send_owner_report_email(to_email, subject, html_body, pdf_path, filename="report.pdf"):
+    """Email the owner day/week report with the PDF attached. Best-effort; returns True/False."""
+    if not MAILJET_API_KEY or not MAILJET_API_SECRET:
+        logger.info("owner report email skipped - Mailjet not configured")
+        return False
+    if not to_email:
+        return False
+    attachments = []
+    if pdf_path and os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
+        try:
+            with open(pdf_path, "rb") as f:
+                attachments.append({
+                    "ContentType": "application/pdf",
+                    "Filename": filename,
+                    "Base64Content": base64.b64encode(f.read()).decode(),
+                })
+        except Exception as e:
+            logger.warning(f"owner report PDF attach failed: {e}")
+    try:
+        data = {"Messages": [{
+            "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas"},
+            "To": [{"Email": to_email, "Name": "Owner"}],
+            "Subject": subject,
+            "TextPart": "Your Hotel Bhimas report is attached as a PDF.",
+            "HTMLPart": html_body or "<p>Your Hotel Bhimas report is attached.</p>",
+            "Attachments": attachments,
+        }]}
+        result = mailjet.send.create(data=data)
+        if result.status_code == 200:
+            return True
+        logger.error(f"owner report email failed: {result.status_code}")
+        return False
+    except Exception as e:
+        logger.error(f"owner report email error: {e}")
+        return False

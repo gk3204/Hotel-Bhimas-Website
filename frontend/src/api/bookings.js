@@ -55,8 +55,8 @@ export const cancelBooking = async (id) => {
 };
 
 
-// Per-occupant KYC roster for a booking (FE-3). Masked IDs only; `has_scan` says whether
-// an encrypted ID image is on file.
+// Per-occupant KYC roster for a booking (FE-3). Masked IDs only; `has_scan` / `has_scan_back`
+// say whether an encrypted ID image is on file for each side of the card.
 export const getBookingGuests = async (bookingId) => {
   const res = await fetch(`${BASE_URL}/reception/bookings/${bookingId}/guests`, {
     headers: getAuthHeader(),
@@ -68,15 +68,17 @@ export const getBookingGuests = async (bookingId) => {
 // Fetch a decrypted ID scan as a blob URL. It is NEVER a public URL — the endpoint is
 // authed and every view is written to the audit log — so it has to be fetched with the
 // bearer token rather than dropped into an <img src>.
-export const getGuestScanObjectUrl = async (bookingId, guestId) => {
+// `side` is "front" (default) or "back" — the desk flatbed has no duplex, so an ID is
+// captured as two separate passes and each is audited on its own when viewed.
+export const getGuestScanObjectUrl = async (bookingId, guestId, side = "front") => {
   const res = await fetch(
-    `${BASE_URL}/reception/bookings/${bookingId}/guests/${guestId}/scan`,
+    `${BASE_URL}/reception/bookings/${bookingId}/guests/${guestId}/scan?side=${side}`,
     { headers: { Authorization: getAuthHeader().Authorization } },
   );
   if (!res.ok) {
     const msg = res.status === 503
       ? "ID scans can't be decrypted — the encryption key isn't configured on the server."
-      : "No ID scan on file for this guest.";
+      : `No ${side} ID scan on file for this guest.`;
     throw new Error(msg);
   }
   const blob = await res.blob();

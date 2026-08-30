@@ -10,6 +10,7 @@ import {
 import { adminCancelBooking } from "../../api/admin";
 import { jwtDecode } from "jwt-decode";
 import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard } from "react-icons/fa";
+import { prettyCategory } from "../../utils/useCategoryList";
 
 // "2026-08-02T14:32:10" -> "14:32". Times are stored/served in Asia/Kolkata.
 const stampTime = (iso) => (iso ? String(iso).slice(11, 16) : "");
@@ -19,6 +20,11 @@ const stampDateTime = (iso) => {
   const [y, m, day] = (d || "").split("-");
   return `${day}-${m}-${y} ${(t || "").slice(0, 5)}`;
 };
+
+// v4b9 R13: booking sources are an admin-editable list, so this FORMATS the stored slug rather
+// than mapping known values to labels. A hard-coded map (OtaChannels.jsx already carries one)
+// goes stale the day the owner adds a channel, and then the list shows the wrong name.
+const sourceLabel = (slug) => (slug ? prettyCategory(slug) : "—");
 
 const Bookings = () => {
   const [bookings, setBookings] = useState([]);
@@ -303,6 +309,9 @@ const Bookings = () => {
                           {getSortIcon("guest_name")}
                         </div>
                       </th>
+                      {/* v4b9 R13: where the booking came from. Every revenue report groups by
+                          this, but the list a human reads never showed it. */}
+                      <th className="px-6 py-4 font-semibold">Source</th>
                       <th className="px-6 py-4 font-semibold text-center">
                         Rooms
                       </th>
@@ -338,7 +347,7 @@ const Bookings = () => {
                     {bookings.length === 0 ? (
                       <tr>
                         <td
-                          colSpan="8"
+                          colSpan="9"
                           className="px-6 py-12 text-center text-slate-400"
                         >
                           No bookings found
@@ -355,6 +364,19 @@ const Bookings = () => {
                           </td>
                           <td className="px-6 py-4 text-sm">
                             <div className="font-medium">{b.guest_name}</div>
+                          </td>
+                          <td className="px-6 py-4 text-sm">
+                            <div>{sourceLabel(b.booking_source)}</div>
+                            {b.ota_booking_id && (
+                              <div className="text-xs text-slate-500 font-mono">{b.ota_booking_id}</div>
+                            )}
+                            {/* v4b9 R9: the guest already paid the channel, so this stay must not
+                                be chased for room money. */}
+                            {b.is_prepaid && (
+                              <div className="text-xs text-[#FCD34D]">
+                                paid in advance · ₹{Number(b.prepaid_amount || 0).toFixed(2)}
+                              </div>
+                            )}
                           </td>
                           <td className="px-6 py-4 text-center">
                             <span className="bg-blue-500/20 text-blue-300 border border-blue-500/30 px-3 py-1 rounded-full text-xs font-semibold">
@@ -384,6 +406,16 @@ const Bookings = () => {
                             >
                               {b.status.replace(/_/g, " ")}
                             </span>
+                            {/* v4b6: a giveaway belongs in the LIST, not only on the detail
+                                modal — it is the thing an owner scans a page of bookings for. */}
+                            {b.comp_mode && b.comp_mode !== "none" && (
+                              <span
+                                title={b.comp_reason || ""}
+                                className="mt-1 block px-2 py-0.5 rounded-full text-[10px] font-semibold border border-[#E5C07B]/50 bg-[#E5C07B]/15 text-[#FCD34D]"
+                              >
+                                {b.comp_mode === "all" ? "Complimentary" : "Room free"}
+                              </span>
+                            )}
                           </td>
                           <td className="px-6 py-4 text-right text-sm font-semibold text-[#E5C07B]">
                             ₹{Number(b.payable_amount).toFixed(2)}
@@ -566,6 +598,31 @@ const Bookings = () => {
                         {selectedBooking.stay.nights} nights
                       </p>
                     </div>
+                    {/* v4b9 R13: where it came from, with the channel's own reference. */}
+                    <div>
+                      <p className="text-slate-400 text-xs mb-1">Source</p>
+                      <p className="font-semibold">
+                        {sourceLabel(selectedBooking.booking_source)}
+                      </p>
+                      {selectedBooking.ota_booking_id && (
+                        <p className="text-xs text-slate-500 font-mono">
+                          {selectedBooking.ota_booking_id}
+                        </p>
+                      )}
+                    </div>
+                    {/* v4b9 R9: paid to the CHANNEL, so it is an advance against this stay and
+                        never a Payment row — only extras are collectable at the desk. */}
+                    {Number(selectedBooking.prepaid_amount || 0) > 0 && (
+                      <div>
+                        <p className="text-slate-400 text-xs mb-1">Paid in advance</p>
+                        <p className="font-semibold text-[#FCD34D]">
+                          ₹{Number(selectedBooking.prepaid_amount).toFixed(2)}
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          to {sourceLabel(selectedBooking.prepaid_source)}
+                        </p>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -807,11 +864,11 @@ function OccupantsCard({ bookingId }) {
   // Blob URLs must be released or they leak for the life of the tab.
   useEffect(() => () => { if (scan?.url) URL.revokeObjectURL(scan.url); }, [scan]);
 
-  const viewScan = async (g) => {
+  const viewScan = async (g, side) => {
     setScanError("");
     try {
-      const s = await getGuestScanObjectUrl(bookingId, g.id);
-      setScan({ ...s, name: g.name });
+      const s = await getGuestScanObjectUrl(bookingId, g.id, side);
+      setScan({ ...s, name: g.name, side });
     } catch (e) {
       setScanError(e.message || "Could not open the ID scan");
     }
@@ -862,13 +919,25 @@ function OccupantsCard({ bookingId }) {
                   </td>
                   <td className="py-2 pr-4 font-mono">{g.id_number_masked || "—"}</td>
                   <td className="py-2 text-right">
-                    {g.has_scan ? (
-                      <button
-                        onClick={() => viewScan(g)}
-                        className="bg-slate-600 hover:bg-slate-500 px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5 transition"
-                      >
-                        <FaIdCard size={11} /> View
-                      </button>
+                    {g.has_scan || g.has_scan_back ? (
+                      <span className="inline-flex items-center gap-1.5 justify-end">
+                        {g.has_scan && (
+                          <button
+                            onClick={() => viewScan(g, "front")}
+                            className="bg-slate-600 hover:bg-slate-500 px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5 transition"
+                          >
+                            <FaIdCard size={11} /> Front
+                          </button>
+                        )}
+                        {g.has_scan_back && (
+                          <button
+                            onClick={() => viewScan(g, "back")}
+                            className="bg-slate-600 hover:bg-slate-500 px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5 transition"
+                          >
+                            <FaIdCard size={11} /> Back
+                          </button>
+                        )}
+                      </span>
                     ) : (
                       <span className="text-slate-500 text-xs">none</span>
                     )}
@@ -891,14 +960,20 @@ function OccupantsCard({ bookingId }) {
           <div className="bg-slate-800 border border-slate-600 rounded-xl p-4 max-w-3xl max-h-full overflow-auto"
                onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
-              <h4 className="font-bold text-[#E5C07B]">ID scan — {scan.name}</h4>
+              <h4 className="font-bold text-[#E5C07B]">
+                ID scan ({scan.side === "back" ? "back" : "front"}) — {scan.name}
+              </h4>
               <button onClick={closeScan}
                       className="text-slate-400 hover:text-white px-2 text-xl leading-none">×</button>
             </div>
             {scan.type === "application/pdf" ? (
-              <iframe title="ID scan" src={scan.url} className="w-[70vw] h-[70vh] bg-white rounded" />
+              // sandbox with no allow-* tokens: the blob: URL inherits THIS origin, where the
+              // admin token lives, so a PDF that is not really a PDF must not get script or
+              // same-origin access. Rendering a PDF needs neither.
+              <iframe title="ID scan" src={scan.url} sandbox=""
+                      className="w-[70vw] h-[70vh] bg-white rounded" />
             ) : (
-              <img src={scan.url} alt={`ID scan for ${scan.name}`}
+              <img src={scan.url} alt={`ID scan (${scan.side || "front"}) for ${scan.name}`}
                    className="max-w-full max-h-[70vh] rounded" />
             )}
           </div>

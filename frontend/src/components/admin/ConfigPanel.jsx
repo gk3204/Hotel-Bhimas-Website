@@ -31,6 +31,19 @@ export function Toggle({ checked, onChange, label, hint, disabled }) {
 function FieldRow({ field, value, onChange }) {
   const { key, label, hint, type = "text", options, min, max, step, placeholder } = field;
 
+  // A select over people (or rooms) cannot be declared statically — it goes stale the moment
+  // one is added. `optionsLoad` fetches them at render; the declared `options` stay as the
+  // fallback so the field is still usable when that fetch fails.
+  const [loaded, setLoaded] = useState(null);
+  useEffect(() => {
+    if (!field.optionsLoad) return undefined;
+    let alive = true;
+    field.optionsLoad()
+      .then((o) => { if (alive && Array.isArray(o)) setLoaded(o); })
+      .catch(() => { /* keep the declared options */ });
+    return () => { alive = false; };
+  }, [field]);
+
   if (type === "toggle") {
     return <Toggle checked={value} onChange={onChange} label={label} hint={hint} />;
   }
@@ -46,9 +59,18 @@ function FieldRow({ field, value, onChange }) {
 
   const renderInput = () => {
     if (type === "select") {
+      const opts = loaded || options || [];
+      // A <select> hands back a string. Send back the type the option carried, or a saved
+      // numeric id would arrive as "2" and read as a change on every render.
+      const numeric = opts.some((o) => typeof o === "object" && typeof o.value === "number");
       return (
-        <select id={`cfg-${key}`} {...common}>
-          {(options || []).map((o) => {
+        <select
+          id={`cfg-${key}`}
+          className={inputCls}
+          value={shown}
+          onChange={(e) => onChange(numeric ? Number(e.target.value) : e.target.value)}
+        >
+          {opts.map((o) => {
             const v = typeof o === "string" ? o : o.value;
             const l = typeof o === "string" ? o : o.label;
             return <option key={v} value={v}>{l}</option>;

@@ -24,8 +24,8 @@ const statusChip = (s) => {
     assigned: "bg-blue-500/20 text-blue-300 border-blue-500/30",
     in_progress: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
     awaiting_parts: "bg-amber-500/20 text-amber-300 border-amber-500/30",
-    resolved: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30",
-    verified: "bg-green-500/20 text-green-300 border-green-500/30",
+    work_done: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30",
+    resolved: "bg-green-500/20 text-green-300 border-green-500/30",
     closed: "bg-green-500/20 text-green-300 border-green-500/30",
   };
   return map[s] || "bg-slate-600/30 text-slate-300 border-slate-600/40";
@@ -34,7 +34,14 @@ const statusChip = (s) => {
 // Shipped defaults only — this list duplicated the `maintenance` family that admin
 // Settings already edits, so the two could drift. The live list now wins (FE-6).
 const CATEGORY_DEFAULTS = ["electrical", "plumbing", "carpentry", "appliance", "lock", "other"];
-const STATUSES = ["", "open", "assigned", "in_progress", "awaiting_parts", "resolved", "verified"];
+// v4b8 (R20): the technician's terminal step is `work_done`; only the sign-off sets
+// `resolved`. The old `verified` was renamed to `resolved` by migration 031.
+const STATUSES = ["", "open", "assigned", "in_progress", "awaiting_parts", "work_done", "resolved"];
+const STATUS_LABEL = {
+  "": "All", open: "Open", assigned: "Assigned", in_progress: "In progress",
+  awaiting_parts: "Awaiting parts", work_done: "Work done — awaiting sign-off",
+  resolved: "Resolved", closed: "Closed",
+};
 
 export default function Maintenance() {
   const [tickets, setTickets] = useState([]);
@@ -115,7 +122,7 @@ export default function Maintenance() {
     setBusy(true);
     try {
       await verifyTicket(t.id, {});
-      showToast(`Ticket #${t.id} verified & closed`);
+      showToast(`Ticket #${t.id} signed off — resolved`);
       await load();
     } catch (e) {
       showToast(e.message, "error");
@@ -127,7 +134,7 @@ export default function Maintenance() {
     <PageShell
       icon="🔧"
       title="Maintenance"
-      subtitle="Assign tickets to a technician, approve required parts, and verify-close. Purchased parts post to the shift ledger."
+      subtitle="Assign tickets to a technician, approve required parts, and sign off the finished work. Purchased parts post to the shift ledger."
     >
 
         {/* Filters + summary */}
@@ -136,7 +143,7 @@ export default function Maintenance() {
             <label className="mb-1 text-sm font-semibold text-slate-300">Status</label>
             <select value={filters.status} onChange={(e) => setFilters({ ...filters, status: e.target.value })} className={inputCls}>
               {STATUSES.map((s) => (
-                <option key={s} value={s}>{s || "All"}</option>
+                <option key={s} value={s}>{STATUS_LABEL[s] || s}</option>
               ))}
             </select>
           </div>
@@ -193,7 +200,7 @@ export default function Maintenance() {
                         <td className="px-5 py-4 text-slate-300 text-sm">{t.room_number ? `Room ${t.room_number}` : t.area || "Common"}</td>
                         <td className="px-5 py-4 text-slate-300 text-sm">{t.category}</td>
                         <td className="px-5 py-4 text-slate-300 text-sm">{t.priority}</td>
-                        <td className="px-5 py-4"><span className={`px-3 py-1 rounded-full text-xs font-bold border ${statusChip(t.status)}`}>{t.status}</span></td>
+                        <td className="px-5 py-4"><span className={`px-3 py-1 rounded-full text-xs font-bold border ${statusChip(t.status)}`}>{t.status === "work_done" ? "work done" : t.status}</span></td>
                         <td className="px-5 py-4 text-slate-300 text-sm">{t.assignee_name || "—"}</td>
                         <td className={`px-5 py-4 text-sm ${t.overdue ? "text-red-300 font-semibold" : "text-slate-400"}`}>
                           {t.age_days}d {t.overdue && "⚠"}
@@ -213,9 +220,11 @@ export default function Maintenance() {
                                 ))}
                               </select>
                             )}
-                            {t.status === "resolved" && (
+                            {/* Only the sign-off marks a ticket resolved — the technician
+                                can go no further than `work_done` (v4b8 R20). */}
+                            {t.status === "work_done" && (
                               <button disabled={busy} onClick={() => doVerify(t)} className="bg-green-700 hover:bg-green-800 px-3 py-1.5 rounded-lg text-sm font-semibold flex items-center gap-2 disabled:opacity-50">
-                                <FaCheckDouble /> Verify
+                                <FaCheckDouble /> Sign off
                               </button>
                             )}
                             <button onClick={() => toggleDetail(t.id)} className="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-sm font-semibold">

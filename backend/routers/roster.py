@@ -36,7 +36,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/roster", tags=["Roster & Attendance"])
 
 # Roles that appear on the duty roster (website `user` accounts are guests, not staff).
-STAFF_ROLES = ("admin", "reception", "housekeeper", "maintenance")
+# v4b8: `supervisor` merged into `housekeeper`, which is already here — so former
+# supervisors now appear on the duty roster, which they never did before.
+STAFF_ROLES = ("admin", "reception", "housekeeper", "maintenance", "roomservice")
 
 
 def get_db():

@@ -98,6 +98,9 @@ def compute_day_close(db, business_date, folios_posted=0, generated_by="schedule
     row.taxable_total = st["taxable"]
     row.cgst_total = st["cgst"]
     row.sgst_total = st["sgst"]
+    # v4b6: what was given away on this date. Snapshotted ALONGSIDE the revenue figures and
+    # never inside them, so the day-close's tax numbers stay exactly as they were.
+    row.comp_room_value = st.get("comp_room_value")
     row.cash_collected = coll["cash"]
     row.cash_expected = cash_expected
     row.cash_variance = cash_variance
@@ -123,6 +126,16 @@ def run_night_audit(db, business_date=None, user=None, generated_by="scheduler")
     summary dict {business_date, folios_posted, snapshot}."""
     target = _target_date(db, business_date)
     logger.info(f"🌙 Night audit / day-close for {target} (by {generated_by})")
+
+    # v4b3: catch-up sweep, in case the 15-minute overstay scheduler was down (a redeploy, a
+    # crashed worker). Idempotent — the check_out invariant means a booking already billed for
+    # tonight is no longer overdue — so a second caller is free.
+    try:
+        from services.overstay_billing import sweep_overstays
+        sweep_overstays(db, generated_by="night-audit")
+    except Exception as e:
+        logger.error(f"night-audit: overstay sweep failed: {e}")
+        db.rollback()
 
     try:
         folios_posted = ensure_folios_posted(db)

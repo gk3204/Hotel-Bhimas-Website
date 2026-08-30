@@ -1,0 +1,19 @@
+# Caddy auto-HTTPS reverse proxy for the Hotel Bhimas backend.
+# Replace api.hotelbhimas.in with YOUR api subdomain (its A record must point at this VPS),
+# and set a real email so Let's Encrypt can notify you about the certificate.
+#
+# Caddy fetches + renews the TLS certificate automatically on first start — nothing else to do.
+
+{
+    email owner@hotelbhimas.in
+}
+
+api.hotelbhimas.in {
+    encode gzip
+    reverse_proxy api:8000
+
+    # Larger uploads for ID scans / documents (default is generous, but be explicit).
+    request_body {
+        max_size 12MB
+    }
+}

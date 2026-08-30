@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Numeric, Date, Time, ForeignKey, DateTime, TIMESTAMP, Boolean, Float, Index, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Numeric, Date, Time, ForeignKey, DateTime, TIMESTAMP, Boolean, Float, Index, UniqueConstraint, Text
 from sqlalchemy.sql import func
 from database import Base
 from sqlalchemy.orm import relationship
@@ -51,6 +51,12 @@ class Room(Base):
     floor = Column(Integer, nullable=False, default=1)      # card code FF
     max_cards = Column(Integer, nullable=False, default=4)  # per-room key limit
     lock_no = Column(String(20), nullable=True)            # optional physical lock id
+    # --- Alternate room type (v4b7, migration 030, additive) ---
+    # A second type this physical room may be sold as (Room 47 = Triple A/C by default, also
+    # lettable as Triple Non-A/C). Selling as the alternate needs an owner code, and only when
+    # no room of the BOOKED type is free — see reception.check_in.
+    alt_room_type_id = Column(Integer, ForeignKey("room_types.room_type_id"),
+                              nullable=True, index=True)
     is_active = Column(Boolean, nullable=False, default=True, index=True)  # False = out of service (repair) → not bookable
     status_changed_at = Column(DateTime, nullable=True)    # when `status` last changed (prompt 11 cleaning-too-long detection)
 
@@ -71,6 +77,10 @@ class Booking(Base):
     check_in = Column(Date, nullable=False, index=True)
     check_in_time = Column(Time, nullable=True)  # Guest's expected arrival time
     check_out = Column(Date, nullable=False, index=True)
+    # Occupancy: adults count against the room type's max_occupancy (= max adults); children are
+    # separate (not counted toward the adult cap). ID is mandatory for adults, optional for minors.
+    adults = Column(Integer, nullable=False, default=1)
+    children = Column(Integer, nullable=False, default=0)
     booking_source = Column(String(20), default="online")
     status = Column(String(30), nullable=False, index=True)
     base_amount = Column(Numeric(10, 2))
@@ -96,10 +106,38 @@ class Booking(Base):
     # --- OTA tracking (prompt 17 Phase A, additive) — set when booking_source is an OTA channel ---
     ota_booking_id = Column(String(80), nullable=True, index=True)    # the OTA's own reference (MMT/Goibibo/Booking.com/Agoda)
     ota_commission_percent = Column(Numeric(5, 2), nullable=True)     # commission % (from per-OTA config, overridable at entry)
-    ota_net_payout = Column(Numeric(10, 2), nullable=True)           # expected payout = gross - commission (snapshot)
+    ota_commission_amount = Column(Numeric(10, 2), nullable=True)     # ACTUAL commission (incl GST) read from the voucher; preferred over %×gross
+    ota_net_payout = Column(Numeric(10, 2), nullable=True)           # expected payout = gross - commission (snapshot), or the voucher's "Payable to Property"
     # --- Corporate bill-to-company (prompt 18 slice 7, additive) ---
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)  # the bill-to company
     bill_to = Column(String(10), nullable=False, default="guest", index=True)  # guest | company | split
+    # --- Stay extension bookkeeping (v4b1, migration 028, additive) ---
+    # An overstay auto-charge or a manual extension moves check_out, which moves the key-card
+    # window, so the guest's card has to be re-cut. Cleared by POST /cards/issue.
+    card_reencode_required = Column(Boolean, nullable=False, default=False)
+    # What the guest actually BOOKED. Set once on the first extension of any kind and never
+    # overwritten, because check_out itself moves. The v4b3 runaway guard reads it.
+    original_check_out = Column(Date, nullable=True)
+    # --- Prepayment collected by a third party (v4b1, migration 028, additive) ---
+    # OTA bookings record NO Payment row — the channel took the money, not the hotel — so
+    # total_paid() returned 0 and the desk billed the guest for the room a SECOND time.
+    # ⚠️ This is the GROSS the guest paid the channel, NOT ota_net_payout (what the hotel
+    # receives after commission). Credited to the folio at open_folio. Deliberately not a
+    # Payment row: that would put money the hotel never touched into collections_summary,
+    # the cash-drawer gate and the shift variance.
+    prepaid_amount = Column(Numeric(12, 2), nullable=False, default=0)
+    prepaid_source = Column(String(20), nullable=True)     # ota | website | agent
+    # --- Complimentary stay (v4b6, migration 029, additive) ---
+    # `all` = room rent AND every folio extra are free; `room` = room rent free, extras billed.
+    # Charges are SUPPRESSED, not discounted: posting a taxable line then discounting it 100%
+    # would create an output-tax liability on a supply with no consideration.
+    # ⚠️ grand_total is NOT zeroed — it records what the stay was WORTH, and is read by agent
+    # commission, the OTA payout snapshot, loyalty and every ADR/RevPAR figure.
+    comp_mode = Column(String(10), nullable=False, default="none")   # none | all | room
+    comp_reason = Column(String(200), nullable=True)
+    comp_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    comp_at = Column(DateTime, nullable=True)
+    comp_otp_id = Column(Integer, nullable=True)   # the owner approval that released it
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
     updated_at = Column(TIMESTAMP, server_default=func.now(), onupdate=func.now(), nullable=True)
 
@@ -124,10 +162,19 @@ class BookingItem(Base):
     gst_amount = Column(Numeric(10, 2))
     discount_amount = Column(Numeric(10, 2), default=0)  # Promotion discount applied to this line item
     total_amount = Column(Numeric(10, 2), nullable=False)
+    # --- Alternate room type (v4b7, migration 030, additive) ---
+    # The room's PHYSICAL type when the stay was sold as an alternate.
+    # ⚠️ `room_type_id` above stays as what was BOOKED AND PRICED: availability.booked_qty
+    # groups on it, so changing it would move a live reservation between inventory buckets
+    # mid-stay. This column is what makes every alternate sale reportable afterwards.
+    sold_as_room_type_id = Column(Integer, ForeignKey("room_types.room_type_id"),
+                                  nullable=True, index=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
 
-    room_type = relationship("RoomType")
-    room = relationship("Room")
+    # Two FKs to room_types now, so the join has to be explicit.
+    room_type = relationship("RoomType", foreign_keys=[room_type_id])
+    sold_as_room_type = relationship("RoomType", foreign_keys=[sold_as_room_type_id])
+    room = relationship("Room", foreign_keys=[room_id])
     booking = relationship("Booking", back_populates="booking_items")
 
 
@@ -135,7 +182,11 @@ class BookingGuest(Base):
     """Per-occupant KYC for a booking (FE-3). One row per guest staying in the room — the lead
     (is_primary=True) plus each companion. ID numbers are stored MASKED only (raw never persisted,
     like Guest.id_number_masked); the ID scan image is stored ENCRYPTED via utils.secure_id_store
-    and referenced by `id_scan_ref` (never a public URL — served by an authed decrypt-on-read route)."""
+    and referenced by `id_scan_ref` (never a public URL — served by an authed decrypt-on-read route).
+
+    An ID has two sides and the desk flatbed has no ADF, so front and back are captured as two
+    separate scans (migration 026). Both are encrypted the same way and read through the same
+    audited route, selected by `?side=`."""
     __tablename__ = "booking_guests"
     id = Column(Integer, primary_key=True, index=True)
     booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=False, index=True)
@@ -144,8 +195,19 @@ class BookingGuest(Base):
     id_number_masked = Column(String(30), nullable=True)   # masked "****1234" — raw never stored
     id_scan_ref = Column(String(120), nullable=True)       # encrypted-file ref: booking_<id>/<uuid>.enc
     id_scan_mime = Column(String(40), nullable=True)       # content type, for the decrypt-on-read stream
+    id_scan_back_ref = Column(String(120), nullable=True)  # reverse of the ID (same encrypted store)
+    id_scan_back_mime = Column(String(40), nullable=True)
     is_primary = Column(Boolean, nullable=False, default=False, index=True)
+    is_minor = Column(Boolean, nullable=False, default=False)   # a child — recorded by name, ID optional
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+
+
+# The desk payment methods, in reporting order. A CONTRACT, not an editable list: each value
+# is validated by a regex in schemas.py, drives the cash-drawer gate in routers/payments.py and
+# is a column in every collections report. Adding one is a code change, not a settings change.
+PAYMENT_METHODS = ("cash", "card", "upi", "bank")
+# How money goes back out. Razorpay refunds leave this NULL (they return down the original rail).
+REFUND_MODES = ("cash", "upi", "bank")
 
 
 class Payment(Base):
@@ -267,8 +329,13 @@ class CardIssuance(Base):
     station_id = Column(String(50), nullable=True)             # which front-desk PC issued it
     issued_at = Column(TIMESTAMP, server_default=func.now(), index=True)
     status = Column(String(20), nullable=False, default="active", index=True)  # active|checked_out|erased|lost|superseded
-    issue_type = Column(String(20), nullable=False, default="checkin")  # checkin|extra|lost_reissue|shift
+    issue_type = Column(String(20), nullable=False, default="checkin")  # checkin|extra|lost_reissue|shift|extend
     client_ref = Column(String(64), nullable=True, unique=True, index=True)  # desktop-generated uuid (offline outbox dedupe)
+    # --- Card erased at checkout (v4b1 columns, used from v4b4, additive) ---
+    # Recorded from day one even while the "checkout needs the card" gate is off, so the
+    # owner can see how often a card actually comes back before making it blocking.
+    erased_at = Column(DateTime, nullable=True)
+    erased_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
 
 
 class Folio(Base):
@@ -306,6 +373,23 @@ class FolioCharge(Base):
     void = Column(Boolean, default=False, index=True)          # never hard-delete; mark void + reversing entry
     void_reason = Column(String(200), nullable=True)
     reversal_of_id = Column(Integer, ForeignKey("folio_charges.id"), nullable=True, index=True)  # set on the reversing entry
+    # --- Product-wise sales (v3 item 4, migration 027, additive) ---
+    # Set ONLY by services/room_service.post_to_folio, which writes one charge per menu line.
+    # Without it, "which dishes sell?" could only be answered by parsing the order payload
+    # JSON, which cannot see voids and so never reconciles with the revenue reports.
+    menu_item_id = Column(Integer, ForeignKey("menu_items.id"), nullable=True, index=True)
+    # --- Room-night identity (v4b1, migration 028, additive) ---
+    # Which night this room line covers, and which booking item it belongs to. Written only by
+    # services/room_posting.post_room_nights. Together they form the partial unique index
+    # uq_folio_room_night, which is what makes "post the nights in this range" idempotent
+    # across check-in, extend-stay and the automatic overstay charge.
+    # ⚠️ That index does NOT filter on `void`: a voided night keeps its slot, so the overstay
+    # sweep can never re-bill a night the owner has just reversed. And a REVERSAL row must
+    # leave both columns NULL (it is excluded via reversal_of_id IS NULL) or it collides.
+    charge_date = Column(Date, nullable=True, index=True)
+    booking_item_id = Column(Integer, ForeignKey("booking_items.booking_item_id"),
+                             nullable=True, index=True)
+    posting_reason = Column(String(20), nullable=True)   # checkin | extend | overstay
     # --- Corporate split billing (prompt 18 slice 7, additive) ---
     # THIS is the split folio: one folio, each line routed to whoever pays it.
     bill_to = Column(String(10), nullable=False, default="guest", index=True)  # guest | company
@@ -579,6 +663,15 @@ class HousekeepingTask(Base):
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
     started_at = Column(DateTime, nullable=True)
     done_at = Column(DateTime, nullable=True)
+    # --- Named cleaner / inspector (v4b8, migration 031, additive) ---
+    # Picked from the admin-editable `cleaned_by` / `inspected_by` lists, so a contract cleaner
+    # can be recorded without anyone creating them a login.
+    # ⚠️ PARALLEL to the login-derived name from `assigned_to` (housekeeping._staff_name) —
+    # one answers "which login did the work", the other "whose name goes on the sheet".
+    # Keep both; do not overwrite one with the other.
+    cleaned_by_name = Column(String(80), nullable=True)
+    inspected_by_name = Column(String(80), nullable=True)
+    inspected_at = Column(DateTime, nullable=True)
 
 
 class MaintenanceTicket(Base):
@@ -738,8 +831,21 @@ class WhatsAppMessage(Base):
     guest_id = Column(Integer, ForeignKey("guests.guest_id"), nullable=True, index=True)
     booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=True, index=True)
     client_ref = Column(String(120), nullable=True, unique=True)  # idempotency for scheduled sends
+    # Inbox: the staff user who sent this (free-text reply / inbox template send). NULL for automated
+    # sends (OTP, confirmations, owner alerts) — lets the inbox show only real staff conversations.
+    sent_by = Column(Integer, ForeignKey("users.user_id"), nullable=True, index=True)
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
     updated_at = Column(DateTime, nullable=True)
+
+
+class WhatsAppConversationRead(Base):
+    """Per-customer-number read marker for the staff inbox. Unread = inbound messages with
+    id > last_read_message_id. One row per number, upserted when staff open the thread."""
+    __tablename__ = "whatsapp_conversation_reads"
+    phone = Column(String(20), primary_key=True)              # E.164 (no '+')
+    last_read_message_id = Column(Integer, nullable=False, default=0)
+    last_read_at = Column(TIMESTAMP, server_default=func.now())
+    updated_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
 
 
 class WhatsAppOptOut(Base):
@@ -771,6 +877,10 @@ class DayCloseSummary(Base):
     taxable_total = Column(Numeric(12, 2), nullable=True)
     cgst_total = Column(Numeric(12, 2), nullable=True)
     sgst_total = Column(Numeric(12, 2), nullable=True)
+    # v4b6: value given away as complimentary on this date. Reported ALONGSIDE the revenue
+    # above, never inside it — suppression keeps the GST figures right but makes ADR/RevPAR
+    # understate, and this is what answers "how much did we comp?".
+    comp_room_value = Column(Numeric(12, 2), nullable=True)
     cash_collected = Column(Numeric(12, 2), nullable=True)
     cash_expected = Column(Numeric(12, 2), nullable=True)
     cash_variance = Column(Numeric(12, 2), nullable=True)     # counted - expected across shifts closed that day
@@ -842,8 +952,12 @@ class OtaDraftBooking(Base):
     check_in = Column(Date, nullable=True)
     check_out = Column(Date, nullable=True)
     room_type_hint = Column(String(120), nullable=True)   # OTA's room name (mapped to a PMS type at confirm time)
+    adults = Column(Integer, nullable=False, default=1)    # occupancy parsed from the email (v4 occupancy)
+    children = Column(Integer, nullable=False, default=0)
     amount = Column(Numeric(10, 2), nullable=True)         # gross booking value parsed from the email
     commission_percent = Column(Numeric(5, 2), nullable=True)  # snapshot of the channel commission at parse time
+    commission_amount = Column(Numeric(10, 2), nullable=True)  # ACTUAL commission (incl GST) read from the voucher
+    net_payout = Column(Numeric(10, 2), nullable=True)         # ACTUAL "Payable to Property" read from the voucher
     message_id = Column(String(200), nullable=True, index=True)  # email Message-ID, for IMAP-level dedupe
     raw_source = Column(String, nullable=True)             # raw email text snippet (audit / manual fallback)
     linked_booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=True)  # set on confirm
@@ -1243,6 +1357,9 @@ class MenuItem(Base):
     price = Column(Numeric(10, 2), nullable=False, default=0)
     gst_percent = Column(Float, nullable=True)
     is_available = Column(Boolean, default=True, index=True)
+    # JSON list of {"start":"HH:MM","end":"HH:MM"} time windows the item is orderable in (IST).
+    # NULL/empty = available all day (subject to is_available). A window may cross midnight.
+    available_windows = Column(Text, nullable=True)
     sort_order = Column(Integer, nullable=False, default=0)
     stock_item_id = Column(Integer, ForeignKey("stock_items.id"), nullable=True)  # optional inventory link
     created_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)

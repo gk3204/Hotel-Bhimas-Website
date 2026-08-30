@@ -2,6 +2,7 @@ import React from "react";
 import { Outlet, useLocation } from "react-router-dom";
 import StaffHeader from "../components/StaffHeader";
 import RouteErrorBoundary from "../components/RouteErrorBoundary";
+import PwaPrompts from "../components/PwaPrompts";
 
 // Mobile-first shell for the housekeeper/maintenance PWA.
 const StaffLayout = () => {
@@ -14,6 +15,9 @@ const StaffLayout = () => {
           <Outlet />
         </RouteErrorBoundary>
       </div>
+      {/* v4b10: install / update / offline. Mounted in the STAFF and ADMIN shells only, so the
+          public booking site stays an ordinary website that never offers to install itself. */}
+      <PwaPrompts />
     </div>
   );
 };

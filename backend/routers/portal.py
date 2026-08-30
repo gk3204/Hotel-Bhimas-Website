@@ -23,8 +23,9 @@ import json
 import logging
 import os
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, time as _dtime
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from sqlalchemy.orm import Session
@@ -32,8 +33,8 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import (Booking, Folio, FolioCharge, Guest, GuestPortalSession, GuestRequest, MenuItem,
                     Room)
-from schemas import (CabRequest, CheckoutRequestBody, MenuItemCreate, MenuItemUpdate,
-                     PortalConfigUpdate, PortalSessionRequest, RequestActionRequest,
+from schemas import (CabRequest, CheckoutRequestBody, MenuAvailabilityUpdate, MenuItemCreate,
+                     MenuItemUpdate, PortalConfigUpdate, PortalSessionRequest, RequestActionRequest,
                      RoomServiceOrder, WakeupRequest, WifiRequestBody)
 from utils import settings as app_settings
 from utils.audit import _resolve_user_id, write_audit
@@ -119,12 +120,57 @@ def _wifi_code(session: GuestPortalSession) -> str:
     return session.token[:8].upper()
 
 
+_IST = ZoneInfo("Asia/Kolkata")
+
+
+def _parse_windows(raw) -> list:
+    """menu_items.available_windows JSON text -> [{"start","end"}, ...]. Tolerant of junk/None."""
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        out = []
+        for w in (data or []):
+            s, e = (w.get("start"), w.get("end")) if isinstance(w, dict) else (w[0], w[1])
+            if s and e:
+                out.append({"start": str(s), "end": str(e)})
+        return out
+    except Exception:
+        return []
+
+
+def _in_window(now_t: _dtime, start: str, end: str) -> bool:
+    """Is now_t within [start, end)? Handles a window that crosses midnight (start > end)."""
+    try:
+        sh, sm = (int(x) for x in start.split(":"))
+        eh, em = (int(x) for x in end.split(":"))
+    except Exception:
+        return False
+    s, e = _dtime(sh, sm), _dtime(eh, em)
+    if s <= e:
+        return s <= now_t < e
+    return now_t >= s or now_t < e   # crosses midnight
+
+
+def _orderable_now(m: MenuItem, now_local: datetime | None = None) -> bool:
+    """True when the guest can order this item right now: available AND (all-day OR inside a window)."""
+    if not m.is_available:
+        return False
+    windows = _parse_windows(getattr(m, "available_windows", None))
+    if not windows:
+        return True
+    now_t = (now_local or datetime.now(_IST)).time()
+    return any(_in_window(now_t, w["start"], w["end"]) for w in windows)
+
+
 def _menu_dict(m: MenuItem) -> dict:
     return {
         "id": m.id, "name": m.name, "description": m.description, "category": m.category,
         "price": float(m.price or 0), "gst_percent": float(m.gst_percent) if m.gst_percent is not None else None,
         "is_available": bool(m.is_available), "sort_order": m.sort_order,
         "stock_item_id": m.stock_item_id,
+        "available_windows": _parse_windows(getattr(m, "available_windows", None)),
+        "orderable_now": _orderable_now(m),
     }
 
 
@@ -285,6 +331,18 @@ def complete_request(request_id: int, data: RequestActionRequest, db: Session = 
         if r.status in ("completed", "dismissed"):
             return {**_request_dict(db, r, with_room=True), "duplicate": True}
 
+        # v4b5 (R4): a room-service order cannot be completed once the guest has left. The
+        # request was checked against the stay when it was CREATED, but nothing re-checked it
+        # here — so a late tap tried to bill a settled folio and failed with an incidental
+        # "folio is settled" 409, leaving the order stranded in `acknowledged`.
+        if r.type == "room_service" and r.booking_id:
+            bk = db.query(Booking).filter(Booking.booking_id == r.booking_id).first()
+            if bk and bk.status != "checked_in":
+                raise HTTPException(
+                    status_code=409,
+                    detail="That guest has already checked out — this order can no longer be "
+                           "billed. Correct it on the folio instead.")
+
         if r.type == "room_service":
             _post_room_service_to_folio(db, r, user)
         elif r.type == "wifi" and data.code:
@@ -352,6 +410,8 @@ def create_menu_item(data: MenuItemCreate, db: Session = Depends(get_db), user=D
     try:
         payload = data.model_dump()
         payload["category"] = app_settings.validate_category(db, "menu", data.category)   # editable list (F-A)
+        aw = payload.pop("available_windows", None)
+        payload["available_windows"] = json.dumps(aw) if aw else None
         item = MenuItem(**payload, created_by=_resolve_user_id(db, user))
         db.add(item)
         db.commit()
@@ -377,6 +437,9 @@ def update_menu_item(item_id: int, data: MenuItemUpdate, db: Session = Depends(g
         changes = data.model_dump(exclude_unset=True)
         if "category" in changes and changes["category"] is not None:
             changes["category"] = app_settings.validate_category(db, "menu", changes["category"])
+        if "available_windows" in changes:
+            aw = changes["available_windows"]
+            changes["available_windows"] = json.dumps(aw) if aw else None
         for k, v in changes.items():
             setattr(item, k, v)
         item.updated_by = _resolve_user_id(db, user)
@@ -406,6 +469,24 @@ def deactivate_menu_item(item_id: int, db: Session = Depends(get_db), user=Depen
     db.commit()
     write_audit(db, user, "portal.menu_deactivate", "menu_item", item.id, client="web", commit=True)
     return {"status": "unavailable", "id": item.id, "name": item.name}
+
+
+@router.patch("/menu-items/{item_id}/availability")
+def set_menu_availability(item_id: int, data: MenuAvailabilityUpdate, db: Session = Depends(get_db),
+                          user=Depends(require_reception_or_admin)):
+    """Reception's quick on/off toggle for a menu item (e.g. kitchen ran out). Only flips
+    is_available — price/name/time-windows stay admin-managed in the web menu editor."""
+    item = db.query(MenuItem).filter(MenuItem.id == item_id).first()
+    if not item:
+        raise HTTPException(status_code=404, detail="Menu item not found")
+    item.is_available = bool(data.is_available)
+    item.updated_by = _resolve_user_id(db, user)
+    item.updated_at = datetime.utcnow()
+    db.commit()
+    db.refresh(item)
+    write_audit(db, user, "portal.menu_availability", "menu_item", item.id,
+                after={"is_available": item.is_available}, client="desktop", commit=True)
+    return _menu_dict(item)
 
 
 @router.get("/config")
@@ -481,12 +562,13 @@ def portal_home(token: str, db: Session = Depends(get_db)):
 
 @router.get("/{token}/menu")
 def portal_menu(token: str, db: Session = Depends(get_db)):
-    """PUBLIC — the orderable room-service menu."""
+    """PUBLIC — the room-service menu. Returns ALL items (not just available ones) each with an
+    `orderable_now` flag, so the portal can SHOW an item as "Not available" / out-of-window rather
+    than silently hiding it. Ordering is still enforced server-side in order_room_service."""
     cfg = app_settings.get_portal_config(db)
     _feature_gate(cfg, "room_service_enabled")
     _resolve_token(db, token, for_action=False)
-    rows = db.query(MenuItem).filter(MenuItem.is_available == True).order_by(  # noqa: E712
-        MenuItem.sort_order, MenuItem.name).all()
+    rows = db.query(MenuItem).order_by(MenuItem.sort_order, MenuItem.name).all()
     return {"total": len(rows), "data": [_menu_dict(m) for m in rows]}
 
 
@@ -500,10 +582,10 @@ def order_room_service(token: str, data: RoomServiceOrder, db: Session = Depends
     # snapshot each line's menu details so the desk posts the right price/GST even if the menu changes
     items, total = [], 0.0
     for ln in data.items:
-        m = db.query(MenuItem).filter(MenuItem.id == ln.menu_item_id,
-                                      MenuItem.is_available == True).first()  # noqa: E712
-        if not m:
-            raise HTTPException(status_code=404, detail=f"Menu item {ln.menu_item_id} is unavailable")
+        m = db.query(MenuItem).filter(MenuItem.id == ln.menu_item_id).first()
+        # Reject an item that is off OR outside its time window (covers both cases).
+        if not m or not _orderable_now(m):
+            raise HTTPException(status_code=404, detail=f"Menu item {ln.menu_item_id} is not available right now")
         price = float(m.price or 0)
         items.append({"menu_item_id": m.id, "name": m.name, "qty": ln.qty,
                       "unit_price": price, "gst_percent": float(m.gst_percent) if m.gst_percent is not None else None,

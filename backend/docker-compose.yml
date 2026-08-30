@@ -1,0 +1,57 @@
+# Hotel Bhimas — self-hosted VPS stack (backend + Postgres + Caddy HTTPS reverse proxy).
+# One command: `docker compose up -d --build`.  See DEPLOY-VPS.md for the full walkthrough.
+#
+# - Postgres is NOT published to the host (no `ports:`) — it is only reachable inside this network.
+# - Guest ID scans and the Postgres data live on persistent volumes so a rebuild never loses them.
+# - Caddy terminates TLS (auto Let's Encrypt) and proxies https://<your domain> -> api:8000.
+
+services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: Asia/Kolkata
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: Asia/Kolkata
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      # Persist encrypted KYC scans on the host disk — the container filesystem is ephemeral.
+      # Host path must be writable by uid 1000 (the container's appuser): see DEPLOY-VPS.md §6.
+      - ./data/id_scans:/app/id_scans
+    expose:
+      - "8000"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:

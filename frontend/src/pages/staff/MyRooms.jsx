@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { FaBroom, FaCheck, FaWrench, FaWineBottle, FaTimes } from "react-icons/fa";
 import { getRooms, startTask, completeTask, minibarRestock } from "../../api/housekeeping";
 import RaiseTicketModal from "../../components/RaiseTicketModal";
+import { useCategoryList, prettyCategory } from "../../utils/useCategoryList";
 
 const inputCls =
   "w-full px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -25,6 +26,10 @@ export default function MyRooms() {
   const [toast, setToast] = useState(null);
   const [raiseFor, setRaiseFor] = useState(null); // room object or null
   const [minibarFor, setMinibarFor] = useState(null);
+  // v4b8 (R19): the cleaner's NAME, picked per room from the admin-editable list. Kept per
+  // room_id because one housekeeper can be finishing several rooms on the same screen.
+  const [cleanedBy, setCleanedBy] = useState({});
+  const cleanerOptions = useCategoryList("cleaned_by", ["housekeeping_team"]);
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -63,7 +68,8 @@ export default function MyRooms() {
   const doFinish = async (room) => {
     setBusyId(room.room_id);
     try {
-      const res = await completeTask(room.open_task.id, {});
+      const name = cleanedBy[room.room_id];
+      const res = await completeTask(room.open_task.id, name ? { cleaned_by_name: name } : {});
       showToast(
         res.auto_inspected
           ? `${room.room_number} clean & inspected — re-sellable`
@@ -82,7 +88,7 @@ export default function MyRooms() {
       <h1 className="text-2xl font-bold mb-1 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-2">
         <FaBroom /> My Rooms
       </h1>
-      <p className="text-slate-400 mb-5 text-sm">Rooms to clean. You set the status — a supervisor inspects before re-sale.</p>
+      <p className="text-slate-400 mb-5 text-sm">Rooms to clean. You set the status — the room is inspected before re-sale.</p>
 
       {loading ? (
         <div className="p-10 text-center text-slate-400">Loading…</div>
@@ -108,9 +114,24 @@ export default function MyRooms() {
                     </button>
                   )}
                   {task && task.status === "in_progress" && (
-                    <button disabled={busy} onClick={() => doFinish(room)} className="bg-green-700 hover:bg-green-800 px-4 py-2 rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50">
-                      <FaCheck /> Mark clean
-                    </button>
+                    <>
+                      {/* Who actually cleaned it — a contract cleaner needs no login. The list
+                          is edited in admin Settings -> Lists. */}
+                      <select
+                        value={cleanedBy[room.room_id] || ""}
+                        onChange={(e) => setCleanedBy({ ...cleanedBy, [room.room_id]: e.target.value })}
+                        aria-label={`Cleaned by, room ${room.room_number}`}
+                        className="px-3 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white text-sm focus:outline-none focus:border-[#E5C07B]"
+                      >
+                        <option value="">Cleaned by…</option>
+                        {cleanerOptions.map((c) => (
+                          <option key={c} value={c}>{prettyCategory(c)}</option>
+                        ))}
+                      </select>
+                      <button disabled={busy} onClick={() => doFinish(room)} className="bg-green-700 hover:bg-green-800 px-4 py-2 rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50">
+                        <FaCheck /> Mark clean
+                      </button>
+                    </>
                   )}
                   <button onClick={() => setMinibarFor(room)} className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg font-semibold flex items-center gap-2">
                     <FaWineBottle /> Minibar

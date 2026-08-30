@@ -1,4 +1,4 @@
-import { Routes, Route } from "react-router-dom";
+import { Navigate, Routes, Route } from "react-router-dom";
 
 import PublicLayout from "./layouts/PublicLayout";
 import AdminLayout from "./layouts/AdminLayout";
@@ -21,7 +21,16 @@ import Restaurant from "./pages/public/Restaurant";
 import Rooms from "./pages/public/Rooms";
 import Booking from "./pages/public/Booking";
 import PreArrival from "./pages/public/PreArrival";
-import GuestPortal from "./pages/public/GuestPortal";
+// In-room guest portal (split into a layout + one page per service in v3).
+import PortalLayout from "./pages/public/portal/PortalLayout";
+import PortalHome from "./pages/public/portal/PortalHome";
+import PortalFeature from "./pages/public/portal/PortalFeature";
+import PortalRoomService from "./pages/public/portal/PortalRoomService";
+import PortalWifi from "./pages/public/portal/PortalWifi";
+import PortalWakeup from "./pages/public/portal/PortalWakeup";
+import PortalCab from "./pages/public/portal/PortalCab";
+import PortalCheckout from "./pages/public/portal/PortalCheckout";
+import PortalRequests from "./pages/public/portal/PortalRequests";
 import PaymentSuccess from "./pages/public/PaymentSuccess";
 import PaymentFailed from "./pages/public/PaymentFailed";
 
@@ -100,8 +109,23 @@ function App() {
       {/* PRE-ARRIVAL DIGITAL REGISTRATION (public, tokenized — prompt 14) */}
       <Route path="/pre-arrival/:token" element={<PreArrival />} />
 
-      {/* IN-ROOM GUEST PORTAL (public, tokenized — prompt 18d) */}
-      <Route path="/portal/:token" element={<GuestPortal />} />
+      {/* IN-ROOM GUEST PORTAL (public, tokenized — prompt 18d; split into pages in v3).
+          A home hub plus one page per service: the room-service menu had grown past a
+          screenful, which pushed WiFi / wake-up / cab out of sight. PortalLayout holds the
+          single /portal/{token} fetch and hands it to each child, so navigating between
+          services costs no extra request. A service the hotel has switched off redirects
+          home rather than rendering a form the backend would refuse. */}
+      <Route path="/portal/:token" element={<PortalLayout />}>
+        <Route index element={<PortalHome />} />
+        <Route path="room-service" element={<PortalFeature flag="room_service"><PortalRoomService /></PortalFeature>} />
+        <Route path="wifi" element={<PortalFeature flag="wifi"><PortalWifi /></PortalFeature>} />
+        <Route path="wakeup" element={<PortalFeature flag="wakeup"><PortalWakeup /></PortalFeature>} />
+        <Route path="cab" element={<PortalFeature flag="cab"><PortalCab /></PortalFeature>} />
+        <Route path="checkout" element={<PortalFeature flag="contactless_checkout"><PortalCheckout /></PortalFeature>} />
+        <Route path="requests" element={<PortalRequests />} />
+        {/* An unknown sub-path is a mistyped/stale link, not a 404 for the whole portal. */}
+        <Route path="*" element={<Navigate to="." replace />} />
+      </Route>
 
       {/* ADMIN LOGIN */}
       <Route path="/admin-login" element={<AdminLogin />} />
@@ -109,7 +133,7 @@ function App() {
       {/* ADMIN LAYOUT (Protected) */}
       <Route
         element={
-          <ProtectedRoute allowedRoles={["admin", "supervisor"]}>
+          <ProtectedRoute allowedRoles={["admin", "housekeeper"]}>
             <AdminLayout />
           </ProtectedRoute>
         }

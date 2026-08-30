@@ -81,6 +81,20 @@ export async function getOtps(status = "pending") {
   return handle(res);
 }
 
+/**
+ * Ask for an owner-approval code (v4b0). The code is NEVER returned here — the owner reads
+ * it from the Approvals inbox (or receives it) and reads it out to the staff member.
+ * `body` = { action, booking_id?, room_ids?, folio_id?, amount?, context? }
+ */
+export async function requestOtp(body) {
+  const res = await fetch(`${BASE_URL}/fraud/otp/request`, {
+    method: "POST",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  return handle(res);
+}
+
 // Re-deliver a still-live approval code to the owner's WhatsApp (same code, not a new one)
 export async function resendOtp(otpId) {
   const res = await fetch(`${BASE_URL}/fraud/otp/${otpId}/resend`, {

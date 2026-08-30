@@ -29,7 +29,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import CashShift, Expense, Payment, User, FraudAlert
+from models import CashShift, Expense, Payment, User, FraudAlert, PAYMENT_METHODS
 from schemas import ShiftOpenRequest, ExpenseCreate, FloatTopupRequest, ShiftCloseRequest, CashConfigUpdate
 from utils.auth_utils import require_reception_or_admin, require_admin
 from utils.audit import write_audit, _resolve_user_id
@@ -83,6 +83,46 @@ def _compute_totals(db: Session, shift: CashShift) -> dict:
     }
 
 
+def _method_window(shift: CashShift):
+    """Condition matching payments that belong to a shift but predate the v3 change that
+    started stamping shift_id for non-cash. Only rows with NO shift_id are matched, so a
+    payment is never counted twice; an open shift's window runs to 'now'."""
+    end = shift.closed_at or datetime.now()
+    return (Payment.shift_id.is_(None),
+            Payment.created_at >= shift.opened_at,
+            Payment.created_at < end)
+
+
+def _totals_by_method(db: Session, shift: CashShift) -> dict:
+    """Collections and refunds for a shift, split by payment method (v3 item 6).
+
+    Money-IN is attributed by Payment.shift_id, which every desk payment now carries. Rows
+    written before that change only have it for cash, so a time-window fallback picks up the
+    historic card/UPI ones — hence the two queries per method. This is REPORTING ONLY: the
+    drawer maths in _compute_totals is untouched and still counts cash alone.
+
+    Single-property assumption (as in this module's docstring): the fallback cannot tell two
+    stations' overlapping shifts apart, because a legacy row carries no station. Payments
+    recorded from v3 onward do not use it.
+    """
+    by_method, total = {}, 0.0
+    for m in PAYMENT_METHODS:
+        paid = (Payment.method == m, Payment.status == "paid")
+        amount = (_sum(db, Payment.amount, *paid, Payment.shift_id == shift.id)
+                  + _sum(db, Payment.amount, *paid, *_method_window(shift)))
+        by_method[m] = round(amount, 2)
+        total += amount
+    refunds = _sum(db, Payment.refund_amount,
+                   Payment.refund_status == "completed",
+                   Payment.refund_shift_id == shift.id)
+    return {
+        **by_method,
+        "total_collected": round(total, 2),
+        "refunds": round(refunds, 2),
+        "net_collected": round(total - refunds, 2),
+    }
+
+
 def _user_name(db: Session, uid) -> Optional[str]:
     if not uid:
         return None
@@ -116,6 +156,10 @@ def _serialize(db: Session, shift: CashShift) -> dict:
         "counted_cash": float(shift.counted_cash) if shift.counted_cash is not None else None,
         "variance": float(shift.variance) if shift.variance is not None else None,
         **totals,
+        # v3 item 6 — collections split by method. Computed live even for a CLOSED shift: the
+        # frozen snapshot on the row only ever held cash, so there is nothing to freeze here,
+        # and the underlying payment rows are append-only anyway.
+        "by_method": _totals_by_method(db, shift),
     }
 
 

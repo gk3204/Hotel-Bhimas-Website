@@ -15,10 +15,12 @@ import { getPortalConfig, updatePortalConfig } from "../../api/portal";
 import { getComplaintsConfig, updateComplaintsConfig } from "../../api/complaints";
 import { getStockConfig, updateStockConfig } from "../../api/stock";
 import { getBackofficeConfig, updateBackofficeConfig } from "../../api/backoffice";
+import { getUsers } from "../../api/users";
 import { getComplianceConfig, updateComplianceConfig } from "../../api/compliance";
 import { getWhatsappConfig, updateWhatsappConfig } from "../../api/whatsapp";
 import { getReviewConfig, updateReviewConfig } from "../../api/reviews";
 import { getConfig as getFraudConfig, updateFraudConfig } from "../../api/fraud";
+import { getOverstayConfig, updateOverstayConfig } from "../../api/reports";
 
 const PRIORITIES = ["urgent", "high", "normal", "low"];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -40,15 +42,54 @@ export const SETTINGS_GROUPS = [
         hint: "Applies to discounts past the floor percentage." },
       { key: "card_issue_otp_required", type: "toggle", label: "Lost / extra key cards need owner approval",
         hint: "The desk cannot cut a replacement or additional card until the owner approves." },
+      { key: "ac_downgrade_otp_required", type: "toggle", label: "Moving a guest to a non-A/C room needs owner approval",
+        hint: "Applies when a room shift takes the guest from an A/C room type to a non-A/C one." },
+      { key: "alt_room_type_otp_required", type: "toggle", label: "Selling a room as its alternate type needs owner approval",
+        hint: "Only possible when no room of the booked type is free — the desk is refused outright while one is." },
+      { key: "comp_otp_required", type: "toggle", label: "Complimentary stays need owner approval",
+        hint: "Both marking a stay free and taking that away. A comp is 100% of the stay, so this ships ON." },
+      { key: "overstay_reverse_otp_required", type: "toggle", label: "Removing an automatic overstay charge needs owner approval",
+        hint: "The charge a room past its checkout grace picks up automatically. Ships ON." },
+      { key: "rs_cancel_otp_required", type: "toggle", label: "Cancelling a room-service order needs owner approval",
+        hint: "The kitchen docket may already be out, so a cancel can hide food that was made." },
+      { key: "checkout_no_card_otp_required", type: "toggle", label: "Checking out without the key card needs owner approval",
+        hint: "Leave this OFF at first — the desk still records whether a card came back, so you can see how often it happens before making it blocking." },
       { key: "owner_otp_ttl_minutes", type: "number", min: 1, max: 1440, label: "Approval code valid for (minutes)",
         hint: "How long a code stays usable before it expires." },
       { key: "cleaning_max_hours", type: "number", min: 0, max: 168, label: "Alert if a room sits in cleaning for (hours)",
         hint: "A room held in cleaning this long with nobody checked in raises an alert." },
+      { key: "inspection_max_hours", type: "number", min: 0, max: 168, label: "Alert if a cleaned room is not inspected for (hours)",
+        hint: "A room cleaned but not signed-off (inspected) within this many hours raises an alert." },
       { key: "repeat_refund_threshold", type: "number", min: 1, max: 100, label: "Alert after this many refunds to one reference" },
       { key: "allowed_issue_hours", type: "text", placeholder: "06-23", label: "Cards may normally be cut between (HH-HH)",
         hint: "A card cut outside this window is flagged for review — it is not blocked." },
       { key: "allowed_stations", type: "csv", label: "Allowed front-desk stations",
         hint: "Comma-separated station IDs. Leave blank to allow any station.", wide: true },
+    ],
+  },
+  {
+    key: "overstay",
+    label: "Overstay billing",
+    title: "Automatic charge for guests who don't leave",
+    description:
+      "A guest still in the room past their check-out time picks up the next day's rent " +
+      "automatically, and their key card stops working. Removing that charge needs your " +
+      "approval code. Ships switched OFF — watch the dry run first (Reports → Overstay).",
+    load: getOverstayConfig,
+    save: updateOverstayConfig,
+    fields: [
+      { key: "enabled", type: "toggle", label: "Charge overstaying guests automatically",
+        hint: "OFF by default. This is the only thing in the system that bills a guest without a person pressing anything, so turn it on once you have watched the dry run for a few days.",
+        wide: true },
+      { key: "grace_minutes", type: "number", min: 0, max: 1440,
+        label: "Wait this long after check-out time before charging (minutes)",
+        hint: "A courtesy window. It only delays the charge — the day charged still runs from the guest's actual check-out time, not from the end of this window." },
+      { key: "max_auto_days", type: "number", min: 1, max: 60,
+        label: "Stop after this many automatic days",
+        hint: "A safety net for a forgotten check-out: after this many days the system stops charging and raises an alert for someone to look at, instead of quietly running up 40 nights." },
+      { key: "sweep_interval_minutes", type: "number", min: 1, max: 1440,
+        label: "Check for overstays every (minutes)",
+        hint: "Takes effect after the next backend restart." },
     ],
   },
   {
@@ -179,6 +220,23 @@ export const SETTINGS_GROUPS = [
       { key: "attendance_pin_enabled", type: "toggle", label: "Staff may clock in with a PIN" },
       { key: "attendance_auto_close_hours", type: "number", min: 1, max: 48,
         label: "Auto-close a forgotten clock-out after (hours)" },
+      // v4b8 (R20): tickets land on a person, not in a queue nobody owns. Options are the
+      // active `maintenance` logins, loaded at render — a new technician appears here the
+      // moment they are created, with no redeploy.
+      { key: "maintenance_default_assignee_id", type: "select", wide: true,
+        label: "New maintenance tickets go to",
+        hint: "Every ticket — raised at the desk, by housekeeping or by a guest — is assigned to this technician automatically. Leave as 'nobody' to keep tickets open for a technician to claim.",
+        options: [{ value: 0, label: "— nobody: leave tickets open to claim —" }],
+        optionsLoad: async () => {
+          const users = await getUsers();
+          const list = Array.isArray(users) ? users : users?.data || [];
+          return [
+            { value: 0, label: "— nobody: leave tickets open to claim —" },
+            ...list
+              .filter((u) => u.role === "maintenance" && u.is_active !== false)
+              .map((u) => ({ value: u.user_id, label: u.full_name || u.username })),
+          ];
+        } },
     ],
   },
   {
@@ -193,6 +251,7 @@ export const SETTINGS_GROUPS = [
       { key: "confirmation_enabled", type: "toggle", label: "Booking confirmation" },
       { key: "receipt_enabled", type: "toggle", label: "Payment receipt" },
       { key: "room_ready_enabled", type: "toggle", label: "Room ready" },
+      { key: "portal_link_enabled", type: "toggle", label: "In-room portal link at check-in" },
       { key: "checkout_reminder_enabled", type: "toggle", label: "Check-out reminder" },
       { key: "checkout_reminder_lead_hours", type: "number", min: 0.5, max: 48, step: "0.5",
         label: "Send the check-out reminder this many hours before" },
@@ -208,6 +267,12 @@ export const SETTINGS_GROUPS = [
       { key: "google_review_url", type: "text", label: "Google review link", wide: true },
       { key: "job_interval_minutes", type: "number", min: 1, max: 1440, label: "Check for due messages every (minutes)" },
       { key: "daily_digest_hour", type: "number", min: 0, max: 23, label: "Send the daily digest at (hour, 24h)" },
+      { key: "weekly_digest_enabled", type: "toggle", label: "Send the weekly owner report" },
+      { key: "weekly_digest_weekday", type: "select", label: "Send the weekly report on",
+        options: [{ value: 0, label: "Monday" }, { value: 1, label: "Tuesday" },
+                  { value: 2, label: "Wednesday" }, { value: 3, label: "Thursday" },
+                  { value: 4, label: "Friday" }, { value: 5, label: "Saturday" },
+                  { value: 6, label: "Sunday" }] },
     ],
   },
   {

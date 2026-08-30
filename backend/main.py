@@ -6,6 +6,7 @@ import os
 import logging
 from contextlib import asynccontextmanager
 from routers import room_types, admin, users, adminsecurity, payments
+from routers import backup   # v4b10: /admin/backup/* (pg_dump export for the admin PC)
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
@@ -136,6 +137,58 @@ def _start_night_audit_scheduler():
         return None
 
 
+def _start_overstay_scheduler():
+    """In-process APScheduler for automatic overstay billing (v4b3). Every N minutes it finds
+    in-house stays past their checkout moment + grace, charges the next night, and kills the
+    key card.
+
+    Interval, not cron: grace expiry is per-booking (checked_in_at + nights x 24h + grace in
+    24h mode), so there is no single hour to fire at.
+
+    ⚠️ Two things to know before touching this:
+      * The sweep itself takes a Postgres advisory lock. This process is one of FOUR uvicorn
+        workers, each running its own copy of this scheduler — the other four jobs survive
+        that by being upsert-idempotent, but a biller must not.
+      * `overstay_auto_charge_enabled` ships FALSE. The scheduler still starts and no-ops, so
+        arming it is a Settings toggle rather than a redeploy.
+    Disabled entirely with OVERSTAY_SCHEDULER_ENABLED=false."""
+    if os.getenv("OVERSTAY_SCHEDULER_ENABLED", "true").strip().lower() in ("false", "0", "no"):
+        logger.info("Overstay scheduler disabled (OVERSTAY_SCHEDULER_ENABLED=false)")
+        return None
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from database import SessionLocal
+        from utils.settings import get_overstay_config
+        from services.overstay_billing import sweep_overstays
+
+        db = SessionLocal()
+        try:
+            cfg = get_overstay_config(db)
+        finally:
+            db.close()
+        minutes = cfg["sweep_interval_minutes"]
+
+        def _tick():
+            _db = SessionLocal()
+            try:
+                sweep_overstays(_db, generated_by="scheduler")
+            except Exception as e:
+                logger.error(f"Overstay sweep failed: {e}")
+            finally:
+                _db.close()
+
+        sched = BackgroundScheduler(daemon=True, timezone="Asia/Kolkata")
+        sched.add_job(_tick, "interval", minutes=minutes, id="overstay_sweep",
+                      max_instances=1, coalesce=True)
+        sched.start()
+        state = "ARMED" if cfg["enabled"] else "dry (auto-charge off)"
+        logger.info(f"✅ Overstay scheduler started (every {minutes} min, {state})")
+        return sched
+    except Exception as e:
+        logger.error(f"❌ Overstay scheduler failed to start: {e}")
+        return None
+
+
 def _start_ota_scheduler():
     """In-process APScheduler for the OTA email auto-draft poller (prompt 17). Polls the configured
     IMAP mailbox every `OTA_IMAP_POLL_INTERVAL_MINUTES` and upserts drafts for reception to confirm.
@@ -231,11 +284,13 @@ async def lifespan(app: FastAPI):
     night_audit_scheduler = _start_night_audit_scheduler()
     ota_scheduler = _start_ota_scheduler()
     review_scheduler = _start_review_scheduler()
+    overstay_scheduler = _start_overstay_scheduler()
 
     yield  # app runs here
 
     # Optional shutdown logic
-    for sched in (scheduler, night_audit_scheduler, ota_scheduler, review_scheduler):
+    for sched in (scheduler, night_audit_scheduler, ota_scheduler, review_scheduler,
+                  overstay_scheduler):
         if sched is not None:
             try:
                 sched.shutdown(wait=False)
@@ -325,6 +380,7 @@ app.include_router(booking_router)
 app.include_router(availability_router)
 app.include_router(enquiry_router)
 app.include_router(admin.router)
+app.include_router(backup.router)
 app.include_router(users.router)
 app.include_router(adminsecurity.router)
 app.include_router(payments.router)

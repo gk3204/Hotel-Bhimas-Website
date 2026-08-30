@@ -12,6 +12,7 @@ the front-desk PC can reach). The OTA-bookings list + draft confirm/dismiss are 
 the desk can action them. Phase B (channel-manager two-way sync) is a later prompt.
 """
 import logging
+import re
 from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -27,6 +28,15 @@ from services import ota_service
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/ota", tags=["OTA"])
+
+
+def _ota_placeholder_phone(ota_id: str | None) -> str:
+    """Go-MMT and most OTAs MASK the guest phone — it is not in the voucher at all — so confirming
+    a draft can't require one. Stand in with the last 10 digits of the OTA booking id (unique per
+    booking, so guest records don't merge into one), zero-padded. The desk updates it with the
+    guest's real number at check-in."""
+    digits = re.sub(r"\D", "", ota_id or "")
+    return (digits[-10:] if len(digits) >= 10 else digits.rjust(10, "0")) or "0000000000"
 
 
 def get_db():
@@ -73,7 +83,7 @@ def list_channels(db: Session = Depends(get_db), user=Depends(require_admin)):
 @router.put("/channels/{code}")
 def update_channel(code: str, data: OtaChannelUpdate,
                    db: Session = Depends(get_db), user=Depends(require_admin)):
-    if code not in ota_service.OTA_SOURCES:
+    if code not in ota_service.ota_sources(db):
         raise HTTPException(status_code=404, detail=f"Unknown OTA channel: {code}")
     c = ota_service.upsert_channel(
         db, code,
@@ -112,11 +122,12 @@ def list_ota_bookings(from_: str = Query(None, alias="from"), to: str = Query(No
                       source: str = Query(None),
                       db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
     dfrom, dto = _range(from_, to)
+    sources = ota_service.ota_sources(db)
     q = (db.query(Booking)
-         .filter(Booking.booking_source.in_(ota_service.OTA_SOURCES),
+         .filter(Booking.booking_source.in_(sources),
                  Booking.check_in >= dfrom, Booking.check_in <= dto))
     if source:
-        if source not in ota_service.OTA_SOURCES:
+        if source not in sources:
             raise HTTPException(status_code=400, detail=f"Unknown OTA source: {source}")
         q = q.filter(Booking.booking_source == source)
     bookings = q.order_by(Booking.check_in.desc(), Booking.booking_id.desc()).all()
@@ -138,7 +149,7 @@ def reconciliation(from_: str = Query(None, alias="from"), to: str = Query(None)
                    channel: str = Query(None),
                    db: Session = Depends(get_db), user=Depends(require_admin)):
     dfrom, dto = _range(from_, to)
-    if channel and channel not in ota_service.OTA_SOURCES:
+    if channel and channel not in ota_service.ota_sources(db):
         raise HTTPException(status_code=400, detail=f"Unknown OTA channel: {channel}")
     return ota_service.reconcile_payouts(db, channel=channel, dfrom=dfrom, dto=dto)
 
@@ -179,7 +190,7 @@ def list_drafts(status: str = Query(None),
     q = db.query(OtaDraftBooking)
     if status:
         q = q.filter(OtaDraftBooking.status == status)
-    rows = [ota_service.serialize_draft(d)
+    rows = [ota_service.serialize_draft(d, db)
             for d in q.order_by(OtaDraftBooking.created_at.desc()).limit(200).all()]
     return {"rows": rows}
 
@@ -199,13 +210,17 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
         raise HTTPException(status_code=400, detail="Cancellation drafts can't be confirmed as a booking; dismiss it.")
 
     guest_name = data.guest_name or d.guest_name
-    phone = data.phone or d.phone
     check_in = data.check_in or d.check_in
     check_out = data.check_out or d.check_out
-    if not guest_name or not phone:
-        raise HTTPException(status_code=400, detail="Guest name + phone are required (draft didn't parse them — supply in the request).")
+    if not guest_name:
+        raise HTTPException(status_code=400, detail="Guest name is required (draft didn't parse it — supply in the request).")
     if not check_in or not check_out:
         raise HTTPException(status_code=400, detail="Check-in + check-out dates are required (draft didn't parse them — supply in the request).")
+    # Phone is masked by the OTA, so fall back to a per-booking placeholder rather than blocking.
+    phone = data.phone or d.phone or _ota_placeholder_phone(d.ota_booking_id)
+    # Occupancy parsed from the voucher (v4 occupancy) — carry the real party size into the booking.
+    adults = data.adults or d.adults or 1
+    children = data.children if data.children is not None else (d.children or 0)
 
     commission_pct = data.ota_commission_percent
     if commission_pct is None and d.commission_percent is not None:
@@ -219,9 +234,14 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
         check_in=check_in,
         check_out=check_out,
         check_in_time=(data.check_in_time or time(12, 0)),
+        adults=adults,
+        children=children,
         booking_source=d.channel_code,
         ota_booking_id=d.ota_booking_id,
         ota_commission_percent=commission_pct,
+        # Actual figures the voucher stated — preferred over %×gross (apply_ota_fields).
+        ota_commission_amount=float(d.commission_amount) if d.commission_amount is not None else None,
+        ota_net_payout=float(d.net_payout) if d.net_payout is not None else None,
     )
 
     # Call the desk-booking handler directly (plain function — Depends bypassed by explicit args).
@@ -251,7 +271,8 @@ def dismiss_draft(draft_id: int,
 # Manual IMAP poll
 # ============================================================
 @router.post("/poll")
-def poll_now(db: Session = Depends(get_db), user=Depends(require_admin)):
+def poll_now(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
     """Trigger the IMAP mailbox poll inline (mirrors /whatsapp/jobs/run). No-ops with
-    configured=false when OTA_IMAP_* env is unset."""
+    configured=false when OTA_IMAP_* env is unset. Reception can trigger it too — the desk's OTA
+    drafts screen has a Poll button (the draft inbox is a front-desk workflow)."""
     return ota_service.poll_mailbox(db)

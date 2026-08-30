@@ -15,7 +15,7 @@ export default function AdminSidebar() {
   const navigate = useNavigate();
   const location = useLocation();
 
-  // Role-scoped nav (F-B): a supervisor sees only its tagged groups/items.
+  // Role-scoped nav (F-B): a non-admin (housekeeper) sees only its tagged groups/items.
   const role = useMemo(() => {
     try { return jwtDecode(localStorage.getItem("adminToken")).role; } catch { return null; }
   }, []);

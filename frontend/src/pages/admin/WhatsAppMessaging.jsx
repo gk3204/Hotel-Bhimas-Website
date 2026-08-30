@@ -1,11 +1,13 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   FaWhatsapp, FaSave, FaSyncAlt, FaPlay, FaPaperPlane, FaTrash, FaBan, FaListUl, FaSlidersH,
+  FaComments,
 } from "react-icons/fa";
 import {
   getWhatsappConfig, getTemplates, getMessages,
   getOptOuts, addOptOut, removeOptOut, runJobs, sendTest,
 } from "../../api/whatsapp";
+import WhatsAppInbox from "../../components/admin/WhatsAppInbox";
 import SharedConfigPanel from "../../components/admin/ConfigPanel";
 import { groupByKey } from "../../components/admin/settingsGroups";
 
@@ -36,7 +38,7 @@ const TabBtn = ({ active, onClick, icon, label }) => (
 
 // The automation toggles rendered as a checkbox grid, bound to the config form.
 export default function WhatsAppMessaging() {
-  const [tab, setTab] = useState("settings");
+  const [tab, setTab] = useState("inbox");
   const [loading, setLoading] = useState(false);
   const [running, setRunning] = useState(false);
   const [toast, setToast] = useState(null);
@@ -80,7 +82,7 @@ export default function WhatsAppMessaging() {
   const openTab = async (t) => {
     setTab(t);
     try {
-      if (t === "templates" && templates.length === 0) {
+      if ((t === "templates" || t === "settings") && templates.length === 0) {
         const r = await getTemplates();
         setTemplates(r.templates || []);
       }
@@ -107,8 +109,17 @@ export default function WhatsAppMessaging() {
   const doSendTest = async () => {
     if (!test.to) { showToast("Enter a phone number", "error"); return; }
     try {
-      await sendTest({ to: test.to, template: test.template, params: {} });
-      showToast("Test message queued — check the Message log");
+      // /send-test answers 200 with the message row even when delivery failed — the sender
+      // never raises so the booking flow can't be broken by a messaging error. Read the row's
+      // status rather than treating any 200 as success.
+      const row = await sendTest({ to: test.to, template: test.template, params: {} });
+      if (row && row.status === "failed") {
+        showToast(`Send failed: ${row.error || "see the Message log"}`, "error");
+      } else if (row && row.provider === "stub") {
+        showToast("Logged in stub mode — no WHATSAPP_* env on this backend, nothing was sent.", "error");
+      } else {
+        showToast(`Test ${row?.status || "queued"} to ${row?.to || test.to}`);
+      }
     } catch (e) { showToast(e.message, "error"); }
   };
 
@@ -156,11 +167,15 @@ export default function WhatsAppMessaging() {
         </div>
 
         <div className="flex flex-wrap gap-2 mb-6">
+          <TabBtn active={tab === "inbox"} onClick={() => openTab("inbox")} icon={<FaComments />} label="Inbox" />
           <TabBtn active={tab === "settings"} onClick={() => openTab("settings")} icon={<FaSlidersH />} label="Templates & toggles" />
           <TabBtn active={tab === "templates"} onClick={() => openTab("templates")} icon={<FaListUl />} label="Template catalog" />
           <TabBtn active={tab === "log"} onClick={() => openTab("log")} icon={<FaPaperPlane />} label="Message log" />
           <TabBtn active={tab === "optouts"} onClick={() => openTab("optouts")} icon={<FaBan />} label="Opt-outs" />
         </div>
+
+        {/* ---------------- Inbox ---------------- */}
+        {tab === "inbox" && <WhatsAppInbox showToast={showToast} />}
 
         {/* ---------------- Settings ---------------- */}
         {tab === "settings" && form && (

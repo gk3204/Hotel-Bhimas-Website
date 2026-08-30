@@ -13,17 +13,18 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
-from models import (Booking, BookingItem, CardIssuance, FraudAlert,
-                    OwnerOtp, Room)
+from models import (Booking, BookingItem, CardIssuance, Folio, FraudAlert,
+                    OwnerOtp, Payment, Room, RoomType)
 from schemas import AlertReview, FraudConfigUpdate, OtpRequest, OtpVerify
 from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.fraud_detection import run_reconciliation, compute_daily_digest, get_config
-from utils.owner_otp import create_otp, consume_otp, deliver_otp
+from utils.owner_otp import (OTP_ACTIONS, build_context, create_otp, consume_otp,
+                             deliver_otp, safe_extras)
 
 logger = logging.getLogger(__name__)
 
@@ -166,7 +167,8 @@ def reconcile(db: Session = Depends(get_db), user=Depends(require_admin)):
 @router.get("/reconciliation-report", dependencies=[Depends(require_admin)])
 def reconciliation_report(db: Session = Depends(get_db)):
     """Every ACTIVE key card with its live card-vs-booking-vs-payment validation state."""
-    from routers.payments import total_paid
+    # v4b1: prepaid-inclusive, so an OTA stay is not reported as an unpaid card.
+    from routers.payments import total_paid_including_prepaid
     cards = db.query(CardIssuance).filter(CardIssuance.status == "active").order_by(
         CardIssuance.id.desc()).all()
     room_numbers = {r.room_id: r.room_number for r in db.query(Room).filter(
@@ -177,7 +179,7 @@ def reconciliation_report(db: Session = Depends(get_db)):
         has_booking = bool(booking and booking.status == "checked_in")
         on_booking = bool(booking and c.room_id and db.query(BookingItem).filter(
             BookingItem.booking_id == booking.booking_id, BookingItem.room_id == c.room_id).first())
-        paid = bool(booking and total_paid(db, booking.booking_id) > 0)
+        paid = bool(booking and total_paid_including_prepaid(db, booking.booking_id) > 0)
         out.append({
             "card_id": c.id, "booking_id": c.booking_id, "room_id": c.room_id,
             "room_number": room_numbers.get(c.room_id), "card_uid": c.card_uid,
@@ -224,13 +226,22 @@ def update_config(data: FraudConfigUpdate, db: Session = Depends(get_db),
 
     key_map = {
         "cleaning_max_hours": app_settings.FRAUD_CLEANING_MAX_HOURS_KEY,
+        "inspection_max_hours": app_settings.FRAUD_INSPECTION_MAX_HOURS_KEY,
         "allowed_issue_hours": app_settings.FRAUD_ALLOWED_ISSUE_HOURS_KEY,
         "allowed_stations": app_settings.FRAUD_ALLOWED_STATIONS_KEY,
         "repeat_refund_threshold": app_settings.FRAUD_REPEAT_REFUND_THRESHOLD_KEY,
         "refund_requires_owner_otp": app_settings.FRAUD_REFUND_OTP_KEY,
         "discount_otp_required": app_settings.FRAUD_DISCOUNT_OTP_KEY,
+        "void_otp_required": app_settings.FRAUD_VOID_OTP_KEY,
         "card_issue_otp_required": app_settings.FRAUD_CARD_ISSUE_OTP_KEY,
         "owner_otp_ttl_minutes": app_settings.FRAUD_OTP_TTL_MINUTES_KEY,
+        # v4b0
+        "ac_downgrade_otp_required": app_settings.FRAUD_AC_DOWNGRADE_OTP_KEY,
+        "alt_room_type_otp_required": app_settings.FRAUD_ALT_ROOM_TYPE_OTP_KEY,
+        "comp_otp_required": app_settings.FRAUD_COMP_OTP_KEY,
+        "overstay_reverse_otp_required": app_settings.FRAUD_OVERSTAY_REVERSE_OTP_KEY,
+        "rs_cancel_otp_required": app_settings.FRAUD_RS_CANCEL_OTP_KEY,
+        "checkout_no_card_otp_required": app_settings.FRAUD_CHECKOUT_NO_CARD_OTP_KEY,
     }
     for field, value in changes.items():
         key = key_map.get(field)
@@ -259,9 +270,67 @@ def update_config(data: FraudConfigUpdate, db: Session = Depends(get_db),
 def otp_request(data: OtpRequest, db: Session = Depends(get_db),
                 user=Depends(require_reception_or_admin)):
     """Create an owner-approval code for a sensitive action. The code is NOT returned here —
-    the owner reads it from the admin Approvals inbox (GET /fraud/otp) / server log, then the
-    desk re-submits the action with owner_otp_id + code."""
-    otp, delivery = create_otp(db, data.action, data.context, user, return_delivery=True)
+    the owner reads it from the admin Approvals inbox (GET /fraud/otp) / WhatsApp, then the
+    desk re-submits the action with owner_otp_id + code.
+
+    v4b0: the action is validated against `owner_otp.OTP_ACTIONS` (a typo'd action used to
+    sail through and mint a code nothing could ever consume), and the approval context is
+    built SERVER-side from the ids the desk sends, so the owner reads the hotel's data
+    rather than the client's."""
+    if data.action not in OTP_ACTIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown approval action '{data.action}'. Valid actions: "
+                   + ", ".join(sorted(OTP_ACTIONS)))
+
+    # Back-compat with the SHIPPED desk, which predates the typed fields and puts everything
+    # in `context`: card_issue sends {booking_id, card_id, issue_type, room}, ac_downgrade
+    # sends {booking_id, to_room_id}, refund sends {payment_id, amount}. Lifting those means
+    # an un-updated desk build produces a fully named summary today, rather than
+    # "guest / no booking" until each screen is migrated in a later batch.
+    ctx_in = data.context or {}
+    booking = rooms = folio = None
+    booking_id = data.booking_id or ctx_in.get("booking_id")
+    if not booking_id and ctx_in.get("payment_id"):
+        booking_id = (db.query(Payment.booking_id)
+                        .filter(Payment.payment_id == ctx_in["payment_id"]).scalar())
+
+    room_ids = list(data.room_ids or [])
+    for key in ("room_id", "to_room_id", "from_room_id"):
+        rid = ctx_in.get(key)
+        if isinstance(rid, int) and rid not in room_ids:
+            room_ids.append(rid)
+
+    if booking_id:
+        booking = (db.query(Booking)
+                     .options(joinedload(Booking.guest))
+                     .filter(Booking.booking_id == booking_id).first())
+    if not room_ids and booking is not None:
+        # "Which room?" is the first thing the owner asks, so fall back to the rooms actually
+        # assigned to the stay. Several shipped desk payloads name no room id at all (refund
+        # sends only payment_id; card_issue sends `room` as a display STRING), and without
+        # this they would read "no room assigned" for a guest who plainly has one.
+        room_ids = [r for (r,) in db.query(BookingItem.room_id)
+                                     .filter(BookingItem.booking_id == booking.booking_id,
+                                             BookingItem.room_id.isnot(None)).all()]
+    if room_ids:
+        # Pass the ORM rows straight through — build_context resolves the type names itself
+        # (`Room` has no room_type relationship, only BookingItem does).
+        rooms = db.query(Room).filter(Room.room_id.in_(room_ids)).all()
+    if data.folio_id:
+        folio = db.query(Folio).filter(Folio.id == data.folio_id).first()
+    elif booking is not None:
+        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+
+    # safe_extras() drops the server-owned keys. Without it a client posting
+    # {"booking": ...} in `context` would collide with build_context's own keyword
+    # parameter and 500 the request.
+    context = build_context(db, data.action, booking=booking, rooms=rooms, folio=folio,
+                            amount=data.amount, user=user,
+                            reasons=(data.context or {}).get("reasons"),
+                            **safe_extras(data.context))
+
+    otp, delivery = create_otp(db, data.action, context, user, return_delivery=True)
     write_audit(db, user, "fraud.otp_request", "owner_otp", otp.id,
                 after={"action": data.action, "delivery": delivery.get("channel")},
                 client="desktop", commit=True)
@@ -301,14 +370,23 @@ def otp_list(db: Session = Depends(get_db), status: str = Query("pending")):
     elif status == "expired":
         q = q.filter(OwnerOtp.used == False, OwnerOtp.expires_at <= now)
     rows = q.order_by(OwnerOtp.created_at.desc()).limit(100).all()
-    return {"total": len(rows), "data": [{
-        "otp_id": o.id, "action": o.action,
-        "context": _parse_detail(o.context),
-        "code": o.code if (not o.used and o.expires_at > now) else None,  # only reveal live codes
-        "expires_at": o.expires_at.isoformat(),
-        "used": o.used, "used_at": str(o.used_at) if o.used_at else None,
-        "created_at": str(o.created_at) if o.created_at else None,
-    } for o in rows]}
+
+    def _row(o):
+        ctx = _parse_detail(o.context) or {}
+        return {
+            "otp_id": o.id, "action": o.action,
+            "context": ctx,
+            # v4b0: lifted out of the context so the inbox has a headline without digging.
+            # Older rows predate build_context and have no summary — the UI falls back to
+            # the action name rather than showing a blank row.
+            "summary": ctx.get("summary") if isinstance(ctx, dict) else None,
+            "code": o.code if (not o.used and o.expires_at > now) else None,  # only reveal live codes
+            "expires_at": o.expires_at.isoformat(),
+            "used": o.used, "used_at": str(o.used_at) if o.used_at else None,
+            "created_at": str(o.created_at) if o.created_at else None,
+        }
+
+    return {"total": len(rows), "data": [_row(o) for o in rows]}
 
 
 @router.post("/otp/verify")

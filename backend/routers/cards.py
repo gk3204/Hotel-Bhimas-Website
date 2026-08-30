@@ -22,7 +22,7 @@ from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_reception_or_admin
 from utils.owner_otp import consume_otp
-from routers.payments import total_paid
+from routers.payments import total_paid, total_paid_including_prepaid
 
 # Anti-fraud (ALT-1): reissuing a reported-lost card or cutting an EXTRA card beyond the
 # check-in set are the two high-risk desk actions. When the card-issue gate is on they need
@@ -98,7 +98,9 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
             reasons.append("card_without_booking")
         elif booking.status != "checked_in":
             reasons.append("card_without_booking")  # not an in-house stay
-        if booking and total_paid(db, booking.booking_id) <= 0:
+        # v4b1: counts a prepayment collected by the channel that sold the stay. Without it
+        # every OTA guest was refused a key card as "unpaid" — they had paid, just not to us.
+        if booking and total_paid_including_prepaid(db, booking.booking_id) <= 0:
             reasons.append("card_without_payment")
         if not room:
             reasons.append("card_without_booking")
@@ -163,6 +165,14 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
         )
         db.add(card)
         db.flush()
+
+        # v4b2: a stay whose dates moved (a manual extension, or v4b3's automatic overstay
+        # charge) is flagged as needing its card re-cut. Recording a card for that booking is
+        # what clears the flag — so the desk board stops nagging the moment the guest has a
+        # working key again. Only a genuinely valid issue clears it: a flagged card means the
+        # stay still has a problem, so leave the flag up for someone to deal with.
+        if booking is not None and not reasons and getattr(booking, "card_reencode_required", False):
+            booking.card_reencode_required = False
 
         fraud_alert_id = None
         if reasons:

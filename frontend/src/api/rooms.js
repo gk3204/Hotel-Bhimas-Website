@@ -25,6 +25,9 @@ export async function createRoom(data) {
       floor: parseInt(data.floor) || 1,
       max_cards: parseInt(data.max_cards) || 4,
       lock_no: data.lock_no ? String(data.lock_no).trim() : null,
+      // v4b7 — ⚠️ this function hand-picks keys, so a new field silently vanishes unless it
+      // is added here. Empty string means "no alternate".
+      alt_room_type_id: data.alt_room_type_id ? parseInt(data.alt_room_type_id) : null,
       is_active: data.is_active !== undefined ? data.is_active : true,
       status: data.status || "vacant",
     }),

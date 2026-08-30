@@ -20,13 +20,15 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
-from models import Booking, Company, CompanyInvoice, CompanyLedger, FolioCharge, Invoice
+from models import (Booking, Company, CompanyInvoice, CompanyLedger, FolioCharge,
+                    Invoice, User)
 from schemas import (BackofficeConfigUpdate, CompanyAdjustment, CompanyCreate,
                      CompanyInvoiceCreate, CompanyPaymentRecord, CompanyUpdate)
 from services import company_service
 from utils.audit import _resolve_user_id, write_audit
 from utils.auth_utils import require_admin, require_reception_or_admin
-from utils.settings import BACKOFFICE_EDITABLE_KEYS, get_backoffice_config, set_setting
+from utils.settings import (BACKOFFICE_EDITABLE_KEYS, MAINTENANCE_DEFAULT_ASSIGNEE_KEY,
+                            get_backoffice_config, set_setting)
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,15 @@ def update_config(data: BackofficeConfigUpdate, db: Session = Depends(get_db),
     for key, value in data.model_dump(exclude_unset=True).items():
         if key not in BACKOFFICE_EDITABLE_KEYS or value is None:
             continue
+        # v4b8: refuse a designated technician who cannot receive tickets. _auto_assign falls
+        # back silently at ticket time, so without this the admin would set a dead id, see it
+        # saved, and never learn why tickets keep arriving unassigned.
+        if key == MAINTENANCE_DEFAULT_ASSIGNEE_KEY and value:
+            tech = db.query(User).filter(User.user_id == int(value)).first()
+            if not tech or not tech.is_active or tech.role != "maintenance":
+                raise HTTPException(
+                    status_code=422,
+                    detail="Pick an active user with the maintenance role, or 'nobody'.")
         set_setting(db, key, "true" if value is True else "false" if value is False else value,
                     user=user)
         changed[key] = value
