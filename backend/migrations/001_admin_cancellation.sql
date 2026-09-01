@@ -1,10 +1,4 @@
-psql -U postgres -d hotel_bhimas -c "
-SELECT column_name, data_type 
-FROM information_schema.columns 
-WHERE table_name = 'bookings' 
-  AND column_name IN ('admin_cancelled', 'admin_cancelled_reason', 'admin_notes', 'admin_cancelled_by', 'admin_cancelled_at')
-ORDER BY ordinal_position;
-"-- Migration: 001_admin_cancellation.sql
+-- Migration: 001_admin_cancellation.sql
 -- Description: Add admin cancellation tracking and refund management columns
 -- Created: 2024-04-17
 -- Purpose: Support admin-initiated booking cancellation with Razorpay refund processing
