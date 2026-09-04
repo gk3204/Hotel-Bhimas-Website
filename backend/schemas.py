@@ -914,8 +914,8 @@ class WhatsAppConfigUpdate(BaseModel):
     review_enabled: Optional[bool] = None
     review_delay_hours: Optional[float] = Field(None, ge=0, le=168)
     owner_alerts_enabled: Optional[bool] = None
-    owner_whatsapp: Optional[str] = Field(None, max_length=20)
-    owner_email: Optional[str] = Field(None, max_length=120)   # email fallback (FE-11)
+    owner_whatsapp: Optional[str] = Field(None, max_length=200)   # one or more, comma-separated
+    owner_email: Optional[str] = Field(None, max_length=300)      # one or more, comma-separated (FE-11)
     google_review_url: Optional[str] = Field(None, max_length=300)
     job_interval_minutes: Optional[int] = Field(None, ge=1, le=1440)
     daily_digest_hour: Optional[int] = Field(None, ge=0, le=23)

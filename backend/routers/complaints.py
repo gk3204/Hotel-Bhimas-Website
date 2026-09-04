@@ -134,17 +134,19 @@ def escalate_ticket(db: Session, ticket: MaintenanceTicket, reason: str, *,
     if notify:
         try:
             from utils import whatsapp_service as wa
-            owner = wa.owner_number(db)
-            if owner:
+            owners = wa.owner_numbers(db)   # a hotel may have more than one owner
+            any_sent = False
+            for i, owner in enumerate(owners):
                 sent = wa.send_template(
                     db, owner, "complaint_escalation",
                     {"complaint_id": str(ticket.id), "priority": ticket.priority,
                      "level": str(ticket.escalation_level),
                      "issue": (ticket.issue or "")[:80], "reason": reason or "SLA breach"},
-                    client_ref=f"complaint_esc:{ticket.id}:{ticket.escalation_level}",
+                    client_ref=f"complaint_esc:{ticket.id}:{ticket.escalation_level}:{i}",
                     respect_optout=False,
                 )
-                row.notified = sent is not None
+                any_sent = any_sent or (sent is not None)
+            row.notified = any_sent
         except Exception as e:  # never let a delivery hiccup block the escalation
             logger.error(f"complaint escalation alert failed: {e}")
     if commit:
