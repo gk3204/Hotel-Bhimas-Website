@@ -152,22 +152,25 @@ def _deliver_report(db, *, cref, report, pdf, caption, doc_template, doc_params,
     email attachment, idempotent per `cref`. Best-effort — never raises."""
     if wa.already_sent(db, cref):
         return 0
-    num = wa.owner_number(db)
-    if num and pdf:
-        wa.send_document(db, num, pdf, filename, caption,
-                         template=doc_template, params=doc_params, client_ref=cref)
+    from services import notify as notify_service
+    # Fan out to EVERY owner — WhatsApp PDF to each number, and email the PDF to each address.
+    numbers = wa.owner_numbers(db)
+    for i, num in enumerate(numbers):
+        if pdf:
+            wa.send_document(db, num, pdf, filename, caption,
+                             template=doc_template, params=doc_params, client_ref=f"{cref}:wa{i}")
     # Email the same PDF (free + reliable even before the WhatsApp doc template is approved).
     try:
-        from services import notify as notify_service
         from utils.email_service import send_owner_report_email
-        oe = notify_service.owner_email(db)
-        if oe and pdf:
-            send_owner_report_email(oe, subject, f"<pre>{caption}</pre>", pdf, filename)
+        if pdf:
+            for oe in notify_service.owner_emails(db):
+                send_owner_report_email(oe, subject, f"<pre>{caption}</pre>", pdf, filename)
     except Exception as e:
         logger.warning(f"owner report email failed: {e}")
-    # Guarantee idempotency even when the owner has no WhatsApp number (email-only path).
+    # One base-cref marker guarantees the whole job runs once per day/week regardless of owner count
+    # (and covers the email-only case where no WhatsApp row was written).
     if not wa.already_sent(db, cref):
-        wa._log_row(db, "out", num or "owner", doc_template, doc_params, caption,
+        wa._log_row(db, "out", (numbers[0] if numbers else "owner"), doc_template, doc_params, caption,
                     status="sent", provider="job", client_ref=cref, commit=True)
     return 1
 

@@ -55,10 +55,23 @@ _SUBJECTS = {
 _RESULT_NONE = {"channel": "none", "ok": False, "detail": "No delivery channel available."}
 
 
+def owner_emails(db) -> list:
+    """All owner email addresses (comma/semicolon-separated in the one setting), de-duplicated,
+    blanks dropped. Supports a hotel with more than one owner."""
+    raw = app_settings.get_setting(db, app_settings.OWNER_EMAIL_KEY, "") or ""
+    out, seen = [], set()
+    for part in raw.replace(";", ",").split(","):
+        e = part.strip()
+        if e and e.lower() not in seen:
+            seen.add(e.lower())
+            out.append(e)
+    return out
+
+
 def owner_email(db) -> str | None:
-    """The owner's email address, set on the Settings hub. There is no owner email
-    column anywhere in the schema, so this setting is the only source."""
-    return (app_settings.get_setting(db, app_settings.OWNER_EMAIL_KEY, "") or "").strip() or None
+    """The FIRST owner email (back-compat for single-value callers / presence checks)."""
+    emails = owner_emails(db)
+    return emails[0] if emails else None
 
 
 def whatsapp_really_delivers() -> bool:
@@ -196,16 +209,32 @@ def notify_guest_document(db, guest, *, doc_template, text_template, doc_params,
 
 def notify_owner(db, *, template, params=None, client_ref=None, commit=True):
     """Owner-facing alert (approval code, fraud, cash variance, digest...). Respects the
-    owner-alerts toggle, goes to the owner's WhatsApp number, falls back to their email.
-    Never raises."""
+    owner-alerts toggle, and fans out to EVERY owner — a hotel may have more than one. Each owner
+    gets it on their WhatsApp with their own email as fallback (owner i = number i, email i, paired
+    by position). Returns ok if ANY owner was reached. Never raises."""
+    from itertools import zip_longest
     try:
         cfg = app_settings.get_whatsapp_config(db)
         if not cfg.get("owner_alerts_enabled"):
             return {"channel": "none", "ok": False, "detail": "Owner alerts are switched off."}
-        return notify(db, template=template, params=params,
-                      to_phone=whatsapp_service.owner_number(db),
-                      to_email=owner_email(db), to_name="Owner",
-                      client_ref=client_ref, commit=commit, respect_optout=False)
+        numbers = whatsapp_service.owner_numbers(db)
+        emails = owner_emails(db)
+        if not numbers and not emails:
+            return dict(_RESULT_NONE)
+
+        results = []
+        for i, (phone, email) in enumerate(zip_longest(numbers, emails)):
+            # Per-owner client_ref — whatsapp_messages.client_ref is UNIQUE, so a shared ref would
+            # collide on the 2nd owner. Idempotent re-runs still dedupe per owner.
+            cref = f"{client_ref}:{i}" if client_ref else None
+            results.append(notify(db, template=template, params=params,
+                                  to_phone=phone, to_email=email, to_name="Owner",
+                                  client_ref=cref, commit=commit, respect_optout=False))
+        delivered = [r for r in results if r.get("ok")]
+        if delivered:
+            return {"channel": delivered[0]["channel"], "ok": True,
+                    "detail": f"Sent to {len(delivered)} owner(s)."}
+        return results[0] if results else dict(_RESULT_NONE)
     except Exception as e:
         logger.warning(f"notify_owner ({template}) failed: {e}")
         return dict(_RESULT_NONE)

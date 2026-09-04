@@ -499,8 +499,23 @@ def update_delivery_status(db, provider_id, status, commit=True) -> bool:
 # ---------------------------------------------------------------------------
 # Owner-facing wrappers (respect the wa_owner_alerts_enabled toggle + owner number)
 # ---------------------------------------------------------------------------
+def owner_numbers(db) -> list:
+    """All owner WhatsApp numbers (comma/semicolon-separated in the one setting), normalized,
+    de-duplicated, blanks dropped. Supports a hotel with more than one owner."""
+    raw = app_settings.get_whatsapp_config(db).get("owner_whatsapp") or ""
+    out, seen = [], set()
+    for part in raw.replace(";", ",").split(","):
+        num = normalize_number(part.strip())
+        if num and num not in seen:
+            seen.add(num)
+            out.append(num)
+    return out
+
+
 def owner_number(db) -> str | None:
-    return normalize_number(app_settings.get_whatsapp_config(db)["owner_whatsapp"])
+    """The FIRST owner number (back-compat for callers that expect a single value / a presence check)."""
+    nums = owner_numbers(db)
+    return nums[0] if nums else None
 
 
 def _owner_alerts_on(db) -> bool:
