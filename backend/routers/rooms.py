@@ -42,6 +42,7 @@ def _serialize(r: Room, type_names: dict | None = None) -> dict:
         "floor": r.floor,
         "max_cards": r.max_cards,
         "lock_no": r.lock_no,
+        "lock_type": r.lock_type,   # card | key — key rooms skip the encode/decode flow
         # v4b7: the second type this room may be sold as, plus its name for the admin list.
         "alt_room_type_id": r.alt_room_type_id,
         "alt_room_type_name": (type_names or {}).get(r.alt_room_type_id),
@@ -138,6 +139,7 @@ def create_room(data: RoomCreate, db: Session = Depends(get_db)):
             floor=data.floor,
             max_cards=data.max_cards,
             lock_no=data.lock_no,
+            lock_type=data.lock_type or "card",
             alt_room_type_id=data.alt_room_type_id,
             is_active=data.is_active,
             status=data.status or "vacant",

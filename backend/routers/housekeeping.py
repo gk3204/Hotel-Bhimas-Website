@@ -17,25 +17,27 @@ Skeleton created in Milestone 0 (prompt 01); implemented here in prompt 13.
 """
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import (Booking, BookingItem, Folio, FolioCharge, HousekeepingStatus,
+from models import (Booking, BookingItem, CardIssuance, Folio, FolioCharge, HousekeepingStatus,
                     HousekeepingTask, Room, User)
-from schemas import (HousekeepingConfigUpdate, HousekeepingStatusUpdate, InspectRequest,
-                     MinibarRestockRequest, TaskCompleteRequest)
+from schemas import (CleaningCardRequest, HousekeepingConfigUpdate, HousekeepingStatusUpdate,
+                     InspectRequest, MinibarRestockRequest, TaskCompleteRequest)
 from utils.auth_utils import (require_admin, require_housekeeper_or_admin,
+                              require_reception_or_admin,
                               require_supervisor_or_admin, require_roles)
 
 # Housekeeping board is readable by the housekeeper who works it, plus admin.
 _board_viewer = require_roles("admin", "housekeeper")
 from utils.audit import write_audit, _resolve_user_id
-from utils.housekeeping import set_hk_status
-from utils.settings import (HK_AUTO_INSPECT_KEY, get_housekeeping_config, set_setting,
-                            validate_category)
+from utils.housekeeping import (set_hk_status, cleaning_card_state, active_cleaning_card,
+                                open_checkout_clean_task)
+from utils.settings import (HK_AUTO_INSPECT_KEY, get_fraud_config, get_housekeeping_config,
+                            set_setting, validate_category)
 from routers.folio import _recompute
 
 logger = logging.getLogger(__name__)
@@ -157,6 +159,8 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
             "housekeeping_status": hk.status if hk else None,
             "updated_at": hk.updated_at.isoformat() if hk and hk.updated_at else None,
             "photo_url": hk.photo_url if hk else None,
+            # card-lock rooms are cleaning-card driven (no manual start); key rooms keep manual buttons.
+            "lock_type": r.lock_type,
             "open_task": _task_dict(db, task, r) if task else None,
             "cleaned_by": _name(last.assigned_to) if last and last.assigned_to else None,  # ALT-7
             # v4b8: the PICKED names, shown as their own columns on the housekeeping board.
@@ -340,6 +344,129 @@ def inspect_room(room_id: int, data: InspectRequest, db: Session = Depends(get_d
             "cleaned_by": cleaned_by, "supervisor": supervisor,
             "cleaned_by_name": cleaned_by_name, "inspected_by_name": inspected_by_name,
             "note": data.note}
+
+
+# ---------------------------------------------------------------- cleaning card
+# Reception hands the housekeeper a time-limited cleaning card for a dirty CARD-LOCK room. It may
+# be encoded ONCE per cleaning cycle and only while the room is dirty. Encoding it AUTO-STARTS the
+# cleaning task (no manual "Start cleaning"); returning it AUTO-FINISHES cleaning and leaves the
+# room awaiting inspection. The card's validity window = the existing `cleaning_max_hours` fraud
+# threshold, so the current `cleaning_too_long` detector fires if the room runs over.
+
+def _cleaning_card_payload(room: Room, card: CardIssuance) -> dict:
+    from routers.reception import _room_code  # lazy: avoids any import-time coupling
+    return {
+        "card_id": card.id,
+        "room_id": room.room_id,
+        "room_number": room.room_number,
+        "building": room.building,
+        "floor": room.floor,
+        "room": int(room.room_number),
+        "area": 99,
+        "room_code": card.room_code or _room_code(room),
+        "valid_from": card.valid_from.isoformat() if card.valid_from else None,
+        "valid_to": card.valid_to.isoformat() if card.valid_to else None,
+        "cleaning_card": "active" if card.status == "active" else "used",
+    }
+
+
+@router.post("/rooms/{room_id}/cleaning-card")
+def encode_cleaning_card(room_id: int, data: CleaningCardRequest, db: Session = Depends(get_db),
+                         user=Depends(require_reception_or_admin)):
+    """Encode a cleaning card for a dirty card-lock room (once per cycle) and auto-start cleaning.
+    Returns the encode payload the desk feeds to the RFID encoder."""
+    from routers.reception import _room_code
+    room = db.query(Room).filter(Room.room_id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+
+    # Idempotency: an offline re-flush with the same client_ref returns the original card.
+    if data.client_ref:
+        existing = db.query(CardIssuance).filter(
+            CardIssuance.client_ref == data.client_ref,
+            CardIssuance.card_type == "cleaning").first()
+        if existing:
+            return {**_cleaning_card_payload(room, existing), "duplicate": True}
+
+    if room.lock_type == "key":
+        raise HTTPException(status_code=409, detail="Key-lock room — no cleaning card is needed")
+    if room.status != "cleaning":
+        raise HTTPException(status_code=409, detail="Room is not awaiting cleaning (must be dirty)")
+    if cleaning_card_state(db, room) != "none":
+        raise HTTPException(status_code=409,
+                            detail="A cleaning card has already been issued for this cleaning")
+
+    hours = get_fraud_config(db).get("cleaning_max_hours") or 1  # 0/disabled -> a sane 1h expiry
+    valid_from = datetime.now()
+    valid_to = valid_from + timedelta(hours=hours)
+    task = open_checkout_clean_task(db, room.room_id)
+    card = CardIssuance(
+        booking_id=task.booking_id if task else None,
+        room_id=room.room_id,
+        card_uid=data.card_uid,
+        card_type="cleaning",
+        room_code=_room_code(room),
+        valid_from=valid_from,
+        valid_to=valid_to,
+        issued_by=_resolve_user_id(db, user),
+        station_id=data.station_id,
+        status="active",
+        issue_type="cleaning",
+        client_ref=data.client_ref,
+    )
+    db.add(card)
+
+    # Auto-start cleaning: the card IS the start signal for card-lock rooms.
+    if task and task.status == "pending":
+        task.status = "in_progress"
+        if task.started_at is None:
+            task.started_at = datetime.utcnow()
+    set_hk_status(db, room.room_id, "cleaning", user=user)  # does NOT touch Room.status_changed_at
+    db.flush()
+    db.commit()
+    db.refresh(card)
+    write_audit(db, user, "housekeeping.cleaning_card_issue", "card", card.id,
+                after={"room_id": room.room_id, "room_number": room.room_number,
+                       "valid_to": valid_to.isoformat(), "hours": hours,
+                       "station_id": data.station_id, "client_ref": data.client_ref},
+                client="desktop", commit=True)
+    return _cleaning_card_payload(room, card)
+
+
+@router.post("/rooms/{room_id}/cleaning-card/return")
+def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
+                         user=Depends(require_reception_or_admin)):
+    """Return (decode/wipe) the room's outstanding cleaning card and auto-finish cleaning:
+    the task is marked done and the room is left awaiting inspection (NOT auto-vacant)."""
+    room = db.query(Room).filter(Room.room_id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if room.lock_type == "key":
+        return {"room_id": room_id, "cleaning_card": "none", "noop": True}
+
+    card = active_cleaning_card(db, room_id)
+    if not card:
+        raise HTTPException(status_code=409, detail="No outstanding cleaning card for this room")
+
+    card.status = "erased"
+    card.erased_at = datetime.now()
+    card.erased_by = _resolve_user_id(db, user)
+
+    # Auto-finish cleaning -> awaiting inspection. Deliberately leave Room.status == "cleaning"
+    # (even if auto-inspect is on) so the housekeeper still records cleaned-by/inspected-by.
+    task = open_checkout_clean_task(db, room_id)
+    if task and task.status in ("pending", "in_progress"):
+        task.status = "done"
+        if task.done_at is None:
+            task.done_at = datetime.utcnow()
+        if task.assigned_to is None:
+            task.assigned_to = _resolve_user_id(db, user)
+    set_hk_status(db, room_id, "clean", user=user)
+    db.commit()
+    write_audit(db, user, "housekeeping.cleaning_card_return", "card", card.id,
+                after={"room_id": room_id, "room_number": room.room_number},
+                client="desktop", commit=True)
+    return {"room_id": room_id, "cleaning_card": "used", "task_done": bool(task)}
 
 
 # ---------------------------------------------------------------- minibar -> folio

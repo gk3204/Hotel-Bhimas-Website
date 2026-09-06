@@ -32,7 +32,7 @@ from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
 from utils.rate_engine import quote_stay
-from utils.housekeeping import on_room_dirtied, set_hk_status
+from utils.housekeeping import on_room_dirtied, set_hk_status, cleaning_card_state
 from models import HousekeepingStatus
 from routers.promotions import get_active_promotions, best_promotion_for_item
 from routers.payments import total_paid, total_paid_including_prepaid, prepaid_slice
@@ -485,7 +485,9 @@ def _checkin_response(db: Session, booking: Booking, folio: Folio | None, alread
     for item in booking.booking_items:
         if item.room_id:
             room = db.query(Room).filter(Room.room_id == item.room_id).first()
-            if room:
+            # Key-lock rooms have a physical metal key — nothing to encode, so they produce no
+            # card task and the desk wizard skips straight past the "cards" step for an all-key stay.
+            if room and room.lock_type != "key":
                 cards.append(_encode_payload(db, item, room, valid_from, valid_to))
     return {
         "booking_id": booking.booking_id,
@@ -909,7 +911,15 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         # the whole mechanism. So: record from day one, arm only once the owner has seen how
         # often cards actually come back.
         erased_uids = [u.strip() for u in (data.cards_erased or []) if u and u.strip()]
-        if not erased_uids and app_settings.get_fraud_config(db).get("checkout_no_card_otp_required"):
+        # A booking made up entirely of key-lock rooms never had a card to hand back, so the
+        # "no card returned" approval must not fire for it. Only gate when at least one room is a card lock.
+        has_card_room = any(
+            (r.lock_type != "key")
+            for r in (db.query(Room).filter(Room.room_id == it.room_id).first()
+                      for it in booking.booking_items if it.room_id)
+            if r is not None)
+        if has_card_room and not erased_uids \
+                and app_settings.get_fraud_config(db).get("checkout_no_card_otp_required"):
             consume_otp(db, data.owner_otp_id, data.owner_otp_code, "checkout_no_card", user)
 
         before = {"booking_status": booking.status, "folio_balance": balance}
@@ -1367,7 +1377,9 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
                  and app_settings.get_fraud_config(db)["ac_downgrade_otp_required"])
                 or (is_alt_sale
                     and app_settings.get_fraud_config(db)["alt_room_type_otp_required"])),
-            "card": _encode_payload(db, item, new_room, valid_from, valid_to),
+            # Key-lock target room => no card to cut; the desk skips encoding on a null card.
+            "card": (None if new_room.lock_type == "key"
+                     else _encode_payload(db, item, new_room, valid_from, valid_to)),
         }
 
         if data.dry_run:
@@ -1466,8 +1478,10 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
 
         response["superseded_card_ids"] = superseded_ids
         response["folio_balance"] = float(folio.balance or 0)
-        # active_cards on the new room may have changed after the supersede/commit
-        response["card"] = _encode_payload(db, item, new_room, valid_from, valid_to)
+        # active_cards on the new room may have changed after the supersede/commit.
+        # Key-lock target room => no card to cut.
+        response["card"] = (None if new_room.lock_type == "key"
+                            else _encode_payload(db, item, new_room, valid_from, valid_to))
         return response
     except HTTPException:
         db.rollback()
@@ -2202,6 +2216,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
                         "floor": room.floor,
                         "max_cards": room.max_cards,
                         "active_cards": _active_cards(db, room.room_id),
+                        "lock_type": room.lock_type,   # key rooms skip card read/erase at checkout
                     })
         inhouse.append({
             "booking_id": b.booking_id,
@@ -2253,6 +2268,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         "building": r.building,
         "floor": r.floor,
         "max_cards": r.max_cards,
+        "lock_type": r.lock_type,
     } for r, rt in db.query(Room, RoomType).outerjoin(
         RoomType, Room.room_type_id == RoomType.room_type_id,
     ).filter(
@@ -2273,6 +2289,11 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "room_status": r.status,
             "housekeeping_status": hk.status if hk else None,
             "updated_at": hk.updated_at.isoformat() if hk and hk.updated_at else None,
+            # cleaning-card controls on the desk housekeeping board (card-lock rooms only)
+            "lock_type": r.lock_type,
+            "building": r.building,
+            "floor": r.floor,
+            "cleaning_card": cleaning_card_state(db, r),
         })
 
     return {"date": str(today), "arrivals": arrivals, "inhouse": inhouse,

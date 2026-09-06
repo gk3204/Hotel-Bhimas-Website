@@ -55,6 +55,7 @@ const Rooms = () => {
     floor: "1",
     max_cards: "4",
     lock_no: "",
+    lock_type: "card",
     status: "vacant",
   });
 
@@ -88,7 +89,7 @@ const Rooms = () => {
     }
     try {
       await createRoom(formData);
-      setFormData({ room_number: "", room_type_id: "", alt_room_type_id: "", building: "1", floor: "1", max_cards: "4", lock_no: "", status: "vacant" });
+      setFormData({ room_number: "", room_type_id: "", alt_room_type_id: "", building: "1", floor: "1", max_cards: "4", lock_no: "", lock_type: "card", status: "vacant" });
       loadAll();
       showToast("Room created successfully");
     } catch (err) {
@@ -105,6 +106,7 @@ const Rooms = () => {
         floor: parseInt(editingRoom.floor),
         max_cards: parseInt(editingRoom.max_cards),
         lock_no: editingRoom.lock_no || null,
+        lock_type: editingRoom.lock_type || "card",
         // v4b7: 0 CLEARS the alternate. null would mean "don't change it".
         alt_room_type_id: editingRoom.alt_room_type_id
           ? parseInt(editingRoom.alt_room_type_id) : 0,
@@ -159,7 +161,7 @@ const Rooms = () => {
             <FaPlus size={20} /> Add New Room
           </h2>
 
-          <div className="grid grid-cols-1 md:grid-cols-7 gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
             <InputField label="Room Number" name="room_number" placeholder="e.g., 45" value={formData.room_number} onChange={handleChange} />
 
             <div className="flex flex-col">
@@ -193,6 +195,15 @@ const Rooms = () => {
 
             <InputField label="Building" name="building" type="number" value={formData.building} onChange={handleChange} />
             <InputField label="Floor" name="floor" type="number" value={formData.floor} onChange={handleChange} />
+            <div className="flex flex-col">
+              <label className="mb-2 text-sm font-semibold text-slate-300">Lock Type</label>
+              <select name="lock_type" value={formData.lock_type} onChange={handleChange}
+                title="Card = RFID encoder lock (needs a key card). Key = normal metal key (no encoding)."
+                className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]">
+                <option value="card">Card lock</option>
+                <option value="key">Key lock</option>
+              </select>
+            </div>
             <InputField label="Max Cards" name="max_cards" type="number" value={formData.max_cards} onChange={handleChange} />
             <InputField label="Lock No (optional)" name="lock_no" placeholder="optional" value={formData.lock_no} onChange={handleChange} />
           </div>
@@ -213,6 +224,7 @@ const Rooms = () => {
                 <th className="px-5 py-3">Room</th>
                 <th className="px-5 py-3">Type</th>
                 <th className="px-5 py-3">Bldg / Floor</th>
+                <th className="px-5 py-3">Lock</th>
                 <th className="px-5 py-3">Max Cards</th>
                 <th className="px-5 py-3">Lock No</th>
                 <th className="px-5 py-3">Status</th>
@@ -222,7 +234,7 @@ const Rooms = () => {
             </thead>
             <tbody>
               {rooms.length === 0 && (
-                <tr><td colSpan="8" className="px-5 py-6 text-slate-400">No rooms yet. Add your first room above.</td></tr>
+                <tr><td colSpan="9" className="px-5 py-6 text-slate-400">No rooms yet. Add your first room above.</td></tr>
               )}
               {rooms.map((r) => (
                 <tr key={r.room_id} className={`border-t border-slate-700/60 hover:bg-slate-700/20 ${r.is_active ? "" : "opacity-50"}`}>
@@ -243,7 +255,12 @@ const Rooms = () => {
                     )}
                   </td>
                   <td className="px-5 py-3">{r.building} / {r.floor}</td>
-                  <td className="px-5 py-3">{r.max_cards}</td>
+                  <td className="px-5 py-3">
+                    <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${r.lock_type === "key" ? "bg-slate-600/70 text-slate-200" : "bg-amber-600/70 text-white"}`}>
+                      {r.lock_type === "key" ? "Key" : "Card"}
+                    </span>
+                  </td>
+                  <td className="px-5 py-3">{r.lock_type === "key" ? "—" : r.max_cards}</td>
                   <td className="px-5 py-3 text-slate-400">{r.lock_no || "—"}</td>
                   <td className="px-5 py-3">
                     <span className={`px-3 py-1 rounded-full text-xs font-medium ${STATUS_COLORS[r.status] || "bg-slate-600/80"}`}>
@@ -364,6 +381,16 @@ const Rooms = () => {
                   onChange={(e) => setEditingRoom({ ...editingRoom, max_cards: e.target.value })} />
                 <InputField label="Lock No" value={editingRoom.lock_no || ""}
                   onChange={(e) => setEditingRoom({ ...editingRoom, lock_no: e.target.value })} />
+                <div className="flex flex-col">
+                  <label className="mb-2 text-sm font-semibold text-slate-300">Lock Type</label>
+                  <select value={editingRoom.lock_type || "card"}
+                    onChange={(e) => setEditingRoom({ ...editingRoom, lock_type: e.target.value })}
+                    title="Card = RFID encoder lock (needs a key card). Key = normal metal key (no encoding)."
+                    className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]">
+                    <option value="card">Card lock</option>
+                    <option value="key">Key lock</option>
+                  </select>
+                </div>
                 <div className="flex flex-col">
                   <label className="mb-2 text-sm font-semibold text-slate-300">Status</label>
                   <select value={editingRoom.status}

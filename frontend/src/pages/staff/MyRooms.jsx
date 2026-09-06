@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from "react";
 import { FaBroom, FaCheck, FaWrench, FaWineBottle, FaTimes } from "react-icons/fa";
-import { getRooms, startTask, completeTask, minibarRestock } from "../../api/housekeeping";
+import { getRooms, startTask, completeTask, minibarRestock, inspectRoom } from "../../api/housekeeping";
 import RaiseTicketModal from "../../components/RaiseTicketModal";
 import { useCategoryList, prettyCategory } from "../../utils/useCategoryList";
 
@@ -28,8 +28,11 @@ export default function MyRooms() {
   const [minibarFor, setMinibarFor] = useState(null);
   // v4b8 (R19): the cleaner's NAME, picked per room from the admin-editable list. Kept per
   // room_id because one housekeeper can be finishing several rooms on the same screen.
+  // Both names are now recorded together at the inspection step (see doInspect).
   const [cleanedBy, setCleanedBy] = useState({});
+  const [inspectedBy, setInspectedBy] = useState({});
   const cleanerOptions = useCategoryList("cleaned_by", ["housekeeping_team"]);
+  const inspectorOptions = useCategoryList("inspected_by", ["housekeeping_team"]);
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -65,16 +68,35 @@ export default function MyRooms() {
     }
   };
 
+  // Key-lock rooms only: no cleaning card drives them, so the housekeeper marks clean by hand.
+  // The room then moves to the inspection step below (names are captured there, not here).
   const doFinish = async (room) => {
     setBusyId(room.room_id);
     try {
-      const name = cleanedBy[room.room_id];
-      const res = await completeTask(room.open_task.id, name ? { cleaned_by_name: name } : {});
-      showToast(
-        res.auto_inspected
-          ? `${room.room_number} clean & inspected — re-sellable`
-          : `${room.room_number} marked clean — awaiting inspection`
-      );
+      await completeTask(room.open_task.id, {});
+      showToast(`${room.room_number} marked clean — sign off below`);
+      await load();
+    } catch (e) {
+      showToast(e.message, "error");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  // Inspection sign-off (all rooms): records who cleaned + who inspected and makes the room
+  // re-sellable. For card-lock rooms this is the only step the housekeeper does on this screen —
+  // the desk's cleaning card handled start + finish.
+  const doInspect = async (room) => {
+    const cleaned = cleanedBy[room.room_id];
+    const inspected = inspectedBy[room.room_id];
+    if (!cleaned || !inspected) {
+      showToast("Pick who cleaned and who inspected before signing off.", "error");
+      return;
+    }
+    setBusyId(room.room_id);
+    try {
+      await inspectRoom(room.room_id, { cleaned_by_name: cleaned, inspected_by_name: inspected });
+      showToast(`${room.room_number} inspected — re-sellable`);
       await load();
     } catch (e) {
       showToast(e.message, "error");
@@ -99,24 +121,45 @@ export default function MyRooms() {
           {rooms.map((room) => {
             const task = room.open_task;
             const busy = busyId === room.room_id;
+            const isKey = room.lock_type === "key";
+            // Cleaned but not yet inspected -> show the sign-off step (both card & key rooms).
+            const awaitingInspection = room.housekeeping_status === "clean";
+            // A card-lock room that's dirty/cleaning is driven by the desk's cleaning card, not here.
+            const cardInProgress = !isKey && task && !awaitingInspection;
             return (
               <div key={room.room_id} className="bg-gradient-to-r from-slate-800/60 to-slate-700/60 border border-slate-700 rounded-2xl p-4">
                 <div className="flex items-center justify-between mb-3">
-                  <div className="text-xl font-bold">Room {room.room_number}</div>
+                  <div className="text-xl font-bold flex items-center gap-2">
+                    Room {room.room_number}
+                    <span className={`px-2 py-0.5 rounded-full text-[10px] font-semibold border ${isKey ? "border-slate-500 text-slate-300" : "border-amber-500/40 text-amber-300"}`}>
+                      {isKey ? "Key lock" : "Card lock"}
+                    </span>
+                  </div>
                   <span className={`px-3 py-1 rounded-full text-xs font-bold border ${statusChip(room.housekeeping_status)}`}>
                     {room.housekeeping_status || "—"}
                   </span>
                 </div>
-                <div className="flex flex-wrap gap-2">
-                  {task && task.status === "pending" && (
+                <div className="flex flex-wrap gap-2 items-center">
+                  {/* Key-lock rooms have no cleaning card, so cleaning is started/finished by hand. */}
+                  {isKey && task && task.status === "pending" && (
                     <button disabled={busy} onClick={() => doStart(room)} className="bg-yellow-600 hover:bg-yellow-700 px-4 py-2 rounded-lg font-semibold disabled:opacity-50">
                       Start cleaning
                     </button>
                   )}
-                  {task && task.status === "in_progress" && (
+                  {isKey && task && task.status === "in_progress" && (
+                    <button disabled={busy} onClick={() => doFinish(room)} className="bg-green-700 hover:bg-green-800 px-4 py-2 rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50">
+                      <FaCheck /> Mark clean
+                    </button>
+                  )}
+                  {cardInProgress && (
+                    <span className="text-sm text-slate-400 italic">
+                      Cleaning card is issued at the front desk — encode it there to start, return it when done.
+                    </span>
+                  )}
+
+                  {/* Inspection sign-off: who cleaned + who inspected -> room re-sellable. */}
+                  {awaitingInspection && (
                     <>
-                      {/* Who actually cleaned it — a contract cleaner needs no login. The list
-                          is edited in admin Settings -> Lists. */}
                       <select
                         value={cleanedBy[room.room_id] || ""}
                         onChange={(e) => setCleanedBy({ ...cleanedBy, [room.room_id]: e.target.value })}
@@ -128,11 +171,23 @@ export default function MyRooms() {
                           <option key={c} value={c}>{prettyCategory(c)}</option>
                         ))}
                       </select>
-                      <button disabled={busy} onClick={() => doFinish(room)} className="bg-green-700 hover:bg-green-800 px-4 py-2 rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50">
-                        <FaCheck /> Mark clean
+                      <select
+                        value={inspectedBy[room.room_id] || ""}
+                        onChange={(e) => setInspectedBy({ ...inspectedBy, [room.room_id]: e.target.value })}
+                        aria-label={`Inspected by, room ${room.room_number}`}
+                        className="px-3 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white text-sm focus:outline-none focus:border-[#E5C07B]"
+                      >
+                        <option value="">Inspected by…</option>
+                        {inspectorOptions.map((c) => (
+                          <option key={c} value={c}>{prettyCategory(c)}</option>
+                        ))}
+                      </select>
+                      <button disabled={busy} onClick={() => doInspect(room)} className="bg-green-700 hover:bg-green-800 px-4 py-2 rounded-lg font-semibold flex items-center gap-2 disabled:opacity-50">
+                        <FaCheck /> Inspect &amp; make re-sellable
                       </button>
                     </>
                   )}
+
                   <button onClick={() => setMinibarFor(room)} className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg font-semibold flex items-center gap-2">
                     <FaWineBottle /> Minibar
                   </button>

@@ -510,6 +510,7 @@ def get_stock_config(db) -> dict:
 # over. Every enforcement site reads get_fraud_config() so the screen can never
 # claim a gate is on while the code checks something else.
 FRAUD_CLEANING_MAX_HOURS_KEY = "fraud_cleaning_max_hours"
+FRAUD_CLEANING_MIN_MINUTES_KEY = "fraud_cleaning_min_minutes"  # cleaned suspiciously fast
 FRAUD_INSPECTION_MAX_HOURS_KEY = "fraud_inspection_max_hours"
 FRAUD_ALLOWED_ISSUE_HOURS_KEY = "fraud_allowed_issue_hours"
 FRAUD_ALLOWED_STATIONS_KEY = "fraud_allowed_stations"
@@ -532,7 +533,9 @@ FRAUD_RS_CANCEL_OTP_KEY = "fraud_rs_cancel_otp_required"
 FRAUD_CHECKOUT_NO_CARD_OTP_KEY = "fraud_checkout_no_card_otp_required"
 
 FRAUD_EDITABLE_KEYS = (
-    FRAUD_CLEANING_MAX_HOURS_KEY, FRAUD_ALLOWED_ISSUE_HOURS_KEY, FRAUD_ALLOWED_STATIONS_KEY,
+    FRAUD_CLEANING_MAX_HOURS_KEY, FRAUD_CLEANING_MIN_MINUTES_KEY,
+    FRAUD_INSPECTION_MAX_HOURS_KEY,
+    FRAUD_ALLOWED_ISSUE_HOURS_KEY, FRAUD_ALLOWED_STATIONS_KEY,
     FRAUD_REPEAT_REFUND_THRESHOLD_KEY, FRAUD_REFUND_OTP_KEY, FRAUD_DISCOUNT_OTP_KEY,
     FRAUD_CARD_ISSUE_OTP_KEY, FRAUD_OTP_TTL_MINUTES_KEY,
     FRAUD_AC_DOWNGRADE_OTP_KEY, FRAUD_ALT_ROOM_TYPE_OTP_KEY, FRAUD_COMP_OTP_KEY,
@@ -569,6 +572,10 @@ def get_fraud_config(db) -> dict:
         # 0 disables the cleaning-too-long detector's alerting window.
         "cleaning_max_hours": max(0, _as_int(get_setting(db, FRAUD_CLEANING_MAX_HOURS_KEY),
                                              _as_int(os.getenv("CLEANING_MAX_HOURS"), 6))),
+        # A room "cleaned" in fewer than this many minutes is flagged (probably not really cleaned).
+        # 0 disables the cleaning-too-fast detector.
+        "cleaning_min_minutes": max(0, _as_int(get_setting(db, FRAUD_CLEANING_MIN_MINUTES_KEY),
+                                               _as_int(os.getenv("CLEANING_MIN_MINUTES"), 10))),
         "inspection_max_hours": max(0, _as_int(get_setting(db, FRAUD_INSPECTION_MAX_HOURS_KEY),
                                                _as_int(os.getenv("INSPECTION_MAX_HOURS"), 6))),
         "allowed_issue_hours": hours,

@@ -1,7 +1,10 @@
 const BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
-export async function getRoomTypes() {
-  const res = await fetch(`${BASE_URL}/room-types/`);
+// Admin/desk call this with no args to get every type; the public site passes
+// { websiteOnly: true } so only active, website-visible types come back.
+export async function getRoomTypes({ websiteOnly = false } = {}) {
+  const qs = websiteOnly ? "?website_only=true" : "";
+  const res = await fetch(`${BASE_URL}/room-types/${qs}`);
   if (!res.ok) throw new Error("Failed to fetch");
   return res.json();
 }
@@ -19,6 +22,7 @@ export async function createRoomType(data) {
         max_occupancy: parseInt(data.occupancy),
         total_rooms: parseInt(data.total_rooms) || 1,
         is_ac: !!data.is_ac,
+        show_on_website: data.show_on_website !== false,
       }),
     }
   );

@@ -40,7 +40,7 @@ const Booking = () => {
   /* ================= FETCH ROOM TYPES ================= */
 
   useEffect(() => {
-    apiRequest("/room-types/")
+    apiRequest("/room-types/?website_only=true")
       .then((data) => {
         setRoomTypes(data);
         // Initialize selected rooms object

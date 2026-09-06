@@ -67,9 +67,13 @@ def create_booking(
         # 2️⃣ Validate and collect room types
         room_types_map = {}  # room_type_id -> RoomType object
         for room_item in data.rooms:
+            # This is the PUBLIC website booking endpoint, so a type hidden from the website
+            # (show_on_website=False) is not bookable here even via a crafted request. Desk/OTA/
+            # agent bookings go through reception.py and are unaffected.
             room_type = db.query(RoomType).filter(
                 RoomType.room_type_id == room_item.room_type_id,
-                RoomType.is_active == True
+                RoomType.is_active == True,
+                RoomType.show_on_website == True
             ).first()
 
             if not room_type:

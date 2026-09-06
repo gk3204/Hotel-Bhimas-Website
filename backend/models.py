@@ -38,6 +38,8 @@ class RoomType(Base):
     total_rooms = Column(Integer, nullable=False, default=1)  # Total count of rooms available
     is_ac = Column(Boolean, nullable=False, default=False, index=True)  # FE-10: AC vs non-AC room type
     is_active = Column(Boolean, default=True, index=True)
+    # v5: sellable at desk/OTA/agents but only shown on the public website when True.
+    show_on_website = Column(Boolean, nullable=False, default=True, index=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
 
 class Room(Base):
@@ -51,6 +53,9 @@ class Room(Base):
     floor = Column(Integer, nullable=False, default=1)      # card code FF
     max_cards = Column(Integer, nullable=False, default=4)  # per-room key limit
     lock_no = Column(String(20), nullable=True)            # optional physical lock id
+    # card = RFID encoder lock (encode/decode a key card); key = physical metal key (no encoding).
+    # Key-lock rooms skip the whole card flow (check-in/checkout/shift + the cleaning card).
+    lock_type = Column(String(8), nullable=False, default="card")  # card | key
     # --- Alternate room type (v4b7, migration 030, additive) ---
     # A second type this physical room may be sold as (Room 47 = Triple A/C by default, also
     # lettable as Triple Non-A/C). Selling as the alternate needs an owner code, and only when

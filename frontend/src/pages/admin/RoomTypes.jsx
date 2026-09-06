@@ -21,6 +21,7 @@ const RoomTypes = () => {
     occupancy: "",
     total_rooms: "",
     is_ac: false,
+    show_on_website: true,
   });
 
   useEffect(() => {
@@ -52,7 +53,7 @@ const RoomTypes = () => {
 
     try {
       await createRoomType(formData);
-      setFormData({ name: "", price: "", gst: "", occupancy: "", total_rooms: "", is_ac: false });
+      setFormData({ name: "", price: "", gst: "", occupancy: "", total_rooms: "", is_ac: false, show_on_website: true });
       loadRoomTypes();
       showToast("Room type created successfully");
     } catch (err) {
@@ -69,6 +70,7 @@ const RoomTypes = () => {
         max_occupancy: editingRoom.max_occupancy,
         total_rooms: editingRoom.total_rooms,
         is_ac: !!editingRoom.is_ac,
+        show_on_website: !!editingRoom.show_on_website,
       });
 
       setEditingRoom(null);
@@ -134,11 +136,18 @@ const RoomTypes = () => {
             />
           </div>
 
-          <label className="mt-4 inline-flex items-center gap-2 text-slate-300 cursor-pointer">
-            <input type="checkbox" checked={formData.is_ac}
-              onChange={(e) => setFormData({ ...formData, is_ac: e.target.checked })} />
-            <span>Air-conditioned (AC) room type</span>
-          </label>
+          <div className="mt-4 flex flex-col gap-3">
+            <label className="inline-flex items-center gap-2 text-slate-300 cursor-pointer">
+              <input type="checkbox" checked={formData.is_ac}
+                onChange={(e) => setFormData({ ...formData, is_ac: e.target.checked })} />
+              <span>Air-conditioned (AC) room type</span>
+            </label>
+            <label className="inline-flex items-center gap-2 text-slate-300 cursor-pointer">
+              <input type="checkbox" checked={formData.show_on_website}
+                onChange={(e) => setFormData({ ...formData, show_on_website: e.target.checked })} />
+              <span>Show on public website (still bookable at the desk when off)</span>
+            </label>
+          </div>
 
           <button
             onClick={handleCreate}
@@ -198,6 +207,11 @@ const RoomTypes = () => {
                             ? "bg-sky-500/20 text-sky-300 border-sky-500/30"
                             : "bg-slate-500/20 text-slate-300 border-slate-500/30"
                         }`}>{room.is_ac ? "AC" : "Non-AC"}</span>
+                        <span className={`ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold border ${
+                          room.show_on_website
+                            ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
+                            : "bg-slate-500/20 text-slate-400 border-slate-500/30"
+                        }`}>{room.show_on_website ? "On website" : "Hidden"}</span>
                       </td>
                       <td className="px-6 py-4 text-[#E5C07B] font-bold">₹{room.price_per_night}</td>
                       <td className="px-6 py-4 text-slate-300">{room.gst_percent}%</td>
@@ -320,6 +334,12 @@ const RoomTypes = () => {
                 <input type="checkbox" checked={!!editingRoom.is_ac}
                   onChange={(e) => setEditingRoom({ ...editingRoom, is_ac: e.target.checked })} />
                 <span>Air-conditioned (AC) room type</span>
+              </label>
+
+              <label className="mt-3 inline-flex items-center gap-2 text-slate-300 cursor-pointer">
+                <input type="checkbox" checked={!!editingRoom.show_on_website}
+                  onChange={(e) => setEditingRoom({ ...editingRoom, show_on_website: e.target.checked })} />
+                <span>Show on public website (still bookable at the desk when off)</span>
               </label>
 
               <div className="flex justify-end gap-4 mt-8">

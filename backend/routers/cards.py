@@ -138,6 +138,10 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
             except HTTPException:
                 reasons.append("card_issue_without_approval")
 
+        # A key-lock room has a physical metal key — a guest key card should never be cut for it.
+        if room and getattr(room, "lock_type", "card") == "key":
+            reasons.append("card_on_keylock_room")
+
         if room and _active_count(db, room.room_id) >= (room.max_cards or 4):
             reasons.append("max_cards_exceeded")
 

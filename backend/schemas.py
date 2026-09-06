@@ -40,6 +40,7 @@ class RoomTypeCreate(BaseModel):
     max_occupancy: int = Field(..., ge=1, le=20)
     total_rooms: int = Field(default=1, ge=1, le=100)
     is_ac: bool = False   # FE-10: AC vs non-AC room type
+    show_on_website: bool = True   # v5: hide from the public website while still bookable internally
 
     @field_validator('price_per_night')
     @classmethod
@@ -61,6 +62,7 @@ class RoomTypeUpdateDetails(BaseModel):
     total_rooms: Optional[int] = Field(None, ge=1, le=100)
     is_ac: Optional[bool] = None   # FE-10
     is_active: Optional[bool] = None
+    show_on_website: Optional[bool] = None   # v5: null = leave unchanged
 
     @field_validator('price_per_night')
     @classmethod
@@ -77,6 +79,7 @@ class RoomCreate(BaseModel):
     floor: int = Field(default=1, ge=1, le=99)
     max_cards: int = Field(default=4, ge=1, le=20)
     lock_no: Optional[str] = Field(None, max_length=20)
+    lock_type: str = Field(default="card", pattern="^(card|key)$")  # card = RFID encoder; key = metal key
     # v4b7: a second type this physical room may be sold as (Room 47 = Triple A/C by default,
     # also lettable as Triple Non-A/C). Only used when the booked type has run out.
     alt_room_type_id: Optional[int] = Field(None, ge=1)
@@ -94,6 +97,7 @@ class RoomUpdate(BaseModel):
     floor: Optional[int] = Field(None, ge=1, le=99)
     max_cards: Optional[int] = Field(None, ge=1, le=20)
     lock_no: Optional[str] = Field(None, max_length=20)
+    lock_type: Optional[str] = Field(None, pattern="^(card|key)$")  # null = leave unchanged
     # v4b7. ge=0 rather than ge=1 deliberately: in this PATCH-style update `null` means
     # "leave it alone", so **0** is how the admin screen CLEARS an alternate that was set.
     alt_room_type_id: Optional[int] = Field(None, ge=0)
@@ -754,6 +758,13 @@ class InspectRequest(BaseModel):
     inspected_by_name: Optional[str] = Field(None, pattern=CATEGORY_SLUG_RE)
 
 
+class CleaningCardRequest(BaseModel):
+    """Reception encodes a time-limited housekeeping cleaning card for a dirty card-lock room."""
+    client_ref: Optional[str] = Field(None, max_length=64)     # desktop uuid for offline dedupe
+    station_id: Optional[str] = Field(None, max_length=50)     # which front-desk PC issued it
+    card_uid: Optional[str] = Field(None, max_length=64)       # serial read back from the card
+
+
 class MinibarRestockRequest(BaseModel):
     """Housekeeper restocks the minibar -> posts a GST-inclusive charge to the guest folio."""
     room_id: int
@@ -1189,6 +1200,7 @@ class FraudConfigUpdate(BaseModel):
     """Admin-editable anti-fraud thresholds + approval gates (backlog v2 FE-12).
     Every field optional — only what's sent is changed."""
     cleaning_max_hours: Optional[int] = Field(None, ge=0, le=168)
+    cleaning_min_minutes: Optional[int] = Field(None, ge=0, le=1440)  # 0 = off; flag cleans faster than this
     inspection_max_hours: Optional[int] = Field(None, ge=0, le=168)
     allowed_issue_hours: Optional[str] = Field(None, pattern=r"^\d{1,2}-\d{1,2}$")
     allowed_stations: Optional[List[str]] = None      # [] = no station fencing

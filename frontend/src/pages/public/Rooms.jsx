@@ -101,7 +101,7 @@ const Rooms = () => {
   useEffect(() => {
     const fetchRooms = async () => {
       try {
-        const data = await getRoomTypes();
+        const data = await getRoomTypes({ websiteOnly: true });
 
         const merged = data
           .filter((room) => room.is_active)

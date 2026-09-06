@@ -24,10 +24,14 @@ def get_db():
     finally:
         db.close()
 
-# GET all room types
+# GET all room types. `website_only=true` (used by the public site) returns only types that are
+# both active and flagged for website display; the admin/desk call it without the flag to see all.
 @router.get("/")
-def get_room_types(db: Session = Depends(get_db)):
-    return db.query(RoomType).all()
+def get_room_types(website_only: bool = Query(False), db: Session = Depends(get_db)):
+    q = db.query(RoomType)
+    if website_only:
+        q = q.filter(RoomType.is_active == True, RoomType.show_on_website == True)  # noqa: E712
+    return q.all()
 
 # CREATE room type
 @router.post("/")
@@ -42,7 +46,8 @@ def create_room_type(
         max_occupancy=data.max_occupancy,
         total_rooms=data.total_rooms,
         is_ac=data.is_ac,
-        is_active=True
+        is_active=True,
+        show_on_website=data.show_on_website,
     )
 
     db.add(room_type)

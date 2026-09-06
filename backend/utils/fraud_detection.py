@@ -116,7 +116,10 @@ def _detect_card_anomalies(db, new_alerts, keys):
 
 
 def _detect_cleaning_too_long(db, new_alerts, keys):
+    from utils.housekeeping import active_cleaning_card
     max_hours = get_config(db)["cleaning_max_hours"]
+    if max_hours <= 0:
+        return  # 0 disables the cleaning-too-long window (documented contract)
     cutoff = datetime.utcnow() - timedelta(hours=max_hours)
     rooms = db.query(Room).filter(Room.status == "cleaning").all()
     for r in rooms:
@@ -130,12 +133,45 @@ def _detect_cleaning_too_long(db, new_alerts, keys):
         if in_house:
             continue
         hours = round((datetime.utcnow() - r.status_changed_at).total_seconds() / 3600, 1)
+        # A cleaning card still in the housekeeper's hands past the window is the stronger signal.
+        outstanding = active_cleaning_card(db, r.room_id) is not None
         _make_alert(new_alerts, keys, type="cleaning_too_long", severity="high",
                     dedupe_key=f"cleaning_too_long:room:{r.room_id}", room_id=r.room_id,
                     detail={"room_number": r.room_number, "hours_in_cleaning": hours,
                             "threshold_hours": max_hours,
                             "since": str(r.status_changed_at),
+                            "cleaning_card_outstanding": outstanding,
                             "note": "room held in cleaning far beyond threshold with no in-house booking"})
+
+
+def _detect_cleaning_too_fast(db, new_alerts, keys):
+    """A checkout-clean finished suspiciously fast (probably not really cleaned). Duration is the
+    task's started_at -> done_at, which for a card-lock room is the cleaning card's encode -> return
+    and for a key-lock room is the manual start -> mark-clean. `cleaning_min_minutes == 0` disables it."""
+    from models import HousekeepingTask
+    min_minutes = get_config(db)["cleaning_min_minutes"]
+    if min_minutes <= 0:
+        return
+    # Only look back a couple of days so a config change doesn't re-scan ancient history.
+    lookback = datetime.utcnow() - timedelta(days=2)
+    tasks = (db.query(HousekeepingTask)
+             .filter(HousekeepingTask.type == "checkout_clean",
+                     HousekeepingTask.status == "done",
+                     HousekeepingTask.started_at.isnot(None),
+                     HousekeepingTask.done_at.isnot(None),
+                     HousekeepingTask.done_at >= lookback).all())
+    for t in tasks:
+        minutes = round((t.done_at - t.started_at).total_seconds() / 60, 1)
+        if minutes >= min_minutes:
+            continue
+        r = db.query(Room).filter(Room.room_id == t.room_id).first()
+        _make_alert(new_alerts, keys, type="cleaning_too_fast", severity="med",
+                    dedupe_key=f"cleaning_too_fast:task:{t.id}", room_id=t.room_id,
+                    detail={"room_number": r.room_number if r else None,
+                            "minutes_taken": minutes, "threshold_minutes": min_minutes,
+                            "cleaned_by": t.cleaned_by_name,
+                            "since": str(t.started_at),
+                            "note": "room marked clean far faster than the minimum — likely not cleaned"})
 
 
 def _detect_inspection_overdue(db, new_alerts, keys):
@@ -233,7 +269,7 @@ def run_reconciliation(db) -> dict:
     keys = _existing_open_keys(db)
     new_alerts = []
     for detector in (_detect_card_anomalies, _detect_cleaning_too_long,
-                     _detect_inspection_overdue,
+                     _detect_cleaning_too_fast, _detect_inspection_overdue,
                      _detect_issuance_fencing, _detect_same_id_two_rooms,
                      _detect_repeated_refunds):
         try:
