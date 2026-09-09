@@ -154,8 +154,35 @@ def commission_for(db, source) -> float:
 # ---------------------------------------------------------------------------
 # Booking OTA snapshot
 # ---------------------------------------------------------------------------
+def ota_email_exists(db, channel_code, ota_booking_id) -> bool:
+    """True when the mailbox has already imported a confirmation for this (channel, id) — i.e. the
+    OTA's own email backs the booking id. This is what makes a manually-typed id 'verified'."""
+    oid = (str(ota_booking_id).strip() if ota_booking_id else "")
+    if not oid:
+        return False
+    return db.query(OtaDraftBooking).filter(
+        OtaDraftBooking.channel_code == channel_code,
+        OtaDraftBooking.ota_booking_id == oid,
+        OtaDraftBooking.kind == "confirmation",
+    ).first() is not None
+
+
+def duplicate_ota_booking(db, ota_booking_id, exclude_booking_id=None):
+    """A live booking (any channel) already using this OTA id, or None. Used to reject a re-typed id."""
+    oid = (str(ota_booking_id).strip() if ota_booking_id else "")
+    if not oid:
+        return None
+    q = db.query(Booking).filter(
+        Booking.ota_booking_id == oid,
+        Booking.status.in_(_LIVE_STATUSES),
+    )
+    if exclude_booking_id is not None:
+        q = q.filter(Booking.booking_id != exclude_booking_id)
+    return q.first()
+
+
 def apply_ota_fields(db, booking, source, ota_booking_id=None, commission_percent_override=None,
-                     commission_amount=None, net_payout=None):
+                     commission_amount=None, net_payout=None, verified=False, verified_source=None):
     """Stamp the OTA tracking snapshot onto a freshly-priced booking.
 
     commission % = the override (if the desk typed one) else the channel's configured default.
@@ -199,9 +226,46 @@ def apply_ota_fields(db, booking, source, ota_booking_id=None, commission_percen
     else:
         comm = float(commission_amount) if commission_amount is not None else gross * pct / 100
         booking.ota_net_payout = round(gross - comm, 2)
-    booking.prepaid_amount = round(gross, 2)
-    booking.prepaid_source = "ota"
+    # v5 hard gate: only an email-backed or owner-approved OTA booking is credited as prepaid.
+    # An UNVERIFIED id records the tracking snapshot above but leaves the folio showing the balance
+    # due, so a fabricated "OTA prepaid" id can't hide a cash liability. mark_ota_verified() flips
+    # this later when the confirming email arrives.
+    if verified:
+        booking.prepaid_amount = round(gross, 2)
+        booking.prepaid_source = "ota"
+        booking.ota_verified = True
+        booking.ota_verified_at = datetime.utcnow()
+        booking.ota_verified_source = verified_source or "email"
     return booking
+
+
+def mark_ota_verified(db, booking, source="email"):
+    """Upgrade a not-yet-verified OTA booking once its confirming email arrives (or an owner
+    approves it): flip the flag and, if it was never credited, credit the prepayment now. Idempotent
+    — a booking already email-verified is left untouched (email is the strongest source)."""
+    if booking is None:
+        return booking
+    if booking.ota_verified and booking.ota_verified_source == "email":
+        return booking
+    booking.ota_verified = True
+    booking.ota_verified_at = datetime.utcnow()
+    booking.ota_verified_source = source
+    # Credit the prepayment if the earlier (unverified/owner-approved) path had not.
+    if not booking.prepaid_amount or float(booking.prepaid_amount) <= 0:
+        booking.prepaid_amount = round(float(booking.grand_total or booking.total_amount or 0), 2)
+        booking.prepaid_source = "ota"
+    return booking
+
+
+def _clear_ota_no_email_alert(db, booking_id):
+    """Resolve an open 'ota_no_email' review alert once the confirming email finally arrives."""
+    from models import FraudAlert
+    for a in db.query(FraudAlert).filter(
+            FraudAlert.booking_id == booking_id,
+            FraudAlert.type == "ota_no_email",
+            FraudAlert.status == "open").all():
+        a.status = "resolved"
+        a.review_note = ((a.review_note or "") + " auto-resolved: confirming OTA email received.").strip()
 
 
 def ota_gross_basis(b: Booking) -> float:
@@ -245,6 +309,10 @@ def serialize_ota_booking(db, b: Booking) -> dict:
         "commission_percent": pct,
         "commission_amount": commission,
         "net_payout": net,
+        # v5 verification state: email (OTA's own email backs it) | owner_otp (owner vouched, no
+        # email yet) | legacy (grandfathered) | null (unverified — not credited as prepaid).
+        "ota_verified": bool(b.ota_verified),
+        "ota_verified_source": b.ota_verified_source,
     }
 
 
@@ -875,6 +943,10 @@ def auto_confirm_draft(db, d, user=None):
         if existing is not None:
             d.status = "confirmed"
             d.linked_booking_id = existing.booking_id
+            # v5: the OTA's own email now backs a desk-typed / owner-approved booking — upgrade it
+            # to email-verified (crediting the prepayment if it wasn't yet) and clear its review flag.
+            mark_ota_verified(db, existing, "email")
+            _clear_ota_no_email_alert(db, existing.booking_id)
             db.flush()
             return existing.booking_id
 
@@ -988,10 +1060,15 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False) -> dict
             "auto_confirmed_booking_id": auto_booking_id}
 
 
-def poll_mailbox(db, limit=50) -> dict:
-    """Connect to the configured IMAP mailbox, ingest UNSEEN OTA emails into drafts, mark them seen.
-    No-ops (returns configured=False) when OTA_IMAP_* env is unset. Best-effort: connection/parse
-    errors are logged and summarised, never raised."""
+def poll_mailbox(db, limit=50, since=None) -> dict:
+    """Connect to the configured IMAP mailbox, ingest OTA emails into drafts.
+
+    Normal poll (since=None): searches UNSEEN and marks each processed message \\Seen — the live
+    cadence. Backfill (since=<date>): searches `SINCE dd-Mon-yyyy` (all mail on/after that date,
+    read or not) and does NOT mark messages seen, so a one-time go-live import can pull already-read
+    pre-go-live confirmations without hiding genuine future mail from the normal poller. Both paths
+    are idempotent (draft dedupe + auto-confirm links to an existing booking by ota_booking_id).
+    No-ops (configured=False) when OTA_IMAP_* env is unset. Best-effort: errors are logged, never raised."""
     cfg = imap_config()
     if cfg is None:
         return {"configured": False, "processed": 0, "created": 0, "drafts": []}
@@ -1016,13 +1093,20 @@ def poll_mailbox(db, limit=50) -> dict:
         conn = imaplib.IMAP4_SSL(cfg["host"], cfg["port"]) if cfg["ssl"] else imaplib.IMAP4(cfg["host"], cfg["port"])
         conn.login(cfg["user"], cfg["password"])
         conn.select(cfg["folder"])
-        typ, data = conn.search(None, "UNSEEN")
+        if since is not None:
+            # IMAP SINCE wants dd-Mon-yyyy (e.g. 01-Sep-2026); pulls read + unread on/after the date.
+            criteria = ("SINCE", since.strftime("%d-%b-%Y"))
+        else:
+            criteria = ("UNSEEN",)
+        typ, data = conn.search(None, *criteria)
         if typ != "OK":
             return {"configured": True, "processed": 0, "created": 0, "error": "search failed"}
         ids = (data[0].split() if data and data[0] else [])[:limit]
         for num in ids:
             try:
-                typ, msg_data = conn.fetch(num, "(RFC822)")
+                # PEEK never sets \Seen itself (a plain RFC822 fetch would) — the live path marks
+                # seen explicitly below, the backfill deliberately leaves messages unread.
+                typ, msg_data = conn.fetch(num, "(BODY.PEEK[])")
                 if typ != "OK" or not msg_data or not msg_data[0]:
                     continue
                 raw = msg_data[0][1]
@@ -1032,7 +1116,9 @@ def poll_mailbox(db, limit=50) -> dict:
                     created += 1
                 if res.get("draft_id"):
                     drafts.append(res["draft_id"])
-                conn.store(num, "+FLAGS", "\\Seen")
+                # A backfill leaves messages unread so the live UNSEEN poller still sees anything new.
+                if since is None:
+                    conn.store(num, "+FLAGS", "\\Seen")
             except Exception as e:  # per-message failure shouldn't abort the batch
                 errors += 1
                 logger.warning(f"OTA IMAP: failed to process message {num!r}: {e}")

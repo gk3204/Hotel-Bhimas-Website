@@ -104,3 +104,12 @@ export async function pollMailbox() {
   const res = await fetch(`${BASE_URL}/ota/poll`, { method: "POST", headers: authHeaders() });
   return handle(res);
 }
+
+// One-time go-live backfill: import OTA mail on/after `since` (YYYY-MM-DD) without marking it read.
+export async function importSince(since) {
+  const res = await fetch(`${BASE_URL}/ota/import?since=${encodeURIComponent(since)}`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  return handle(res);
+}

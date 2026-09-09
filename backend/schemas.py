@@ -1218,6 +1218,7 @@ class FraudConfigUpdate(BaseModel):
     overstay_reverse_otp_required: Optional[bool] = None
     rs_cancel_otp_required: Optional[bool] = None
     checkout_no_card_otp_required: Optional[bool] = None
+    ota_unverified_otp_required: Optional[bool] = None
 
 
 STOCK_CATEGORY_RE = CATEGORY_SLUG_RE   # editable list (F-A/FE-6); membership checked at the endpoint

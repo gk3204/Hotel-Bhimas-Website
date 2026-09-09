@@ -276,3 +276,19 @@ def poll_now(db: Session = Depends(get_db), user=Depends(require_reception_or_ad
     configured=false when OTA_IMAP_* env is unset. Reception can trigger it too — the desk's OTA
     drafts screen has a Poll button (the draft inbox is a front-desk workflow)."""
     return ota_service.poll_mailbox(db)
+
+
+@router.post("/import")
+def import_since(since: str = Query(..., description="YYYY-MM-DD — import OTA mail on/after this date"),
+                 limit: int = Query(500, ge=1, le=2000),
+                 db: Session = Depends(get_db), user=Depends(require_admin)):
+    """One-time GO-LIVE backfill: import OTA confirmation emails on/after `since` (read or unread),
+    WITHOUT marking them seen, so pre-go-live bookings arriving after go-live get drafted/auto-linked.
+    Idempotent — safe to re-run. No-ops when the mailbox isn't configured."""
+    d = _parse_date(since, "since")
+    res = ota_service.poll_mailbox(db, limit=limit, since=d)
+    write_audit(db, user, "ota.import_since", "ota", None,
+                after={"since": since, "limit": limit,
+                       "processed": res.get("processed"), "created": res.get("created")},
+                commit=True)
+    return res

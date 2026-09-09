@@ -54,6 +54,8 @@ export const SETTINGS_GROUPS = [
         hint: "The kitchen docket may already be out, so a cancel can hide food that was made." },
       { key: "checkout_no_card_otp_required", type: "toggle", label: "Checking out without the key card needs owner approval",
         hint: "Leave this OFF at first — the desk still records whether a card came back, so you can see how often it happens before making it blocking." },
+      { key: "ota_unverified_otp_required", type: "toggle", label: "Unverified OTA booking ID needs owner approval",
+        hint: "An OTA booking is only treated as prepaid once verified. If the confirming OTA email hasn't arrived, the desk needs your approval — this blocks a fabricated ‘OTA prepaid’ walk-in. Ships ON." },
       { key: "owner_otp_ttl_minutes", type: "number", min: 1, max: 1440, label: "Approval code valid for (minutes)",
         hint: "How long a code stays usable before it expires." },
       { key: "cleaning_max_hours", type: "number", min: 0, max: 168, label: "Alert if a room sits in cleaning for (hours)",

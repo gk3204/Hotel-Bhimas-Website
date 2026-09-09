@@ -264,6 +264,35 @@ def _detect_repeated_refunds(db, new_alerts, keys):
                             "note": "same payout reference refunded repeatedly"})
 
 
+def _detect_ota_no_email(db, new_alerts, keys):
+    """An OTA booking whose id was NOT backed by the OTA's own email — verified only by an owner
+    OTP (or still unverified) — and whose stay has reached check-in with no confirming email yet.
+    This is the review queue for the hard OTA-id gate: a fabricated 'OTA prepaid' id never gets a
+    real email. 'legacy' (grandfathered) and 'email' verified bookings are exempt."""
+    from models import OtaDraftBooking
+    today = datetime.utcnow().date()
+    rows = (db.query(Booking)
+            .filter(Booking.ota_booking_id.isnot(None),
+                    Booking.status.in_(("confirmed", "checked_in", "checked_out")),
+                    Booking.check_in <= today,
+                    func.coalesce(Booking.ota_verified_source, "") != "email",
+                    func.coalesce(Booking.ota_verified_source, "") != "legacy").all())
+    for b in rows:
+        has_email = db.query(OtaDraftBooking).filter(
+            OtaDraftBooking.channel_code == b.booking_source,
+            OtaDraftBooking.ota_booking_id == b.ota_booking_id,
+            OtaDraftBooking.kind == "confirmation").first() is not None
+        if has_email:
+            continue
+        _make_alert(new_alerts, keys, type="ota_no_email", severity="med",
+                    dedupe_key=f"ota_no_email:booking:{b.booking_id}", booking_id=b.booking_id,
+                    detail={"ota_booking_id": b.ota_booking_id, "channel": b.booking_source,
+                            "verified_source": b.ota_verified_source,
+                            "check_in": str(b.check_in),
+                            "note": "OTA booking reached check-in with no confirming OTA email — "
+                                    "verify the booking id is genuine"})
+
+
 def run_reconciliation(db) -> dict:
     """Run every detector, persist new (de-duplicated) alerts, return per-type counts."""
     keys = _existing_open_keys(db)
@@ -271,7 +300,7 @@ def run_reconciliation(db) -> dict:
     for detector in (_detect_card_anomalies, _detect_cleaning_too_long,
                      _detect_cleaning_too_fast, _detect_inspection_overdue,
                      _detect_issuance_fencing, _detect_same_id_two_rooms,
-                     _detect_repeated_refunds):
+                     _detect_repeated_refunds, _detect_ota_no_email):
         try:
             detector(db, new_alerts, keys)
         except Exception as e:

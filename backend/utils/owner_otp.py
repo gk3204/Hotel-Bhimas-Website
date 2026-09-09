@@ -52,6 +52,7 @@ OTP_ACTIONS = frozenset({
     "extend_waive",            # extend a stay for less than the quoted amount (v4b2)
     "room_service_cancel",     # cancel a room-service order (v4b5)
     "checkout_no_card",        # check out without the key card on the encoder (v4b4)
+    "ota_unverified",          # v5: accept an OTA booking whose id has no confirming OTA email yet
 })
 
 
@@ -252,6 +253,13 @@ def _sum_off_hours(ctx):
             f"{_guest_label(ctx)}")
 
 
+def _sum_ota_unverified(ctx):
+    oid = ctx.get("ota_booking_id") or "—"
+    chan = ctx.get("channel") or "OTA"
+    return (f"Accept an {chan} booking as prepaid with NO confirming OTA email yet — "
+            f"booking id {oid}, {_guest_label(ctx)}. Approve only if you can confirm it is genuine.")
+
+
 _SUMMARY_BUILDERS = {
     "refund": _sum_refund,
     "discount_below_floor": _sum_discount,
@@ -265,6 +273,7 @@ _SUMMARY_BUILDERS = {
     "extend_waive": _sum_extend_waive,
     "room_service_cancel": _sum_rs_cancel,
     "checkout_no_card": _sum_checkout_no_card,
+    "ota_unverified": _sum_ota_unverified,
 }
 
 

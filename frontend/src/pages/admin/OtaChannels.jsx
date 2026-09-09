@@ -4,7 +4,7 @@ import { FaGlobe, FaSyncAlt, FaSave, FaEnvelopeOpenText, FaBalanceScale, FaListU
 import { PageShell } from "../../components/admin/BackofficeUI";
 import {
   getChannels, updateChannel, getOtaBookings, getReconciliation,
-  getSettlements, createSettlement, getDrafts, confirmDraft, dismissDraft, pollMailbox,
+  getSettlements, createSettlement, getDrafts, confirmDraft, dismissDraft, pollMailbox, importSince,
 } from "../../api/ota";
 import { getRoomTypes } from "../../api/roomTypes";
 
@@ -21,6 +21,19 @@ const CHANNEL_LABEL = {
   makemytrip: "MakeMyTrip", goibibo: "Goibibo", booking_com: "Booking.com",
   agoda: "Agoda", yatra: "Yatra (Travelguru)", other_ota: "Other OTA",
 };
+
+// v5 OTA-id verification chip: email = OTA's own email backs it; owner = owner vouched (no email yet,
+// review it); legacy = grandfathered; otherwise unverified (not credited as prepaid).
+function otaVerifiedBadge(r) {
+  const src = r.ota_verified_source;
+  const map = {
+    email: ["Verified", "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"],
+    owner_otp: ["Owner-approved", "bg-amber-500/20 text-amber-300 border-amber-500/30"],
+    legacy: ["Legacy", "bg-slate-500/20 text-slate-300 border-slate-500/30"],
+  };
+  const [label, cls] = map[src] || ["Unverified", "bg-rose-500/20 text-rose-300 border-rose-500/30"];
+  return <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold border ${cls}`}>{label}</span>;
+}
 
 const OtaChannels = () => {
   const [tab, setTab] = useState("channels");
@@ -258,6 +271,7 @@ const BookingsTab = ({ showToast }) => {
                 <th className="px-5 py-3 font-semibold">Guest</th>
                 <th className="px-5 py-3 font-semibold">Channel</th>
                 <th className="px-5 py-3 font-semibold">OTA ID</th>
+                <th className="px-5 py-3 font-semibold">Verified</th>
                 <th className="px-5 py-3 font-semibold">Stay</th>
                 <th className="px-5 py-3 font-semibold text-right">Gross</th>
                 <th className="px-5 py-3 font-semibold text-right">Comm %</th>
@@ -272,6 +286,7 @@ const BookingsTab = ({ showToast }) => {
                   <td className="px-5 py-3 text-slate-300">{r.guest_name || "—"}</td>
                   <td className="px-5 py-3 text-slate-300">{CHANNEL_LABEL[r.source] || r.source}</td>
                   <td className="px-5 py-3 text-slate-400">{r.ota_booking_id || "—"}</td>
+                  <td className="px-5 py-3">{otaVerifiedBadge(r)}</td>
                   <td className="px-5 py-3 text-slate-400 whitespace-nowrap">{r.check_in} → {r.check_out}</td>
                   <td className="px-5 py-3 text-right text-slate-300">{fmt(r.gross)}</td>
                   <td className="px-5 py-3 text-right text-slate-400">{r.commission_percent ?? "—"}</td>
@@ -280,7 +295,7 @@ const BookingsTab = ({ showToast }) => {
                 </tr>
               ))}
               <tr className="bg-slate-900/60 font-bold">
-                <td className="px-5 py-3" colSpan={5}>TOTAL ({totals.bookings} bookings)</td>
+                <td className="px-5 py-3" colSpan={6}>TOTAL ({totals.bookings} bookings)</td>
                 <td className="px-5 py-3 text-right">{fmt(totals.gross)}</td>
                 <td className="px-5 py-3"></td>
                 <td className="px-5 py-3 text-right">{fmt(totals.commission_amount)}</td>
@@ -448,6 +463,8 @@ const DraftsTab = ({ showToast }) => {
   const [cform, setCform] = useState({});
   const [busy, setBusy] = useState(false);
   const [polling, setPolling] = useState(false);
+  const [importDate, setImportDate] = useState("");
+  const [importing, setImporting] = useState(false);
 
   const load = async () => {
     setLoading(true);
@@ -531,6 +548,19 @@ const DraftsTab = ({ showToast }) => {
     setPolling(false);
   };
 
+  // One-time go-live backfill of OTA mail on/after a date (reads without marking seen).
+  const doImport = async () => {
+    if (!importDate) { showToast("Pick a date to import from", "error"); return; }
+    setImporting(true);
+    try {
+      const res = await importSince(importDate);
+      if (!res.configured) showToast("Mailbox poller is off (set OTA_IMAP_* env)", "error");
+      else showToast(`Imported since ${importDate}: ${res.processed || 0} email(s), ${res.created || 0} new draft(s)`);
+      await load();
+    } catch (e) { showToast(e.message, "error"); }
+    setImporting(false);
+  };
+
   const statusChip = (s) => ({
     pending: "bg-yellow-500/20 text-yellow-300 border-yellow-500/30",
     confirmed: "bg-green-500/20 text-green-300 border-green-500/30",
@@ -542,10 +572,20 @@ const DraftsTab = ({ showToast }) => {
     <Card className="overflow-hidden">
       <div className="px-6 py-4 border-b border-slate-700 flex items-center justify-between">
         <h2 className="text-lg font-bold text-white">Email-parsed drafts</h2>
-        <button onClick={doPoll} disabled={polling}
-          className="bg-slate-700 hover:bg-slate-600 font-semibold px-5 py-2.5 rounded-lg transition flex items-center gap-2 disabled:opacity-50">
-          <FaSyncAlt size={13} /> {polling ? "Polling…" : "Poll mailbox now"}
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Go-live backfill: import older OTA mail on/after a date without marking it read. */}
+          <input type="date" value={importDate} onChange={(e) => setImportDate(e.target.value)}
+            title="Import OTA emails on/after this date (one-time go-live backfill)"
+            className={inputCls + " py-2"} />
+          <button onClick={doImport} disabled={importing || !importDate}
+            className="bg-slate-700 hover:bg-slate-600 font-semibold px-4 py-2.5 rounded-lg transition flex items-center gap-2 disabled:opacity-50">
+            {importing ? "Importing…" : "Import since"}
+          </button>
+          <button onClick={doPoll} disabled={polling}
+            className="bg-slate-700 hover:bg-slate-600 font-semibold px-5 py-2.5 rounded-lg transition flex items-center gap-2 disabled:opacity-50">
+            <FaSyncAlt size={13} /> {polling ? "Polling…" : "Poll mailbox now"}
+          </button>
+        </div>
       </div>
       {loading ? <Spinner /> : drafts.length === 0 ? (
         <Empty emoji="✉️" text="No drafts. Forwarded/parsed OTA emails will appear here for one-click confirm." />

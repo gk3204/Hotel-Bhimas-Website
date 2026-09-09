@@ -273,11 +273,32 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
         db.flush()
         # OTA tracking snapshot (prompt 17): stamp OTA booking id + commission + net payout when the
         # source is an OTA channel. Commission % = the desk override else the per-OTA config default.
+        # v5 HARD GATE (applies to every OTA channel via is_ota_source — MMT/Goibibo/Booking.com/
+        # Agoda/Yatra/other_ota + any admin-added source): an OTA id must be legitimate before the
+        # booking is treated as prepaid.
+        ota_verified_source = None
+        if ota_service.is_ota_source(booking_source, db):
+            # 1) No two live bookings may share an OTA id.
+            dup = ota_service.duplicate_ota_booking(db, data.ota_booking_id)
+            if dup is not None:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"This OTA booking ID is already used by booking #{dup.booking_id}")
+            # 2) Verified = a matching OTA email already imported; otherwise the owner must approve.
+            if ota_service.ota_email_exists(db, booking_source, data.ota_booking_id):
+                ota_verified_source = "email"
+            elif app_settings.get_fraud_config(db).get("ota_unverified_otp_required"):
+                consume_otp(db, data.owner_otp_id, data.owner_otp_code, "ota_unverified", user)
+                ota_verified_source = "owner_otp"
+            else:
+                ota_verified_source = None  # gate off: record it, but leave it unverified/uncredited
         ota_service.apply_ota_fields(db, booking, booking_source,
                                      ota_booking_id=data.ota_booking_id,
                                      commission_percent_override=data.ota_commission_percent,
                                      commission_amount=data.ota_commission_amount,
-                                     net_payout=data.ota_net_payout)
+                                     net_payout=data.ota_net_payout,
+                                     verified=ota_verified_source is not None,
+                                     verified_source=ota_verified_source)
 
         # Complimentary at booking (desk only) — reuses the v4b6 machinery. Setting all/room needs
         # a reason + the owner OTP; the v4b1 post_room_nights short-circuit then suppresses the room

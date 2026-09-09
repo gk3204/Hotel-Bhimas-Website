@@ -531,6 +531,7 @@ FRAUD_COMP_OTP_KEY = "fraud_comp_otp_required"
 FRAUD_OVERSTAY_REVERSE_OTP_KEY = "fraud_overstay_reverse_otp_required"
 FRAUD_RS_CANCEL_OTP_KEY = "fraud_rs_cancel_otp_required"
 FRAUD_CHECKOUT_NO_CARD_OTP_KEY = "fraud_checkout_no_card_otp_required"
+FRAUD_OTA_UNVERIFIED_OTP_KEY = "fraud_ota_unverified_otp_required"  # v5: unverified OTA id needs owner approval
 
 FRAUD_EDITABLE_KEYS = (
     FRAUD_CLEANING_MAX_HOURS_KEY, FRAUD_CLEANING_MIN_MINUTES_KEY,
@@ -540,6 +541,7 @@ FRAUD_EDITABLE_KEYS = (
     FRAUD_CARD_ISSUE_OTP_KEY, FRAUD_OTP_TTL_MINUTES_KEY,
     FRAUD_AC_DOWNGRADE_OTP_KEY, FRAUD_ALT_ROOM_TYPE_OTP_KEY, FRAUD_COMP_OTP_KEY,
     FRAUD_OVERSTAY_REVERSE_OTP_KEY, FRAUD_RS_CANCEL_OTP_KEY, FRAUD_CHECKOUT_NO_CARD_OTP_KEY,
+    FRAUD_OTA_UNVERIFIED_OTP_KEY,
 )
 
 _ALLOWED_HOURS_RE = re.compile(r"^\d{1,2}-\d{1,2}$")
@@ -611,6 +613,10 @@ def get_fraud_config(db) -> dict:
                                            _env_bool("RS_CANCEL_OTP_REQUIRED")),
         "checkout_no_card_otp_required": _bool_or(get_setting(db, FRAUD_CHECKOUT_NO_CARD_OTP_KEY),
                                                   _env_bool("CHECKOUT_NO_CARD_OTP_REQUIRED")),
+        # v5: ships ARMED — an OTA booking id with no confirming email needs owner approval before
+        # the stay is treated as prepaid (blocks a fabricated "OTA prepaid" walk-in).
+        "ota_unverified_otp_required": _bool_or(get_setting(db, FRAUD_OTA_UNVERIFIED_OTP_KEY),
+                                                _env_bool("OTA_UNVERIFIED_OTP_REQUIRED", "true")),
     }
 
 

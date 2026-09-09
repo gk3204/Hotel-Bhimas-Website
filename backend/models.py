@@ -113,6 +113,11 @@ class Booking(Base):
     ota_commission_percent = Column(Numeric(5, 2), nullable=True)     # commission % (from per-OTA config, overridable at entry)
     ota_commission_amount = Column(Numeric(10, 2), nullable=True)     # ACTUAL commission (incl GST) read from the voucher; preferred over %×gross
     ota_net_payout = Column(Numeric(10, 2), nullable=True)           # expected payout = gross - commission (snapshot), or the voucher's "Payable to Property"
+    # v5: an OTA booking id is only treated as prepaid once VERIFIED — a matching OTA email imported,
+    # or (no email yet) an owner-approval OTP at the desk. `legacy` = grandfathered pre-gate rows.
+    ota_verified = Column(Boolean, nullable=False, default=False, index=True)
+    ota_verified_at = Column(DateTime, nullable=True)
+    ota_verified_source = Column(String(16), nullable=True)          # email | owner_otp | legacy
     # --- Corporate bill-to-company (prompt 18 slice 7, additive) ---
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)  # the bill-to company
     bill_to = Column(String(10), nullable=False, default="guest", index=True)  # guest | company | split

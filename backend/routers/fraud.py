@@ -243,6 +243,7 @@ def update_config(data: FraudConfigUpdate, db: Session = Depends(get_db),
         "overstay_reverse_otp_required": app_settings.FRAUD_OVERSTAY_REVERSE_OTP_KEY,
         "rs_cancel_otp_required": app_settings.FRAUD_RS_CANCEL_OTP_KEY,
         "checkout_no_card_otp_required": app_settings.FRAUD_CHECKOUT_NO_CARD_OTP_KEY,
+        "ota_unverified_otp_required": app_settings.FRAUD_OTA_UNVERIFIED_OTP_KEY,
     }
     for field, value in changes.items():
         key = key_map.get(field)
