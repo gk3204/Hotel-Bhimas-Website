@@ -36,6 +36,7 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
@@ -529,3 +530,182 @@ def scans_export(request: Request, db: Session = Depends(get_db),
         _cleanup(tmp_path)
         logger.error("scan archive export failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="The scan archive export failed.")
+
+
+# -----------------------------------------------------------------------------------------
+# Purge — the only irreversible operation in this file.
+#
+# Deleting a scan from object storage is permanent, and afterwards the ONLY copy that exists
+# is the zip on the owner's PC. So every check here is a refusal, not a repair: a ref that
+# does not pass is skipped and reported, never deleted "to be safe".
+#
+# The order matters. The AGE GATE is enforced server-side from the object's own last_modified
+# and is NOT overridable by the request, so neither a client bug nor a hostile caller can wipe
+# this week's check-ins. The CHECKSUM gate compares what the client verified against what is
+# actually stored right now: a mismatch means the client verified something else, or the object
+# changed since the archive, and either way deleting would destroy the unverified copy.
+# -----------------------------------------------------------------------------------------
+
+# Distinct from overstay's 0x00570A11 and OTA's 0x00074A11.
+_PURGE_LOCK_KEY = 0x005CA451
+
+# Stop-and-ask thresholds. A purge facing an unexpectedly large batch should behave like the
+# CLI pruner does when it cannot read a date: do nothing, and make a human look.
+PURGE_MAX_REFS = 1000
+PURGE_BLAST_RADIUS_REFS = 200
+PURGE_BLAST_RADIUS_FRACTION = 0.5
+# The fraction test only makes sense once a batch is big enough for "most of the bucket" to be a
+# meaningful statement. Without this floor, a hotel holding 12 scans trips the 50% rule on a
+# 7-scan purge every single week — and a guard that fires on every correct run teaches whoever
+# runs it to pass force=true reflexively, which is worse than having no guard at all.
+PURGE_BLAST_RADIUS_MIN_REFS_FOR_FRACTION = 25
+
+
+def _purge_enabled() -> bool:
+    return os.getenv("SCAN_PURGE_ENABLED", "false").strip().lower() in ("1", "true", "yes")
+
+
+class PurgeRef(BaseModel):
+    ref: str
+    sha256: str
+
+
+class PurgeRequest(BaseModel):
+    batch_id: str
+    confirm: str
+    refs: list[PurgeRef]
+    # Only ever set by a human who has read the 409 and decided the batch is genuinely correct.
+    force: bool = False
+
+
+@router.post("/scans/purge")
+def scans_purge(payload: PurgeRequest, request: Request, db: Session = Depends(get_db),
+                user=Depends(require_admin)):
+    """Delete archived scans from object storage, after proving each one is safely archived.
+
+    Ships DISABLED (`SCAN_PURGE_ENABLED=false`), matching how every other destructive automation
+    in this codebase ships — `overstay_auto_charge_enabled` is FALSE out of the box for the same
+    reason. Turning it on is a decision, not a default."""
+    if not _purge_enabled():
+        raise HTTPException(
+            status_code=503,
+            detail="Scan purging is disabled. Set SCAN_PURGE_ENABLED=true to arm it.")
+    if payload.confirm != "DELETE":
+        raise HTTPException(status_code=400, detail='Refusing to purge without confirm="DELETE".')
+    if not payload.refs:
+        raise HTTPException(status_code=400, detail="No refs supplied.")
+    if len(payload.refs) > PURGE_MAX_REFS:
+        raise HTTPException(status_code=400,
+                            detail=f"Too many refs in one request (max {PURGE_MAX_REFS}).")
+    if not secure_id_store.storage_ready():
+        raise HTTPException(status_code=503, detail="ID scan storage is not configured.")
+
+    # Blast radius. Checked BEFORE the advisory lock so a refusal costs nothing.
+    if not payload.force:
+        try:
+            online = len(secure_id_store.list_scans())
+        except Exception:
+            online = 0
+        too_many = len(payload.refs) > PURGE_BLAST_RADIUS_REFS
+        too_much = (online
+                    and len(payload.refs) >= PURGE_BLAST_RADIUS_MIN_REFS_FOR_FRACTION
+                    and (len(payload.refs) / online) > PURGE_BLAST_RADIUS_FRACTION)
+        if too_many or too_much:
+            logger.error("purge refused on blast radius: %s refs of %s online",
+                         len(payload.refs), online)
+            raise HTTPException(
+                status_code=409,
+                detail=(f"That would delete {len(payload.refs)} of {online} stored scans. "
+                        f"If that is really intended, resend with force=true."))
+
+    ip = _client_ip(request)
+    cutoff = datetime.utcnow() - timedelta(days=SCAN_ARCHIVE_MIN_AGE_DAYS)
+    results, deleted_refs = [], []
+    skipped = {}
+
+    # One purge at a time across workers, so two runs cannot double-stamp the same rows.
+    got_lock = db.execute(text("SELECT pg_try_advisory_lock(:k)"),
+                          {"k": _PURGE_LOCK_KEY}).scalar()
+    if not got_lock:
+        raise HTTPException(status_code=409, detail="Another purge is already running.")
+
+    try:
+        owners = _scan_ref_owners(db, {r.ref for r in payload.refs})
+        for item in payload.refs:
+            ref = item.ref
+
+            def skip(reason):
+                skipped[reason] = skipped.get(reason, 0) + 1
+                results.append({"ref": ref, "status": "skipped", "reason": reason})
+
+            if not secure_id_store.valid_ref(ref):
+                skip("invalid")
+                continue
+
+            info = secure_id_store.stat_scan(ref)
+            if info is None:
+                # Already gone. Still stamp the row, so a retried run converges instead of
+                # leaving a scan that is deleted but not marked archived.
+                _stamp_archived(db, owners.get(ref))
+                results.append({"ref": ref, "status": "already_gone"})
+                continue
+
+            last_mod = _naive(info.get("last_modified")) if info.get("last_modified") else None
+            if last_mod is None or last_mod > cutoff:
+                skip("too_recent")
+                continue
+
+            try:
+                actual = hashlib.sha256(secure_id_store.read_ciphertext(ref)).hexdigest()
+            except FileNotFoundError:
+                _stamp_archived(db, owners.get(ref))
+                results.append({"ref": ref, "status": "already_gone"})
+                continue
+            if actual.lower() != (item.sha256 or "").lower():
+                # The archived copy is not what is stored. Deleting now would destroy the only
+                # version nobody has verified.
+                logger.error("purge checksum mismatch for %s", ref)
+                skip("mismatch")
+                continue
+
+            secure_id_store.delete_scan(ref)
+            _stamp_archived(db, owners.get(ref))
+            deleted_refs.append(ref)
+            results.append({"ref": ref, "status": "deleted"})
+
+        db.commit()
+    finally:
+        db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PURGE_LOCK_KEY})
+        db.commit()
+
+    if deleted_refs:
+        set_setting(db, SCANS_LAST_PURGE_AT_KEY, datetime.utcnow().isoformat(),
+                    user=user, commit=True)
+
+    # The full list is the record of what left the system. ~30 KB at 500 refs — worth it.
+    write_audit(db, user, "backup.scans_purge", "id_scans", None,
+                after={"batch_id": payload.batch_id, "requested": len(payload.refs),
+                       "deleted": len(deleted_refs), "skipped": skipped,
+                       "forced": payload.force, "refs_deleted": deleted_refs},
+                ip=ip, client="web", commit=True)
+    logger.warning("🗑️ purge by %s from %s — %s deleted, %s skipped (batch %s)",
+                   (user or {}).get("sub"), ip, len(deleted_refs), sum(skipped.values()),
+                   payload.batch_id)
+
+    return {"batch_id": payload.batch_id, "requested": len(payload.refs),
+            "deleted": len(deleted_refs), "skipped": skipped,
+            "min_age_days": SCAN_ARCHIVE_MIN_AGE_DAYS, "results": results}
+
+
+def _stamp_archived(db: Session, owner: dict | None) -> None:
+    """Record that this side's scan is now offline. id_scan_ref is deliberately left in place:
+    it is the pointer into the archive zip, and nulling it would make the file unfindable."""
+    if not owner:
+        return                                    # an orphan: nothing references it
+    g = db.query(BookingGuest).filter(BookingGuest.id == owner["guest_id"]).first()
+    if g is None:
+        return
+    if owner["side"] == "back":
+        g.id_scan_back_archived_at = datetime.utcnow()
+    else:
+        g.id_scan_archived_at = datetime.utcnow()
