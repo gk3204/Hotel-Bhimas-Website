@@ -23,11 +23,14 @@ their IP, and rate-limited to one per hour — the limit lives in `app_settings`
 memory, because uvicorn runs with `--workers 4` and an in-memory counter would allow four.
 """
 import hashlib
+import json
 import logging
 import os
 import shutil
 import subprocess
 import tempfile
+import uuid
+import zipfile
 from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
@@ -38,8 +41,9 @@ from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from database import SessionLocal
-from models import (Booking, Folio, FolioCharge, Guest, Invoice, Payment, Room,
-                    User)
+from models import (Booking, BookingGuest, Folio, FolioCharge, Guest, Invoice,
+                    Payment, Room, User)
+from utils import scan_objectstore, secure_id_store
 from utils.audit import write_audit
 from utils.auth_utils import require_admin
 from utils.settings import get_setting, set_setting
@@ -92,9 +96,13 @@ def _parse_dt(value):
         return None
 
 
-def _rate_limit_check(db: Session):
-    """One export per hour. Reads persisted state so all four workers share the limit."""
-    last = _parse_dt(get_setting(db, LAST_EXPORT_AT_KEY))
+def _rate_limit_check(db: Session, key: str = LAST_EXPORT_AT_KEY, what: str = "backup"):
+    """One export per hour. Reads persisted state so every worker shares the limit.
+
+    `key` is a parameter because the scan archive MUST NOT share the database dump's slot:
+    the weekly scans run would otherwise 429 that night's `pg_dump`, and the failure would
+    look like a broken backup rather than a shared counter."""
+    last = _parse_dt(get_setting(db, key))
     if last is None:
         return
     waited = datetime.utcnow() - last
@@ -102,7 +110,7 @@ def _rate_limit_check(db: Session):
         mins = int((MIN_INTERVAL - waited).total_seconds() // 60) + 1
         raise HTTPException(
             status_code=429,
-            detail=f"A backup was taken less than an hour ago. Try again in {mins} minute(s).")
+            detail=f"A {what} was taken less than an hour ago. Try again in {mins} minute(s).")
 
 
 def _row_counts(db: Session) -> dict:
@@ -254,3 +262,270 @@ def _cleanup(path: str):
         os.unlink(path)
     except OSError:
         pass
+
+
+# =========================================================================================
+# Guest ID scan archive
+#
+# The database dump above does NOT contain ID scans — they are Fernet-encrypted blobs in
+# object storage, not rows. These endpoints let the owner's PC pull a verified copy of them
+# on the same schedule, so the two halves of "everything the hotel holds" are both covered.
+#
+# Everything here moves CIPHERTEXT and never decrypts. The archive is deliberately unreadable
+# on the machine that stores it: ID_SCAN_ENCRYPTION_KEY lives only in the server environment
+# and an offline escrow. That is the property that makes it safe to hold on a desktop.
+# =========================================================================================
+
+SCANS_LAST_EXPORT_AT_KEY = "scans_last_export_at"
+SCANS_LAST_SUCCESS_AT_KEY = "scans_last_success_at"
+SCANS_LAST_SUCCESS_COUNT_KEY = "scans_last_success_count"
+SCANS_LAST_SUCCESS_SHA_KEY = "scans_last_success_sha256"
+SCANS_LAST_PURGE_AT_KEY = "scans_last_purge_at"
+
+# Nothing may be deleted from object storage until it is at least this old, regardless of what
+# any client asks for. Enforced server-side in the purge path (stage 4).
+SCAN_ARCHIVE_MIN_AGE_DAYS = int(os.getenv("SCAN_ARCHIVE_MIN_AGE_DAYS", "90"))
+
+SCANS_MAX_LIMIT = 2000
+SCANS_DEFAULT_LIMIT = 500
+# Railway's disk is ephemeral and shared; refuse rather than fill it. 8 MB/scan cap means the
+# default batch of 500 cannot realistically approach this, but a bad `limit` could.
+SCANS_MAX_EXPORT_BYTES = 512 * 1024 * 1024
+
+
+def _scan_ref_owners(db: Session, refs: set) -> dict:
+    """Map each ref -> {guest_id, booking_id, side, mime} for refs that a roster row still
+    points at. A ref absent from this map is an ORPHAN: stored bytes nothing references."""
+    if not refs:
+        return {}
+    owners = {}
+    rows = (db.query(BookingGuest)
+            .filter((BookingGuest.id_scan_ref.in_(refs)) |
+                    (BookingGuest.id_scan_back_ref.in_(refs))).all())
+    for g in rows:
+        if g.id_scan_ref in refs:
+            owners[g.id_scan_ref] = {"guest_id": g.id, "booking_id": g.booking_id,
+                                     "side": "front", "mime": g.id_scan_mime,
+                                     "archived_at": g.id_scan_archived_at}
+        if g.id_scan_back_ref in refs:
+            owners[g.id_scan_back_ref] = {"guest_id": g.id, "booking_id": g.booking_id,
+                                          "side": "back", "mime": g.id_scan_back_mime,
+                                          "archived_at": g.id_scan_back_archived_at}
+    return owners
+
+
+def _collect_scans(db: Session, before_days: int, limit: int) -> list:
+    """Stored scans, oldest first, annotated with the roster row that owns each one."""
+    items = secure_id_store.list_scans()
+    if before_days > 0:
+        cutoff = datetime.utcnow() - timedelta(days=before_days)
+        items = [i for i in items
+                 if i["last_modified"] is not None
+                 and _naive(i["last_modified"]) <= cutoff]
+    items = items[:limit]
+    owners = _scan_ref_owners(db, {i["ref"] for i in items})
+    for i in items:
+        own = owners.get(i["ref"])
+        i["in_use"] = own is not None
+        i["booking_id"] = own["booking_id"] if own else None
+        i["guest_id"] = own["guest_id"] if own else None
+        i["side"] = own["side"] if own else None
+        i["id_scan_mime"] = own["mime"] if own else None
+        i["already_archived"] = bool(own and own["archived_at"])
+    return items
+
+
+def _naive(dt):
+    """R2 returns tz-aware datetimes; the local backend returns naive ones. Compare in UTC."""
+    return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
+
+
+@router.get("/scans/status", dependencies=[Depends(require_admin)])
+def scans_status(db: Session = Depends(get_db)):
+    """Health of the ID-scan archive.
+
+    Deliberately a SEPARATE endpoint from /status: an object-storage outage must not break the
+    one panel whose entire job is telling the owner whether the database backup is healthy."""
+    store = scan_objectstore.describe()
+    backend = secure_id_store.storage_backend()
+    online_count = online_bytes = 0
+    oldest = None
+    error = None
+    try:
+        if secure_id_store.storage_ready():
+            items = secure_id_store.list_scans()
+            online_count = len(items)
+            online_bytes = sum(i["bytes"] for i in items)
+            oldest = _naive(items[0]["last_modified"]).isoformat() if items else None
+    except Exception as e:                                  # storage down — report, never 500
+        logger.error("scan status listing failed: %s", e)
+        error = "Object storage could not be listed. See server logs."
+
+    last_ok = _parse_dt(get_setting(db, SCANS_LAST_SUCCESS_AT_KEY))
+    age_hours = None
+    if last_ok:
+        age_hours = round((datetime.utcnow() - last_ok).total_seconds() / 3600.0, 1)
+    return {
+        "backend": backend,
+        "storage_ready": secure_id_store.storage_ready(),
+        "bucket": store.get("bucket"),
+        "prefix": store.get("prefix"),
+        "online_count": online_count,
+        "online_bytes": online_bytes,
+        "oldest_scan_at": oldest,
+        "last_export_at": last_ok.isoformat() if last_ok else None,
+        "last_export_count": get_setting(db, SCANS_LAST_SUCCESS_COUNT_KEY),
+        "last_export_sha256": get_setting(db, SCANS_LAST_SUCCESS_SHA_KEY),
+        "last_purge_at": get_setting(db, SCANS_LAST_PURGE_AT_KEY),
+        "age_hours": age_hours,
+        "min_age_days": SCAN_ARCHIVE_MIN_AGE_DAYS,
+        "purge_enabled": (os.getenv("SCAN_PURGE_ENABLED", "false").strip().lower()
+                          in ("1", "true", "yes")),
+        "error": error,
+    }
+
+
+@router.get("/scans/manifest", dependencies=[Depends(require_admin)])
+def scans_manifest(db: Session = Depends(get_db),
+                   before_days: int = 0,
+                   limit: int = SCANS_DEFAULT_LIMIT):
+    """What the archive WOULD contain, without transferring anything.
+
+    `before_days=0` (the default) means every stored scan: the weekly archive wants a copy of
+    everything promptly, not only of what is old enough to delete. The age floor is a
+    delete-side control and lives in the purge path, not here."""
+    limit = max(1, min(int(limit), SCANS_MAX_LIMIT))
+    if not secure_id_store.storage_ready():
+        raise HTTPException(status_code=503, detail="ID scan storage is not configured.")
+    items = _collect_scans(db, max(0, int(before_days)), limit)
+    return {
+        "generated_at": datetime.utcnow().isoformat(),
+        "backend": secure_id_store.storage_backend(),
+        "count": len(items),
+        "total_bytes": sum(i["bytes"] for i in items),
+        "orphan_count": sum(1 for i in items if not i["in_use"]),
+        "min_age_days": SCAN_ARCHIVE_MIN_AGE_DAYS,
+        "items": [{
+            "ref": i["ref"], "bytes": i["bytes"],
+            "last_modified": _naive(i["last_modified"]).isoformat() if i["last_modified"] else None,
+            "booking_id": i["booking_id"], "guest_id": i["guest_id"], "side": i["side"],
+            "in_use": i["in_use"], "already_archived": i["already_archived"],
+        } for i in items],
+    }
+
+
+@router.get("/scans/export")
+def scans_export(request: Request, db: Session = Depends(get_db),
+                 user=Depends(require_admin),
+                 before_days: int = 0,
+                 limit: int = SCANS_DEFAULT_LIMIT):
+    """Stream a ZIP of the encrypted ID scans, plus a manifest naming every member.
+
+    Spooled to a temp file for the same reason as /export: `X-Scans-Sha256` must precede the
+    body, so it cannot be a hash of a stream already being sent.
+
+    ZIP_STORED, not deflate — the members are Fernet ciphertext, which is incompressible, so
+    compression would burn CPU for ~0%.
+
+    Each member sits at its literal ref path, so THE PATH INSIDE THE ZIP IS THE REF. That is
+    what lets an archived scan still be located years later from `booking_guests.id_scan_ref`.
+    """
+    _rate_limit_check(db, SCANS_LAST_EXPORT_AT_KEY, "scan archive")
+    if not secure_id_store.storage_ready():
+        raise HTTPException(status_code=503, detail="ID scan storage is not configured.")
+
+    limit = max(1, min(int(limit), SCANS_MAX_LIMIT))
+    started = datetime.utcnow()
+    items = _collect_scans(db, max(0, int(before_days)), limit)
+    projected = sum(i["bytes"] for i in items)
+    if projected > SCANS_MAX_EXPORT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=(f"That batch is {projected // (1024*1024)} MB, over the "
+                    f"{SCANS_MAX_EXPORT_BYTES // (1024*1024)} MB limit. Lower `limit` and run again."))
+
+    set_setting(db, SCANS_LAST_EXPORT_AT_KEY, started.isoformat(), user=user, commit=True)
+
+    batch_id = uuid.uuid4().hex
+    stamp = started.strftime("%Y-%m-%d_%H%M")
+    filename = f"bhimas-scans-{stamp}.zip"
+    tmp = tempfile.NamedTemporaryFile(prefix="bhimas-scans-", suffix=".zip", delete=False)
+    tmp_path = tmp.name
+    tmp.close()
+
+    ip = _client_ip(request)
+    try:
+        members = []
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_STORED) as zf:
+            for i in items:
+                try:
+                    blob = secure_id_store.read_ciphertext(i["ref"])
+                except FileNotFoundError:
+                    # Listed a moment ago, gone now. Skip it rather than fail the whole run.
+                    logger.warning("scan vanished between listing and archive: %s", i["ref"])
+                    continue
+                zf.writestr(i["ref"], blob)
+                members.append({
+                    "ref": i["ref"], "bytes": len(blob),
+                    "sha256": hashlib.sha256(blob).hexdigest(),
+                    "booking_id": i["booking_id"], "guest_id": i["guest_id"],
+                    "side": i["side"], "id_scan_mime": i["id_scan_mime"],
+                    "in_use": i["in_use"],
+                    "last_modified": (_naive(i["last_modified"]).isoformat()
+                                      if i["last_modified"] else None),
+                })
+            manifest = {
+                "generated_at": started.isoformat(),
+                "batch_id": batch_id,
+                "backend": secure_id_store.storage_backend(),
+                "count": len(members),
+                "total_bytes": sum(m["bytes"] for m in members),
+                "encryption": "fernet",
+                "note": ("Members are Fernet ciphertext. Decrypt with ID_SCAN_ENCRYPTION_KEY "
+                         "from offline escrow — see backend/scripts/decrypt_scan.py. "
+                         "The path of each member IS its id_scan_ref."),
+                "items": members,
+            }
+            zf.writestr("scans-manifest.json", json.dumps(manifest, indent=2))
+
+        size = os.path.getsize(tmp_path)
+        if size == 0:
+            raise HTTPException(status_code=500, detail="The scan archive came out empty.")
+
+        sha = hashlib.sha256()
+        with open(tmp_path, "rb") as fh:
+            for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                sha.update(chunk)
+        digest = sha.hexdigest()
+
+        set_setting(db, SCANS_LAST_SUCCESS_AT_KEY, datetime.utcnow().isoformat(), user=user)
+        set_setting(db, SCANS_LAST_SUCCESS_COUNT_KEY, str(len(members)), user=user)
+        set_setting(db, SCANS_LAST_SUCCESS_SHA_KEY, digest, user=user, commit=True)
+
+        write_audit(db, user, "backup.scans_export", "id_scans", None,
+                    after={"batch_id": batch_id, "count": len(members), "bytes": size,
+                           "sha256": digest},
+                    ip=ip, client="web", commit=True)
+        logger.info("🗄️ ID scan archive exported by %s from %s — %s scans, %s bytes",
+                    (user or {}).get("sub"), ip, len(members), size)
+
+        return FileResponse(
+            tmp_path, media_type="application/zip", filename=filename,
+            headers={
+                # Deliberately distinct from X-Backup-*: no future refactor should be able to
+                # verify a scan archive against a database dump's hash, or vice versa.
+                "X-Scans-Sha256": digest,
+                "X-Scans-Bytes": str(size),
+                "X-Scans-Count": str(len(members)),
+                "X-Scans-Batch-Id": batch_id,
+                "X-Scans-Taken-At": started.isoformat(),
+            },
+            background=BackgroundTask(_cleanup, tmp_path),
+        )
+    except HTTPException:
+        _cleanup(tmp_path)
+        raise
+    except Exception as e:
+        _cleanup(tmp_path)
+        logger.error("scan archive export failed: %s", e, exc_info=True)
+        raise HTTPException(status_code=500, detail="The scan archive export failed.")

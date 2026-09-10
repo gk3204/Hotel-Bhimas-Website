@@ -76,9 +76,18 @@ export const getGuestScanObjectUrl = async (bookingId, guestId, side = "front") 
     { headers: { Authorization: getAuthHeader().Authorization } },
   );
   if (!res.ok) {
-    const msg = res.status === 503
-      ? "ID scans can't be decrypted — the encryption key isn't configured on the server."
-      : `No ${side} ID scan on file for this guest.`;
+    // 410 Gone is deliberate and means something different from 404: the scan DID exist and was
+    // moved into the offline weekly archive. The server sends the archive date and the ref, which
+    // is what locates the file inside the archive zip — so show that, not "no scan on file".
+    let msg;
+    if (res.status === 410) {
+      msg = await res.json().then((b) => b?.detail).catch(() => null);
+      msg = msg || `This ${side} ID scan was archived offline and is no longer on the server.`;
+    } else if (res.status === 503) {
+      msg = "ID scans can't be retrieved right now — the key or storage isn't available.";
+    } else {
+      msg = `No ${side} ID scan on file for this guest.`;
+    }
     throw new Error(msg);
   }
   const blob = await res.blob();

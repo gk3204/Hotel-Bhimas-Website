@@ -2387,6 +2387,10 @@ def list_booking_guests(booking_id: int, db: Session = Depends(get_db),
         "id_number_masked": g.id_number_masked, "is_primary": g.is_primary,
         "has_scan": bool(g.id_scan_ref),
         "has_scan_back": bool(g.id_scan_back_ref),
+        # Archived = pulled into the offline weekly archive and deleted from object storage.
+        # The UI shows "Archived (offline)" instead of a viewer button that would only 410.
+        "scan_archived": bool(g.id_scan_archived_at),
+        "scan_back_archived": bool(g.id_scan_back_archived_at),
     } for g in rows]}
 
 
@@ -2404,8 +2408,11 @@ async def upload_guest_scan(booking_id: int, file: UploadFile = File(...),
     try:
         ref = secure_id_store.save_scan(booking_id, data, file.content_type)
     except RuntimeError:
+        # RuntimeError now covers two cases: the encryption key is unset, OR object storage is
+        # unreachable. Both mean "we will not store this scan" and both fail closed — nothing is
+        # ever written in plaintext. The specific cause is in the server log.
         raise HTTPException(status_code=503,
-                            detail="ID-scan encryption is not configured on the server")
+                            detail="ID scans cannot be stored right now — check the server log")
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     write_audit(db, user, "reception.guest_scan_upload", "booking", booking_id,
@@ -2431,12 +2438,24 @@ def get_guest_scan(booking_id: int, guest_id: int,
     mime = (g.id_scan_back_mime if side == "back" else g.id_scan_mime) if g else None
     if not ref:
         raise HTTPException(status_code=404, detail=f"No {side} ID scan on file")
+    # Archived check comes FIRST. Once a scan is pulled offline and deleted from object storage,
+    # read_scan would raise FileNotFoundError and this would 404 — indistinguishable from "this
+    # guest never had a scan". 410 Gone says the opposite: it existed, we moved it deliberately,
+    # and here is the ref that locates it inside the archive.
+    archived_at = g.id_scan_back_archived_at if side == "back" else g.id_scan_archived_at
+    if archived_at:
+        raise HTTPException(
+            status_code=410,
+            detail=(f"This {side} ID scan was archived offline on "
+                    f"{archived_at.strftime('%Y-%m-%d')} and is no longer stored on the server. "
+                    f"Retrieve it from the backup archive using ref {ref}."))
     try:
         data = secure_id_store.read_scan(ref)
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail="ID scan not found")
     except RuntimeError:
-        raise HTTPException(status_code=503, detail="ID scan cannot be decrypted (key not configured)")
+        raise HTTPException(status_code=503,
+                            detail="ID scan cannot be retrieved right now (key or storage unavailable)")
     # Record WHO looked at a government ID. `routers/crm.py` already emits `id.view` when a
     # guest record is opened; this path decrypts an actual ID image and was not audited at
     # all — a gap worth closing now that the web admin surfaces it (FE-3).

@@ -207,6 +207,11 @@ class BookingGuest(Base):
     id_scan_mime = Column(String(40), nullable=True)       # content type, for the decrypt-on-read stream
     id_scan_back_ref = Column(String(120), nullable=True)  # reverse of the ID (same encrypted store)
     id_scan_back_mime = Column(String(40), nullable=True)
+    # Set once the scan has been pulled into the weekly offline archive and deleted from object
+    # storage (migration 040). NULL = still retrievable online. The *_ref above stays populated —
+    # it is what locates the file inside the archive zip.
+    id_scan_archived_at = Column(TIMESTAMP, nullable=True)
+    id_scan_back_archived_at = Column(TIMESTAMP, nullable=True)
     is_primary = Column(Boolean, nullable=False, default=False, index=True)
     is_minor = Column(Boolean, nullable=False, default=False)   # a child — recorded by name, ID optional
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)

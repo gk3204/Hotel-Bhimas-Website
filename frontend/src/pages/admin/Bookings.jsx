@@ -921,22 +921,39 @@ function OccupantsCard({ bookingId }) {
                   <td className="py-2 text-right">
                     {g.has_scan || g.has_scan_back ? (
                       <span className="inline-flex items-center gap-1.5 justify-end">
-                        {g.has_scan && (
+                        {/* An archived scan has been pulled into the weekly offline archive and
+                            deleted from object storage, so its button would only ever 410. Show
+                            the state instead — the image still exists, just not on the server. */}
+                        {g.has_scan && (g.scan_archived ? (
+                          <span
+                            title="Archived offline — retrieve it from the backup archive"
+                            className="bg-slate-800 text-slate-400 px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5 border border-slate-700"
+                          >
+                            <FaIdCard size={11} /> Front · archived
+                          </span>
+                        ) : (
                           <button
                             onClick={() => viewScan(g, "front")}
                             className="bg-slate-600 hover:bg-slate-500 px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5 transition"
                           >
                             <FaIdCard size={11} /> Front
                           </button>
-                        )}
-                        {g.has_scan_back && (
+                        ))}
+                        {g.has_scan_back && (g.scan_back_archived ? (
+                          <span
+                            title="Archived offline — retrieve it from the backup archive"
+                            className="bg-slate-800 text-slate-400 px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5 border border-slate-700"
+                          >
+                            <FaIdCard size={11} /> Back · archived
+                          </span>
+                        ) : (
                           <button
                             onClick={() => viewScan(g, "back")}
                             className="bg-slate-600 hover:bg-slate-500 px-3 py-1.5 rounded-lg text-xs inline-flex items-center gap-1.5 transition"
                           >
                             <FaIdCard size={11} /> Back
                           </button>
-                        )}
+                        ))}
                       </span>
                     ) : (
                       <span className="text-slate-500 text-xs">none</span>
