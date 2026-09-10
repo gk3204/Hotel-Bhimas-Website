@@ -23,14 +23,14 @@ from datetime import date, datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
-from sqlalchemy import func
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import (Booking, BookingItem, CardIssuance, CashShift, FolioCharge,
                     FraudAlert, Guest, GuestRequest, MaintenanceTicket, MenuItem,
                     Payment, Room, RoomType, User, DayCloseSummary, PAYMENT_METHODS)
-from schemas import OverstayConfigUpdate
+from schemas import OverstayConfigUpdate, ReportsConfigUpdate
 from utils.audit import write_audit
 from utils.auth_utils import require_admin
 from utils.settings import get_reports_config
@@ -716,6 +716,474 @@ def fraud_summary_data(db, dfrom, dto):
 
 
 # ============================================================
+# v5d — adapted "legacy-style" detailed reports
+# ============================================================
+
+def _segment_of(db, b):
+    """Business segment for a stay, adapted to OUR sources (owner's choice): complimentary, then
+    the OTA channel code, then agent / website, else direct."""
+    if getattr(b, "comp_mode", "none") not in (None, "none"):
+        return "complimentary"
+    src = (b.booking_source or "direct").strip() or "direct"
+    if ota_service.is_ota_source(src, db):
+        return src
+    if src in ("agent", "website"):
+        return src
+    return "direct"
+
+
+def occupancy_analysis_data(db, as_on):
+    """Snapshot 'as on' occupancy: every currently-occupied room with its stay + prorated revenue,
+    grouped by floor, plus floor-wise / by-source / type-wise summaries. Adapted from the legacy
+    Occupancy Analysis — a booking's actual base/GST/discount/net are prorated across its rooms by
+    rack share so per-room rows still sum to the real totals."""
+    try:
+        from routers.reception import booking_checkout_moment
+    except Exception:  # pragma: no cover - defensive
+        booking_checkout_moment = None
+
+    rooms_by_id = {r.room_id: r for r in db.query(Room).all()}
+    rt_by_id = {rt.room_type_id: rt for rt in db.query(RoomType).all()}
+    bookings = db.query(Booking).filter(Booking.status == "checked_in").all()
+
+    floors, rows = {}, []
+    seg_acc, type_acc = {}, {}
+
+    def _acc(d, key, occ=0, pax=0, rns=0, rev=0.0):
+        r = d.setdefault(key, {"occ": 0, "pax": 0, "room_nights": 0, "revenue": 0.0})
+        r["occ"] += occ; r["pax"] += pax; r["room_nights"] += rns; r["revenue"] += rev
+
+    for b in bookings:
+        items = [it for it in db.query(BookingItem).filter(BookingItem.booking_id == b.booking_id).all()
+                 if it.room_id]
+        if not items:
+            continue
+        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
+        nights = max(1, (b.check_out - b.check_in).days)
+        racks = [(float(rt_by_id[it.room_type_id].price_per_night) * nights
+                  if it.room_type_id in rt_by_id else 0.0) for it in items]
+        rack_total = sum(racks) or 1.0
+        base, gst = float(b.base_amount or 0), float(b.gst_amount or 0)
+        disc, net = float(b.discount_amount or 0), float(b.grand_total or b.total_amount or 0)
+        seg = _segment_of(db, b)
+        pax = int((b.adults or 0) + (b.children or 0))
+        arr = b.checked_in_at
+        dep = booking_checkout_moment(b) if booking_checkout_moment else None
+        for idx, it in enumerate(items):
+            r = rooms_by_id.get(it.room_id)
+            if not r:
+                continue
+            share = racks[idx] / rack_total
+            rt = rt_by_id.get(it.room_type_id)
+            row = {
+                "room_no": r.room_number, "floor": int(r.floor or 0),
+                "guest": guest.name if guest else None,
+                "segment": seg, "source": b.booking_source or "direct",
+                "room_type": rt.name if rt else None,
+                "arrival": arr.isoformat() if arr else None,
+                "departure": dep.isoformat() if dep else str(b.check_out),
+                "pax": pax if idx == 0 else 0,
+                "discount_pct": round(disc / rack_total * 100, 1) if rack_total else 0.0,
+                "rack": round(racks[idx], 2), "room_rent": round(base * share, 2),
+                "discount": round(disc * share, 2), "gross_rent": round(base * share, 2),
+                "gst": round(gst * share, 2), "net": round(net * share, 2),
+            }
+            rows.append(row)
+            floors.setdefault(int(r.floor or 0), []).append(row)
+            _acc(type_acc, (rt.name if rt else "—"), occ=1, pax=(pax if idx == 0 else 0),
+                 rns=nights, rev=net * share)
+        _acc(seg_acc, seg, occ=len(items), pax=pax, rns=nights * len(items), rev=net)
+
+    # floor-wise vacancy/status counts from the room master (independent of bookings)
+    floor_summary = {}
+    for r in rooms_by_id.values():
+        if not r.is_active:
+            continue
+        f = int(r.floor or 0)
+        fs = floor_summary.setdefault(f, {"occ": 0, "vacant": 0, "not_ready": 0, "blocked": 0})
+        st = r.status
+        if st == "occupied":
+            fs["occ"] += 1
+        elif st in ("cleaning", "inspected"):
+            fs["not_ready"] += 1
+        elif st in ("maintenance", "blocked"):
+            fs["blocked"] += 1
+        else:
+            fs["vacant"] += 1
+
+    def _summarise(acc):
+        out = []
+        for k in sorted(acc):
+            v = acc[k]
+            out.append({"key": k, "occ": v["occ"], "pax": v["pax"],
+                        "room_nights": v["room_nights"], "revenue": round(v["revenue"], 2),
+                        "arr": round(v["revenue"] / v["occ"], 2) if v["occ"] else 0.0})
+        return out
+
+    for f, fs in floor_summary.items():
+        rev = round(sum(row["net"] for row in floors.get(f, [])), 2)
+        pax = sum(row["pax"] for row in floors.get(f, []))
+        fs.update({"floor": f, "pax": pax, "revenue": rev,
+                   "arr": round(rev / fs["occ"], 2) if fs["occ"] else 0.0})
+
+    total_rev = round(sum(r["net"] for r in rows), 2)
+    return {
+        "as_on": str(as_on),
+        "rooms": sorted(rows, key=lambda x: (x["floor"], x["room_no"])),
+        "floor_summary": [floor_summary[f] for f in sorted(floor_summary)],
+        "by_source": _summarise(seg_acc),
+        "by_type": _summarise(type_acc),
+        "totals": {"occ_rooms": len(rows), "pax": sum(r["pax"] for r in rows),
+                   "revenue": total_rev,
+                   "arr": round(total_rev / len(rows), 2) if rows else 0.0},
+    }
+
+
+def cashier_summary_data(db, day):
+    """Front-office cashier summary for one day (adapted): paid Payments grouped by method into
+    advance receipts vs checkout receipts, plus paid-outs (refunds) and unsettled checkout bills."""
+    from models import Folio
+    pays = (db.query(Payment).filter(Payment.status == "paid",
+                                     func.date(Payment.created_at) == day).all())
+    methods = {}   # method -> {"advance","checkout","paidout"}
+    rows = []
+
+    def _mrow(m):
+        return methods.setdefault(m, {"advance": 0.0, "checkout": 0.0, "paidout": 0.0})
+
+    for p in pays:
+        m = (p.method or "other")
+        b = db.query(Booking).filter(Booking.booking_id == p.booking_id).first()
+        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first() if b else None
+        amt = float(p.amount or 0)
+        is_checkout = bool(b and b.checked_out_at and b.checked_out_at.date() == day
+                           and p.created_at >= b.checked_out_at)
+        section = "checkout" if is_checkout else "advance"
+        if amt:
+            _mrow(m)[section] += amt
+            rows.append({"section": section, "method": m, "booking_id": p.booking_id,
+                         "guest": guest.name if guest else None, "amount": round(amt, 2),
+                         "at": p.created_at.isoformat() if p.created_at else None})
+        rf = float(p.refund_amount or 0)
+        if rf and (p.refund_status == "completed"):
+            _mrow(p.refund_mode or m)["paidout"] += rf
+            rows.append({"section": "paidout", "method": p.refund_mode or m,
+                         "booking_id": p.booking_id, "guest": guest.name if guest else None,
+                         "amount": round(-rf, 2), "at": p.created_at.isoformat() if p.created_at else None})
+
+    # unsettled checkout bills = checked out today but folio still carries a balance
+    unsettled = []
+    for b in db.query(Booking).filter(Booking.status == "checked_out",
+                                      func.date(Booking.checked_out_at) == day).all():
+        f = db.query(Folio).filter(Folio.booking_id == b.booking_id).first()
+        if f and round(float(f.balance or 0), 2) != 0:
+            guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
+            unsettled.append({"booking_id": b.booking_id,
+                              "guest": guest.name if guest else None,
+                              "balance": round(float(f.balance or 0), 2)})
+
+    method_rows = []
+    for m in sorted(methods):
+        v = methods[m]
+        method_rows.append({"method": m, "advance": round(v["advance"], 2),
+                            "checkout": round(v["checkout"], 2), "paidout": round(v["paidout"], 2),
+                            "net": round(v["advance"] + v["checkout"] - v["paidout"], 2)})
+    grand = {"advance": round(sum(x["advance"] for x in method_rows), 2),
+             "checkout": round(sum(x["checkout"] for x in method_rows), 2),
+             "paidout": round(sum(x["paidout"] for x in method_rows), 2),
+             "net": round(sum(x["net"] for x in method_rows), 2)}
+    return {"day": str(day), "by_method": method_rows, "rows": rows,
+            "unsettled": unsettled, "totals": grand}
+
+
+def checkout_summary_data(db, day):
+    """Per-bill check-out summary for one day (adapted): one row per booking checked out that day —
+    room rent, SGST/CGST, food, laundry, misc, discount, advance, refund, and the bill amount."""
+    from models import Folio
+    from routers.folio import _get_invoice
+    rows = []
+    bookings = (db.query(Booking).filter(Booking.status == "checked_out",
+                                         func.date(Booking.checked_out_at) == day)
+                .order_by(Booking.checked_out_at).all())
+    for b in bookings:
+        f = db.query(Folio).filter(Folio.booking_id == b.booking_id).first()
+        if not f:
+            continue
+        charges = [c for c in db.query(FolioCharge).filter(FolioCharge.folio_id == f.id,
+                                                           FolioCharge.void == False).all()]  # noqa: E712
+
+        def _sum(types):
+            return round(sum(float(c.amount or 0) for c in charges if c.type in types), 2)
+        room_rent = _sum(("room",))
+        food = _sum(("food", "minibar"))
+        laundry = _sum(("laundry",))
+        misc = _sum(("misc", "extra_bed"))
+        discount = _sum(("discount",))
+        pairs = [(c.gst_percent, c.amount) for c in charges if c.type not in ("payment", "discount")]
+        _r, taxable, cgst, sgst, gross = _gst_split(pairs)
+        advance = round(sum(float(p.amount or 0) for p in
+                            db.query(Payment).filter(Payment.booking_id == b.booking_id,
+                                                     Payment.status == "paid").all()
+                            if not (b.checked_out_at and p.created_at and p.created_at >= b.checked_out_at)), 2)
+        refund = round(sum(float(p.refund_amount or 0) for p in
+                           db.query(Payment).filter(Payment.booking_id == b.booking_id,
+                                                    Payment.refund_status == "completed").all()), 2)
+        rooms = [db.query(Room).filter(Room.room_id == it.room_id).first()
+                 for it in db.query(BookingItem).filter(BookingItem.booking_id == b.booking_id).all()
+                 if it.room_id]
+        inv = _get_invoice(db, f.id)
+        rows.append({
+            "bill_no": (inv.invoice_no if inv else f"F{f.id}"),
+            "rooms": ", ".join(r.room_number for r in rooms if r) or "—",
+            "room_rent": room_rent, "sgst": sgst, "cgst": cgst, "food": food, "laundry": laundry,
+            "misc": misc, "discount": discount, "total": round(float(f.total or 0), 2),
+            "advance": advance, "refund": refund, "bill_amount": round(float(f.total or 0), 2),
+        })
+    keys = ("room_rent", "sgst", "cgst", "food", "laundry", "misc", "discount", "total",
+            "advance", "refund", "bill_amount")
+    totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
+    return {"day": str(day), "rows": rows, "totals": totals}
+
+
+def _booking_room_label(db, booking_id, _cache):
+    """The room label for a booking (its first assigned room; joined lazily + cached). Room-service
+    charges are posted to the folio, not a specific room, so a stay's room is the natural grouping."""
+    if booking_id not in _cache:
+        row = (db.query(Room.room_number).join(BookingItem, BookingItem.room_id == Room.room_id)
+               .filter(BookingItem.booking_id == booking_id).order_by(Room.room_number).first())
+        _cache[booking_id] = row[0] if row else "—"
+    return _cache[booking_id]
+
+
+def room_service_by_room_data(db, dfrom, dto):
+    """Room-service sales grouped BY ROOM, product-wise within each room. Charges are attributed to
+    the stay's room (first assigned room for a multi-room booking). Reuses `_room_service_filters`."""
+    from models import Folio
+    q = (db.query(FolioCharge, Booking, MenuItem)
+         .join(Folio, Folio.id == FolioCharge.folio_id)
+         .join(Booking, Booking.booking_id == Folio.booking_id)
+         .outerjoin(MenuItem, MenuItem.id == FolioCharge.menu_item_id)
+         .filter(*_room_service_filters(dfrom=dfrom, dto=dto)))
+    cache, groups = {}, {}
+    for fc, b, mi in q.all():
+        room = _booking_room_label(db, b.booking_id, cache)
+        g = groups.setdefault(room, {"items": {}, "subtotal": 0.0, "qty": 0.0})
+        name = (mi.name if mi else (fc.description or "Item"))
+        it = g["items"].setdefault(name, {"qty": 0.0, "amount": 0.0})
+        it["qty"] += float(fc.qty or 0)
+        it["amount"] += float(fc.amount or 0)
+        g["subtotal"] += float(fc.amount or 0)
+        g["qty"] += float(fc.qty or 0)
+    rows = []
+    for room in sorted(groups):
+        g = groups[room]
+        items = [{"item": n, "qty": round(v["qty"], 2), "amount": round(v["amount"], 2)}
+                 for n, v in sorted(g["items"].items(), key=lambda x: -x[1]["amount"])]
+        rows.append({"room": room, "items": items, "qty": round(g["qty"], 2),
+                     "subtotal": round(g["subtotal"], 2)})
+    grand = round(sum(r["subtotal"] for r in rows), 2)
+    return {"from": str(dfrom), "to": str(dto), "rows": rows,
+            "totals": {"rooms": len(rows), "gross": grand}}
+
+
+def room_detail_data(db, dfrom, dto):
+    """Per checked-out stay in the range, per room: check-in/out times, cleaning started/ended,
+    inspected time, cleaned-by / inspected-by (from the room's HousekeepingTask), and any frauds."""
+    from models import HousekeepingTask
+    rows = []
+    bookings = (db.query(Booking)
+                .filter(Booking.checked_out_at.isnot(None),
+                        func.date(Booking.checked_out_at) >= dfrom,
+                        func.date(Booking.checked_out_at) <= dto)
+                .order_by(Booking.checked_out_at).all())
+    for b in bookings:
+        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
+        items = [it for it in db.query(BookingItem).filter(BookingItem.booking_id == b.booking_id).all()
+                 if it.room_id]
+        for it in items:
+            r = db.query(Room).filter(Room.room_id == it.room_id).first()
+            task = (db.query(HousekeepingTask)
+                    .filter(HousekeepingTask.room_id == it.room_id,
+                            HousekeepingTask.type == "checkout_clean",
+                            HousekeepingTask.booking_id == b.booking_id)
+                    .order_by(HousekeepingTask.created_at.desc()).first())
+            if task is None:  # fall back to the room's most recent cleaning after this checkout
+                task = (db.query(HousekeepingTask)
+                        .filter(HousekeepingTask.room_id == it.room_id,
+                                HousekeepingTask.type == "checkout_clean",
+                                HousekeepingTask.created_at >= b.checked_out_at)
+                        .order_by(HousekeepingTask.created_at.asc()).first())
+            frauds = (db.query(FraudAlert)
+                      .filter(or_(FraudAlert.booking_id == b.booking_id,
+                                  FraudAlert.room_id == it.room_id)).all())
+            fr = "; ".join(f"{a.type}({a.severity})" for a in frauds)
+            rows.append({
+                "booking_id": b.booking_id, "room": r.room_number if r else "—",
+                "guest": guest.name if guest else None,
+                "check_in": b.checked_in_at.isoformat() if b.checked_in_at else None,
+                "check_out": b.checked_out_at.isoformat() if b.checked_out_at else None,
+                "cleaning_started": task.started_at.isoformat() if task and task.started_at else None,
+                "cleaning_ended": task.done_at.isoformat() if task and task.done_at else None,
+                "inspected_at": task.inspected_at.isoformat() if task and task.inspected_at else None,
+                "cleaned_by": task.cleaned_by_name if task else None,
+                "inspected_by": task.inspected_by_name if task else None,
+                "frauds": fr,
+            })
+    return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": {"stays": len(rows)}}
+
+
+def maintenance_detail_data(db, dfrom, dto):
+    """Per maintenance ticket created in the range: full details + the items used. `fixed` =
+    resolved/verified/closed; `inspected` = verified/closed (signed off)."""
+    from models import TicketItem
+    tickets = (db.query(MaintenanceTicket)
+               .filter(func.date(MaintenanceTicket.created_at) >= dfrom,
+                       func.date(MaintenanceTicket.created_at) <= dto)
+               .order_by(MaintenanceTicket.created_at).all())
+    rows = []
+    for t in tickets:
+        r = db.query(Room).filter(Room.room_id == t.room_id).first() if t.room_id else None
+        items = db.query(TicketItem).filter(TicketItem.ticket_id == t.id).all()
+        item_list = [{"item": i.item, "qty": float(i.qty or 0),
+                      "est_cost": float(i.est_cost or 0), "status": i.status,
+                      "posted_to_ledger": bool(i.expense_id)} for i in items]
+        parts_cost = round(sum(float(i.est_cost or 0) for i in items), 2)
+        fixed = t.status in ("resolved", "verified", "closed")
+        inspected = t.status in ("verified", "closed") or t.verified_at is not None
+        sla_breached = bool(t.escalation_level and t.escalation_level > 0)
+        rows.append({
+            "ticket_id": t.id,
+            "location": (r.room_number if r else (t.area or "Common area")),
+            "category": t.category, "priority": t.priority, "issue": t.issue, "source": t.source,
+            "status": t.status, "fixed": fixed, "inspected": inspected,
+            "raised_by": _user_name(db, t.raised_by),
+            "assignee": _user_name(db, t.assignee),
+            "verified_by": _user_name(db, t.verified_by),
+            "resolution_notes": t.resolution_notes,
+            "created_at": t.created_at.isoformat() if t.created_at else None,
+            "assigned_at": t.assigned_at.isoformat() if t.assigned_at else None,
+            "first_responded_at": t.first_responded_at.isoformat() if t.first_responded_at else None,
+            "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
+            "verified_at": t.verified_at.isoformat() if t.verified_at else None,
+            "sla_breached": sla_breached, "escalation_level": int(t.escalation_level or 0),
+            "compensation_amount": float(t.compensation_amount or 0),
+            "items": item_list, "parts_cost": parts_cost,
+        })
+    totals = {"tickets": len(rows),
+              "fixed": sum(1 for r in rows if r["fixed"]),
+              "open": sum(1 for r in rows if not r["fixed"]),
+              "inspected": sum(1 for r in rows if r["inspected"]),
+              "parts_cost": round(sum(r["parts_cost"] for r in rows), 2)}
+    return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
+
+
+# ============================================================
+# v5d-C — end-of-day report bundle (emailed to the accounting address)
+# ============================================================
+
+# The reports that may be included in the end-of-day accounting email. Each renders for a single
+# business date. Keys are what get stored in the `eod_report_keys` setting.
+EOD_REPORT_CHOICES = {
+    "occupancy_analysis": "Occupancy Analysis",
+    "cashier_summary": "Front-Office Cashier Summary",
+    "checkout_summary": "Check-Out Summary",
+    "room_service_by_room": "Room Service by Room",
+    "room_detail": "Room Detail (HK + frauds)",
+    "maintenance_detail": "Maintenance Detail",
+    "daily_sales": "Daily Sales",
+}
+
+
+def _eod_report_pdf(db, key, day):
+    """Render one report for a single business date to a PDF file, returning its path (or None).
+    Reuses the same data fns + generic table PDF as the on-screen reports."""
+    from utils.pdf_generator import generate_report_pdf
+    meta = {"Business date": f"{day:%d-%m-%Y}", **_meta()}
+    title = EOD_REPORT_CHOICES.get(key, key)
+    if key == "occupancy_analysis":
+        d = occupancy_analysis_data(db, day)
+        cols = ["Floor", "Room", "Guest", "Source", "Type", "Pax", "Rack", "Room Rent", "GST", "Net"]
+        rows = [[r["floor"], r["room_no"], r["guest"], r["segment"], r["room_type"], r["pax"],
+                 r["rack"], r["room_rent"], r["gst"], r["net"]] for r in d["rooms"]]
+        totals = ["TOTAL", "", "", "", "", d["totals"]["pax"], "", "", "", d["totals"]["revenue"]]
+    elif key == "cashier_summary":
+        d = cashier_summary_data(db, day)
+        cols = ["Method", "Advance", "Checkout", "Paid-out", "Net"]
+        rows = [[r["method"], r["advance"], r["checkout"], r["paidout"], r["net"]] for r in d["by_method"]]
+        t = d["totals"]; totals = ["GRAND TOTAL", t["advance"], t["checkout"], t["paidout"], t["net"]]
+    elif key == "checkout_summary":
+        d = checkout_summary_data(db, day)
+        cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
+                "Advance", "Refund", "Bill Amt"]
+        rows = [[r["bill_no"], r["rooms"], r["room_rent"], r["sgst"], r["cgst"], r["food"], r["laundry"],
+                 r["misc"], r["discount"], r["advance"], r["refund"], r["bill_amount"]] for r in d["rows"]]
+        t = d["totals"]; totals = ["TOTAL", "", t["room_rent"], t["sgst"], t["cgst"], t["food"],
+                                   t["laundry"], t["misc"], t["discount"], t["advance"], t["refund"],
+                                   t["bill_amount"]]
+    elif key == "room_service_by_room":
+        d = room_service_by_room_data(db, day, day)
+        cols = ["Room", "Item", "Qty", "Amount"]
+        rows = []
+        for g in d["rows"]:
+            for it in g["items"]:
+                rows.append([g["room"], it["item"], it["qty"], it["amount"]])
+            rows.append([g["room"], "— subtotal —", g["qty"], g["subtotal"]])
+        totals = ["TOTAL", f"{d['totals']['rooms']} room(s)", "", d["totals"]["gross"]]
+    elif key == "room_detail":
+        d = room_detail_data(db, day, day)
+        cols = ["Room", "Guest", "Check-in", "Check-out", "Cleaned", "Inspected", "Cleaned by",
+                "Inspected by", "Frauds"]
+        rows = [[r["room"], r["guest"], (r["check_in"] or "")[:16].replace("T", " "),
+                 (r["check_out"] or "")[:16].replace("T", " "),
+                 (r["cleaning_ended"] or "")[:16].replace("T", " "),
+                 (r["inspected_at"] or "")[:16].replace("T", " "), r["cleaned_by"] or "",
+                 r["inspected_by"] or "", r["frauds"]] for r in d["rows"]]
+        totals = None
+    elif key == "maintenance_detail":
+        d = maintenance_detail_data(db, day, day)
+        cols = ["Ticket", "Location", "Issue", "Status", "Fixed", "Inspected", "Parts ₹"]
+        rows = [[r["ticket_id"], r["location"], r["issue"], r["status"], "Yes" if r["fixed"] else "No",
+                 "Yes" if r["inspected"] else "No", r["parts_cost"]] for r in d["rows"]]
+        t = d["totals"]; totals = [f"{t['tickets']} ticket(s)", f"{t['fixed']} fixed", "", "", "", "",
+                                   t["parts_cost"]]
+    elif key == "daily_sales":
+        d = sales_by_date(db, day, day)
+        cols = ["Date", "Room Rev", "Other", "Room Svc", "Discount", "Gross", "Taxable", "CGST", "SGST"]
+        rows = [[r["date"], r["room_revenue"], r["other_revenue"], r["room_service"], r["discount"],
+                 r["gross_sales"], r["taxable"], r["cgst"], r["sgst"]] for r in d["rows"]]
+        t = d["totals"]; totals = ["TOTAL", t["room_revenue"], t["other_revenue"], t["room_service"],
+                                   t["discount"], t["gross_sales"], t["taxable"], t["cgst"], t["sgst"]]
+    else:
+        return None
+    return generate_report_pdf(title, cols, rows, totals, meta)
+
+
+def deliver_eod_reports(db, day):
+    """Render the configured end-of-day reports for `day` and email them to the accounting address.
+    Best-effort; returns a summary dict. Called from the night-audit after the day-close."""
+    cfg = get_reports_config(db)
+    if not cfg["eod_email_enabled"] or not cfg["accounting_email"]:
+        return {"sent": False, "reason": "disabled or no accounting email"}
+    keys = [k for k in cfg["eod_report_keys"] if k in EOD_REPORT_CHOICES]
+    attachments = []
+    for k in keys:
+        try:
+            path = _eod_report_pdf(db, k, day)
+            if path:
+                attachments.append((path, f"{k}_{day}.pdf"))
+        except Exception as e:  # one bad report must not sink the whole email
+            logger.error(f"EOD report {k} for {day} failed: {e}")
+    if not attachments:
+        return {"sent": False, "reason": "no reports rendered"}
+    from utils.email_service import send_report_email
+    subject = f"Hotel Bhimas — end-of-day reports {day:%d-%m-%Y}"
+    html = (f"<p>End-of-day reports for <b>{day:%d-%m-%Y}</b> (00:00–23:59) attached:</p><ul>"
+            + "".join(f"<li>{EOD_REPORT_CHOICES[k]}</li>" for k in keys) + "</ul>")
+    ok = send_report_email(cfg["accounting_email"], subject, html, attachments)
+    return {"sent": bool(ok), "reports": keys, "recipients": cfg["accounting_email"]}
+
+
+# ============================================================
 # export dispatch (csv / pdf / json)
 # ============================================================
 
@@ -890,6 +1358,121 @@ def in_house_report(format: str = Query("json"), db: Session = Depends(get_db)):
              r["check_out"], r["nights"], r["balance"]] for r in data["rows"]]
     return _export_or_json(format, data, title="In-House Guests", columns=cols, rows=rows,
                            meta=_meta(), filename="in_house")
+
+
+@router.get("/occupancy-analysis", dependencies=[Depends(require_admin)])
+def occupancy_analysis_report(as_on: str | None = Query(None), format: str = Query("json"),
+                              db: Session = Depends(get_db)):
+    """Adapted Occupancy Analysis 'as on' snapshot: per-room stay + revenue, grouped by floor, with
+    floor-wise / by-source / by-type summaries."""
+    d = _parse_date(as_on, "as_on") if as_on else date.today()
+    data = occupancy_analysis_data(db, d)
+    cols = ["Floor", "Room", "Guest", "Source", "Type", "Arrival", "Departure", "Pax",
+            "Dis %", "Rack", "Room Rent", "Discount", "Gross Rent", "GST", "Net"]
+    rows = [[r["floor"], r["room_no"], r["guest"], r["segment"], r["room_type"], r["arrival"],
+             r["departure"], r["pax"], r["discount_pct"], r["rack"], r["room_rent"], r["discount"],
+             r["gross_rent"], r["gst"], r["net"]] for r in data["rooms"]]
+    t = data["totals"]
+    totals = ["TOTAL", "", "", "", "", "", "", t["pax"], "", "", "", "", "", "", t["revenue"]]
+    meta = {"As on": f"{d:%d-%m-%Y}", "Occupied rooms": t["occ_rooms"], "ARR": t["arr"],
+            **_meta()}
+    return _export_or_json(format, data, title="Occupancy Analysis", columns=cols, rows=rows,
+                           totals_row=totals, meta=meta, filename="occupancy_analysis")
+
+
+@router.get("/cashier-summary", dependencies=[Depends(require_admin)])
+def cashier_summary_report(day: str | None = Query(None), format: str = Query("json"),
+                           db: Session = Depends(get_db)):
+    """Adapted Front-Office Cashier Summary for one day: receipts by method (advance vs checkout),
+    paid-outs, and unsettled checkout bills."""
+    d = _parse_date(day, "day") if day else date.today()
+    data = cashier_summary_data(db, d)
+    cols = ["Method", "Advance", "Checkout", "Paid-out", "Net"]
+    rows = [[r["method"], r["advance"], r["checkout"], r["paidout"], r["net"]]
+            for r in data["by_method"]]
+    t = data["totals"]
+    totals = ["GRAND TOTAL", t["advance"], t["checkout"], t["paidout"], t["net"]]
+    meta = {"Day": f"{d:%d-%m-%Y}", "Unsettled bills": len(data["unsettled"]), **_meta()}
+    return _export_or_json(format, data, title="Front-Office Cashier Summary", columns=cols,
+                           rows=rows, totals_row=totals, meta=meta, filename="cashier_summary")
+
+
+@router.get("/checkout-summary", dependencies=[Depends(require_admin)])
+def checkout_summary_report(day: str | None = Query(None), format: str = Query("json"),
+                            db: Session = Depends(get_db)):
+    """Adapted Check-Out Summary for one day: per-bill room rent, SGST/CGST, food, laundry, misc,
+    discount, advance, refund, bill amount."""
+    d = _parse_date(day, "day") if day else date.today()
+    data = checkout_summary_data(db, d)
+    cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
+            "Advance", "Refund", "Bill Amount"]
+    rows = [[r["bill_no"], r["rooms"], r["room_rent"], r["sgst"], r["cgst"], r["food"],
+             r["laundry"], r["misc"], r["discount"], r["advance"], r["refund"], r["bill_amount"]]
+            for r in data["rows"]]
+    t = data["totals"]
+    totals = ["TOTAL", "", t["room_rent"], t["sgst"], t["cgst"], t["food"], t["laundry"],
+              t["misc"], t["discount"], t["advance"], t["refund"], t["bill_amount"]]
+    meta = {"Day": f"{d:%d-%m-%Y}", **_meta()}
+    return _export_or_json(format, data, title="Check-Out Summary", columns=cols, rows=rows,
+                           totals_row=totals, meta=meta, filename="checkout_summary")
+
+
+@router.get("/room-service/by-room", dependencies=[Depends(require_admin)])
+def room_service_by_room_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                                format: str = Query("json"), db: Session = Depends(get_db)):
+    """Room-service sales grouped by room, product-wise within each room."""
+    dfrom, dto = _range(from_, to)
+    data = room_service_by_room_data(db, dfrom, dto)
+    # flatten: an item row per line, then a room subtotal row
+    cols = ["Room", "Item", "Qty", "Amount"]
+    rows = []
+    for g in data["rows"]:
+        for it in g["items"]:
+            rows.append([g["room"], it["item"], it["qty"], it["amount"]])
+        rows.append([g["room"], "— subtotal —", g["qty"], g["subtotal"]])
+    totals = ["TOTAL", f"{data['totals']['rooms']} room(s)", "", data["totals"]["gross"]]
+    return _export_or_json(format, data, title="Room Service by Room", columns=cols, rows=rows,
+                           totals_row=totals, meta=_meta(dfrom, dto), filename="room_service_by_room")
+
+
+@router.get("/room-detail", dependencies=[Depends(require_admin)])
+def room_detail_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                       format: str = Query("json"), db: Session = Depends(get_db)):
+    """Per checked-out stay: check-in/out + cleaning/inspection timestamps, cleaned-by/inspected-by,
+    and any frauds. Range is by check-out date."""
+    dfrom, dto = _range(from_, to)
+    data = room_detail_data(db, dfrom, dto)
+    cols = ["Room", "Guest", "Check-in", "Check-out", "Cleaning start", "Cleaning end",
+            "Inspected", "Cleaned by", "Inspected by", "Frauds"]
+
+    def _t(s):
+        return (s or "").replace("T", " ")[:16]
+    rows = [[r["room"], r["guest"], _t(r["check_in"]), _t(r["check_out"]), _t(r["cleaning_started"]),
+             _t(r["cleaning_ended"]), _t(r["inspected_at"]), r["cleaned_by"] or "", r["inspected_by"] or "",
+             r["frauds"]] for r in data["rows"]]
+    return _export_or_json(format, data, title="Room Detail (housekeeping + frauds)", columns=cols,
+                           rows=rows, meta=_meta(dfrom, dto), filename="room_detail")
+
+
+@router.get("/maintenance-detail", dependencies=[Depends(require_admin)])
+def maintenance_detail_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                              format: str = Query("json"), db: Session = Depends(get_db)):
+    """Per maintenance ticket created in the range: details + items, fixed?/inspected?, parts cost."""
+    dfrom, dto = _range(from_, to)
+    data = maintenance_detail_data(db, dfrom, dto)
+    cols = ["Ticket", "Location", "Category", "Priority", "Issue", "Status", "Fixed", "Inspected",
+            "Assignee", "Verified by", "Items", "Parts ₹"]
+    rows = []
+    for r in data["rows"]:
+        item_str = "; ".join(f"{i['item']}×{i['qty']:g} [{i['status']}]" for i in r["items"]) or "—"
+        rows.append([r["ticket_id"], r["location"], r["category"], r["priority"], r["issue"],
+                     r["status"], "Yes" if r["fixed"] else "No", "Yes" if r["inspected"] else "No",
+                     r["assignee"] or "", r["verified_by"] or "", item_str, r["parts_cost"]])
+    t = data["totals"]
+    totals = [f"{t['tickets']} ticket(s)", f"{t['fixed']} fixed / {t['open']} open", "", "", "",
+              "", "", f"{t['inspected']} insp.", "", "", "", t["parts_cost"]]
+    return _export_or_json(format, data, title="Maintenance Detail", columns=cols, rows=rows,
+                           totals_row=totals, meta=_meta(dfrom, dto), filename="maintenance_detail")
 
 
 @router.get("/travel-agents", dependencies=[Depends(require_admin)])
@@ -1182,6 +1765,48 @@ def run_day_close(date_: str | None = Query(None, alias="date"), user=Depends(re
     d = _parse_date(date_, "date") if date_ else None
     result = run_night_audit(db, business_date=d, user=user, generated_by="manual")
     return result
+
+
+@router.get("/config", dependencies=[Depends(require_admin)])
+def reports_config(db: Session = Depends(get_db)):
+    """Reports & scheduled-delivery settings (v5d-C), plus the valid EOD report choices."""
+    cfg = get_reports_config(db)
+    cfg["eod_report_choices"] = EOD_REPORT_CHOICES
+    return cfg
+
+
+@router.put("/config")
+def update_reports_config(data: ReportsConfigUpdate, db: Session = Depends(get_db),
+                         user=Depends(require_admin)):
+    """Edit the reports & delivery settings (accounting email, EOD report selection, 6-hourly
+    owner-WhatsApp summary, night-audit hour/enabled). Audited."""
+    from utils import settings as s
+    before = get_reports_config(db)
+    changes = data.model_dump(exclude_unset=True)
+    key_map = {
+        "night_audit_hour": s.NIGHT_AUDIT_HOUR_KEY,
+        "night_audit_enabled": s.NIGHT_AUDIT_ENABLED_KEY,
+        "accounting_email": s.ACCOUNTING_EMAIL_KEY,
+        "eod_email_enabled": s.EOD_EMAIL_ENABLED_KEY,
+        "ops_summary_enabled": s.OPS_SUMMARY_ENABLED_KEY,
+    }
+    for field, value in changes.items():
+        if field == "eod_report_keys":
+            keys = value if isinstance(value, list) else str(value).split(",")
+            keys = [k.strip() for k in keys if k.strip() in EOD_REPORT_CHOICES]
+            s.set_setting(db, s.EOD_REPORT_KEYS_KEY, ",".join(keys), user=user, commit=False)
+            continue
+        key = key_map.get(field)
+        if not key:
+            continue
+        stored = ("true" if value else "false") if isinstance(value, bool) else str(value)
+        s.set_setting(db, key, stored, user=user, commit=False)
+    db.commit()
+    after = get_reports_config(db)
+    write_audit(db, user, "settings.reports_update", "app_settings", None,
+                before=before, after=after, client="web", commit=True)
+    after["eod_report_choices"] = EOD_REPORT_CHOICES
+    return after
 
 
 @router.get("/overstay/config", dependencies=[Depends(require_admin)])

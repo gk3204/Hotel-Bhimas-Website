@@ -964,3 +964,43 @@ def send_owner_report_email(to_email, subject, html_body, pdf_path, filename="re
     except Exception as e:
         logger.error(f"owner report email error: {e}")
         return False
+
+
+def send_report_email(to_emails, subject, html_body, attachments):
+    """Email one or more PDF reports to one or more recipients (v5d-C accounting email).
+    `to_emails` = a string (comma/;-separated) or list; `attachments` = list of (path, filename).
+    Best-effort; returns True if the send call succeeded."""
+    if not MAILJET_API_KEY or not MAILJET_API_SECRET:
+        logger.info("report email skipped - Mailjet not configured")
+        return False
+    if isinstance(to_emails, str):
+        to_emails = [e.strip() for e in to_emails.replace(";", ",").split(",") if e.strip()]
+    to_emails = [e for e in (to_emails or []) if e]
+    if not to_emails:
+        return False
+    atts = []
+    for path, filename in (attachments or []):
+        try:
+            if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                with open(path, "rb") as f:
+                    atts.append({"ContentType": "application/pdf", "Filename": filename,
+                                 "Base64Content": base64.b64encode(f.read()).decode()})
+        except Exception as e:
+            logger.warning(f"report email attach failed ({filename}): {e}")
+    try:
+        data = {"Messages": [{
+            "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas"},
+            "To": [{"Email": e, "Name": "Accounts"} for e in to_emails],
+            "Subject": subject,
+            "TextPart": "Your Hotel Bhimas reports are attached as PDFs.",
+            "HTMLPart": html_body or "<p>Your Hotel Bhimas reports are attached.</p>",
+            "Attachments": atts,
+        }]}
+        result = mailjet.send.create(data=data)
+        if result.status_code == 200:
+            return True
+        logger.error(f"report email failed: {result.status_code}")
+        return False
+    except Exception as e:
+        logger.error(f"report email error: {e}")
+        return False

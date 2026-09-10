@@ -47,6 +47,10 @@ async function getReport(path, params) {
 
 // ---- report data (JSON) ----
 export const getOccupancy = (p) => getReport("occupancy", p);
+// v5d — adapted legacy-style detailed reports (single-date snapshots)
+export const getOccupancyAnalysis = (p) => getReport("occupancy-analysis", p);
+export const getCashierSummary = (p) => getReport("cashier-summary", p);
+export const getCheckoutSummary = (p) => getReport("checkout-summary", p);
 export const getDailySales = (p) => getReport("sales/daily", p);
 export const getPaymentsDaily = (p) => getReport("payments-daily", p);
 export const getArrivalsDepartures = (p) => getReport("arrivals-departures", p);
@@ -58,6 +62,10 @@ export const getCashShift = (p) => getReport("cash-shift", p);
 // v3 items 4 & 6 — room-service sales (day-wise + product-wise) and the shift payment split.
 export const getRoomServiceDaily = (p) => getReport("room-service/daily", p);
 export const getRoomServiceItems = (p) => getReport("room-service/items", p);
+// v5d sub-batch B — room-service by room + detailed room/HK/fraud + maintenance detail
+export const getRoomServiceByRoom = (p) => getReport("room-service/by-room", p);
+export const getRoomDetail = (p) => getReport("room-detail", p);
+export const getMaintenanceDetail = (p) => getReport("maintenance-detail", p);
 export const getShiftPayments = (p) => getReport("shift-payments", p);
 export const getCardAudit = (p) => getReport("card-audit", p);
 export const getFraudSummary = (p) => getReport("fraud-summary", p);
@@ -74,6 +82,18 @@ export async function runDayClose(date) {
     `${BASE_URL}/reports/day-close/run${date ? `?date=${date}` : ""}`,
     { method: "POST", headers: authHeaders() }
   );
+  return handle(res);
+}
+
+// ---- reports & scheduled delivery config (v5d-C) ----
+export const getReportsConfig = () => getReport("config");
+
+export async function updateReportsConfig(body) {
+  const res = await fetch(`${BASE_URL}/reports/config`, {
+    method: "PUT",
+    headers: { ...authHeaders(), "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
   return handle(res);
 }
 

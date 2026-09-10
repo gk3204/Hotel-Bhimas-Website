@@ -232,6 +232,54 @@ def send_weekly_digest_if_due(db) -> int:
                            filename=f"HotelBhimas_weekly_{report['to']}.pdf")
 
 
+def send_operational_summary_if_due(db) -> int:
+    """v5d-C: every 6 hours (windows at IST 00/06/12/18) send the owner a short operational summary —
+    rooms checked in / out / cleaned / pending-clean / inspected + occupancy since day start. Rides the
+    WhatsApp sweep; deduped per 6-hour window. Gated by the reports `ops_summary_enabled` toggle."""
+    rcfg = app_settings.get_reports_config(db)
+    wcfg = app_settings.get_whatsapp_config(db)
+    if not rcfg.get("ops_summary_enabled") or not wcfg.get("owner_alerts_enabled"):
+        return 0
+    now = _now_ist()
+    window = now.hour // 6            # 0..3
+    day = now.date()
+    cref = f"ops_summary:{day}:{window}"
+    if wa.already_sent(db, cref):
+        return 0
+    from sqlalchemy import func
+    from models import Booking, Room, HousekeepingTask
+    from services import notify as notify_service
+
+    def _c(q):
+        return int(q.scalar() or 0)
+    checked_in = _c(db.query(func.count(Booking.booking_id)).filter(func.date(Booking.checked_in_at) == day))
+    checked_out = _c(db.query(func.count(Booking.booking_id)).filter(func.date(Booking.checked_out_at) == day))
+    cleaned = _c(db.query(func.count(HousekeepingTask.id)).filter(
+        HousekeepingTask.type == "checkout_clean", func.date(HousekeepingTask.done_at) == day))
+    inspected = _c(db.query(func.count(HousekeepingTask.id)).filter(func.date(HousekeepingTask.inspected_at) == day))
+    total_rooms = _c(db.query(func.count(Room.room_id)).filter(Room.is_active == True))  # noqa: E712
+    pending = _c(db.query(func.count(Room.room_id)).filter(Room.is_active == True,       # noqa: E712
+                                                           Room.status == "cleaning"))
+    occupied = _c(db.query(func.count(Room.room_id)).filter(Room.is_active == True,      # noqa: E712
+                                                            Room.status == "occupied"))
+    occ = round(100.0 * occupied / total_rooms, 1) if total_rooms else 0.0
+    label = f"{now:%d-%b %H:%M}"
+    params = {"window": label, "checked_in": checked_in, "checked_out": checked_out,
+              "cleaned": cleaned, "pending": pending, "inspected": inspected, "occupancy": f"{occ}%"}
+    res = notify_service.notify_owner(db, template="operational_summary", params=params, client_ref=cref)
+    # Base-cref marker so the sweep doesn't recompute/resend within this 6-hour window.
+    if not wa.already_sent(db, cref):
+        try:
+            nums = wa.owner_numbers(db)
+            wa._log_row(db, "out", nums[0] if nums else "owner", "operational_summary", params,
+                        f"Ops update {label}: in {checked_in}, out {checked_out}, cleaned {cleaned}, "
+                        f"pending {pending}, inspected {inspected}, occ {occ}%",
+                        status="sent", provider="job", client_ref=cref, commit=True)
+        except Exception:
+            pass
+    return 1 if (res or {}).get("ok") else 0
+
+
 def notify_new_fraud_alerts(db) -> int:
     """Run the reconciliation sweep, then alert the owner about any open high-severity
     alert — WhatsApp, falling back to their email (FE-11)."""
@@ -291,6 +339,7 @@ _JOBS = [
     ("review_requests", send_review_requests),
     ("daily_digest", send_daily_digest_if_due),
     ("weekly_digest", send_weekly_digest_if_due),
+    ("operational_summary", send_operational_summary_if_due),
     ("fraud_alerts", notify_new_fraud_alerts),
     ("vendor_renewals", sweep_vendor_renewals),
     ("low_stock_alerts", sweep_low_stock),

@@ -152,6 +152,20 @@ def run_night_audit(db, business_date=None, user=None, generated_by="scheduler")
         logger.warning(f"night-audit: roll_business_date failed: {e}")
         db.rollback()
 
+    # v5d-C: email the configured end-of-day reports (00:00–23:59 of `target`) to the accounting
+    # address. Best-effort — a mail failure must never fail the day-close.
+    try:
+        from routers.reports import deliver_eod_reports
+        eod = deliver_eod_reports(db, target)
+        if eod.get("sent"):
+            logger.info(f"night-audit: EOD reports emailed for {target}: {eod.get('reports')}")
+    except Exception as e:
+        logger.error(f"night-audit: EOD report email failed: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
     logger.info(f"✅ Day-close {target}: sales ₹{snapshot['total_sales']} "
                 f"occ {snapshot['occupancy_pct']}% cash ₹{snapshot['cash_collected']} "
                 f"(folios opened: {folios_posted})")

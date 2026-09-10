@@ -20,7 +20,7 @@ import { getComplianceConfig, updateComplianceConfig } from "../../api/complianc
 import { getWhatsappConfig, updateWhatsappConfig } from "../../api/whatsapp";
 import { getReviewConfig, updateReviewConfig } from "../../api/reviews";
 import { getConfig as getFraudConfig, updateFraudConfig } from "../../api/fraud";
-import { getOverstayConfig, updateOverstayConfig } from "../../api/reports";
+import { getOverstayConfig, updateOverstayConfig, getReportsConfig, updateReportsConfig } from "../../api/reports";
 
 const PRIORITIES = ["urgent", "high", "normal", "low"];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -94,6 +94,27 @@ export const SETTINGS_GROUPS = [
       { key: "sweep_interval_minutes", type: "number", min: 1, max: 1440,
         label: "Check for overstays every (minutes)",
         hint: "Takes effect after the next backend restart." },
+    ],
+  },
+  {
+    key: "reports",
+    label: "Reports & delivery",
+    title: "Scheduled report delivery",
+    description: "End-of-day accounting email and the 6-hourly owner-WhatsApp operational summary.",
+    load: getReportsConfig,
+    save: updateReportsConfig,
+    fields: [
+      { key: "accounting_email", type: "text", label: "Accounting email(s)",
+        hint: "Comma-separate for more than one. The end-of-day reports are emailed here when the day-close runs." },
+      { key: "eod_email_enabled", type: "toggle", label: "Email the accounting reports at end of day",
+        hint: "Sent for the just-closed day (00:00–23:59) when the nightly day-close runs." },
+      { key: "eod_report_keys", type: "csv", label: "Reports to email each day",
+        hint: "Valid keys: occupancy_analysis, cashier_summary, checkout_summary, room_service_by_room, room_detail, maintenance_detail, daily_sales." },
+      { key: "ops_summary_enabled", type: "toggle", label: "6-hourly operational summary to owner WhatsApp",
+        hint: "Rooms checked-in / out / cleaned / pending / inspected + occupancy, at 00:00 / 06:00 / 12:00 / 18:00. Needs owner alerts on and the owner WhatsApp number set (Messaging)." },
+      { key: "night_audit_hour", type: "number", min: 0, max: 23, label: "Night-audit hour (IST)",
+        hint: "The hour the day-close + accounting email run. Takes effect after the next backend restart." },
+      { key: "night_audit_enabled", type: "toggle", label: "Run the nightly day-close automatically" },
     ],
   },
   {

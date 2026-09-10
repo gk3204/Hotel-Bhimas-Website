@@ -66,6 +66,11 @@ WA_WEEKLY_WEEKDAY_KEY = "wa_weekly_digest_weekday"   # 0=Mon … 6=Sun
 BUSINESS_DATE_KEY = "business_date"
 NIGHT_AUDIT_HOUR_KEY = "night_audit_hour"        # IST hour (0-23) the day-close runs
 NIGHT_AUDIT_ENABLED_KEY = "night_audit_enabled"  # master toggle for the scheduled routine
+# v5d-C: end-of-day accounting email + 6-hourly owner-WhatsApp operational summary
+ACCOUNTING_EMAIL_KEY = "accounting_email"        # comma-separated recipients for the EOD report email
+EOD_EMAIL_ENABLED_KEY = "eod_email_enabled"      # send the selected reports by email at day-close
+EOD_REPORT_KEYS_KEY = "eod_report_keys"          # comma list of report keys to email (see reports.EOD_REPORT_CHOICES)
+OPS_SUMMARY_ENABLED_KEY = "ops_summary_enabled"  # 6-hourly owner-WhatsApp operational summary
 
 # India compliance / Tally / e-invoicing / 2FA config keys + defaults (prompt 18; seeded in migration 016).
 # The e-invoicing SECRETS live in ENV (GST_EINVOICE_*), not here — these are admin-editable business values.
@@ -173,6 +178,10 @@ _DEFAULTS = {
     BUSINESS_DATE_KEY: "",
     NIGHT_AUDIT_HOUR_KEY: "3",
     NIGHT_AUDIT_ENABLED_KEY: "true",
+    ACCOUNTING_EMAIL_KEY: "",
+    EOD_EMAIL_ENABLED_KEY: "true",
+    EOD_REPORT_KEYS_KEY: "occupancy_analysis,cashier_summary,checkout_summary",
+    OPS_SUMMARY_ENABLED_KEY: "true",
     POLICE_STATION_NAME_KEY: "",
     POLICE_STATION_CODE_KEY: "",
     FRRO_OFFICE_KEY: "",
@@ -360,10 +369,18 @@ def get_reports_config(db) -> dict:
     whether the scheduled routine is enabled. Manual trigger via POST /reports/day-close/run
     works regardless of the enabled flag."""
     bd = (get_setting(db, BUSINESS_DATE_KEY, "") or "").strip()
+    raw_keys = (get_setting(db, EOD_REPORT_KEYS_KEY,
+                            "occupancy_analysis,cashier_summary,checkout_summary") or "")
+    eod_keys = [k.strip() for k in raw_keys.replace(";", ",").split(",") if k.strip()]
     return {
         "business_date": bd or None,
         "night_audit_hour": min(23, max(0, _as_int(get_setting(db, NIGHT_AUDIT_HOUR_KEY), 3))),
         "night_audit_enabled": _as_bool(get_setting(db, NIGHT_AUDIT_ENABLED_KEY, "true")),
+        # v5d-C delivery config
+        "accounting_email": (get_setting(db, ACCOUNTING_EMAIL_KEY, "") or "").strip(),
+        "eod_email_enabled": _as_bool(get_setting(db, EOD_EMAIL_ENABLED_KEY, "true")),
+        "eod_report_keys": eod_keys,
+        "ops_summary_enabled": _as_bool(get_setting(db, OPS_SUMMARY_ENABLED_KEY, "true")),
     }
 
 

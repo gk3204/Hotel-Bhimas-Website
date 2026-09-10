@@ -305,6 +305,20 @@ TEMPLATES = {
         "respect_optout": False,
         "body_preview": "Hotel Bhimas — your weekly report ({week}) is attached.",
     },
+    # v5d-C: 6-hourly operational summary to the owner. Utility (owner-facing operations, not marketing).
+    "operational_summary": {
+        "meta_name": "operational_summary",
+        "category": "utility",
+        "lang": "en",
+        "param_order": ["window", "checked_in", "checked_out", "cleaned", "pending",
+                        "inspected", "occupancy"],
+        "respect_optout": False,
+        "body_preview": (
+            "Hotel Bhimas update ({window}) — checked in: {checked_in}, checked out: {checked_out}, "
+            "rooms cleaned: {cleaned}, pending cleaning: {pending}, inspected: {inspected}, "
+            "occupancy: {occupancy}. Sent every 6 hours."
+        ),
+    },
     "portal_link": {
         "meta_name": "portal_link",
         "category": "utility",

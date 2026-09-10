@@ -468,6 +468,16 @@ class OverstayConfigUpdate(BaseModel):
     max_auto_days: Optional[int] = Field(None, ge=1, le=60)
 
 
+class ReportsConfigUpdate(BaseModel):
+    """Reports & scheduled-delivery settings (v5d-C). Every field optional — only what is sent changes."""
+    night_audit_hour: Optional[int] = Field(None, ge=0, le=23)
+    night_audit_enabled: Optional[bool] = None
+    accounting_email: Optional[str] = Field(None, max_length=300)
+    eod_email_enabled: Optional[bool] = None
+    eod_report_keys: Optional[List[str]] = None      # list of report keys, or a comma string
+    ops_summary_enabled: Optional[bool] = None
+
+
 class ReverseOverstayRequest(BaseModel):
     """Undo an automatically-charged overstay night (v4b3). Admin + owner approval.
 

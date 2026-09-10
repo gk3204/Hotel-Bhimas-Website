@@ -34,6 +34,51 @@ const REPORTS = {
             rows: d.rows.map((r) => [r.date, r.occupied, r.available, r.total_rooms, `${r.occupancy_pct}%`]),
           },
   },
+  "occupancy-analysis": {
+    label: "Occupancy Analysis",
+    path: "occupancy-analysis",
+    dateParam: "as_on",
+    note: "Snapshot of every occupied room 'as on' the chosen date, with each stay's prorated revenue. Segments are our booking sources (direct / website / each OTA / agent / complimentary).",
+    fetch: (p) => api.getOccupancyAnalysis(p),
+    project: (d) => ({
+      columns: ["Floor", "Room", "Guest", "Source", "Type", "Arrival", "Departure", "Pax",
+        "Dis %", "Rack", "Room Rent", "Discount", "Gross", "GST", "Net"],
+      rows: d.rooms.map((r) => [r.floor, r.room_no, r.guest, r.segment, r.room_type,
+        (r.arrival || "").replace("T", " ").slice(0, 16), (r.departure || "").replace("T", " ").slice(0, 16),
+        r.pax || "", r.discount_pct ? `${r.discount_pct}%` : "", fmt(r.rack), fmt(r.room_rent),
+        fmt(r.discount), fmt(r.gross_rent), fmt(r.gst), fmt(r.net)]),
+      totals: ["TOTAL", "", "", "", "", "", "", d.totals.pax, "", "", "", "", "", "", fmt(d.totals.revenue)],
+    }),
+  },
+  "cashier-summary": {
+    label: "Cashier Summary",
+    path: "cashier-summary",
+    dateParam: "day",
+    note: "Front-office collections for the day by method — advance receipts vs checkout bills, plus paid-outs. Unsettled checkout bills are listed in the JSON/PDF.",
+    fetch: (p) => api.getCashierSummary(p),
+    project: (d) => ({
+      columns: ["Method", "Advance", "Checkout", "Paid-out", "Net"],
+      rows: d.by_method.map((r) => [r.method, fmt(r.advance), fmt(r.checkout), fmt(r.paidout), fmt(r.net)]),
+      totals: ["GRAND TOTAL", fmt(d.totals.advance), fmt(d.totals.checkout), fmt(d.totals.paidout), fmt(d.totals.net)],
+    }),
+  },
+  "checkout-summary": {
+    label: "Check-Out Summary",
+    path: "checkout-summary",
+    dateParam: "day",
+    note: "One row per bill checked out on the day — room rent, SGST/CGST, food, laundry, misc, discount, advance, refund and bill amount.",
+    fetch: (p) => api.getCheckoutSummary(p),
+    project: (d) => ({
+      columns: ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc",
+        "Discount", "Advance", "Refund", "Bill Amt"],
+      rows: d.rows.map((r) => [r.bill_no, r.rooms, fmt(r.room_rent), fmt(r.sgst), fmt(r.cgst),
+        fmt(r.food), fmt(r.laundry), fmt(r.misc), fmt(r.discount), fmt(r.advance), fmt(r.refund),
+        fmt(r.bill_amount)]),
+      totals: ["TOTAL", "", fmt(d.totals.room_rent), fmt(d.totals.sgst), fmt(d.totals.cgst),
+        fmt(d.totals.food), fmt(d.totals.laundry), fmt(d.totals.misc), fmt(d.totals.discount),
+        fmt(d.totals.advance), fmt(d.totals.refund), fmt(d.totals.bill_amount)],
+    }),
+  },
   "sales/daily": {
     label: "Daily Sales",
     path: "sales/daily",
@@ -76,6 +121,58 @@ const REPORTS = {
         `${r.share_percent}%`]),
       totals: ["TOTAL", `${d.totals.items} item${d.totals.items === 1 ? "" : "s"}`, d.totals.qty,
         fmt(d.totals.gross), "", `${d.totals.share_percent}%`],
+    }),
+  },
+  "room-service/by-room": {
+    label: "Room Service (by room)",
+    path: "room-service/by-room",
+    range: true,
+    note: "Room-service sales grouped by room, product-wise within each room. A charge is attributed to the stay's room.",
+    fetch: (p) => api.getRoomServiceByRoom(p),
+    project: (d) => {
+      const rows = [];
+      d.rows.forEach((g) => {
+        g.items.forEach((it) => rows.push([g.room, it.item, it.qty, fmt(it.amount)]));
+        rows.push([g.room, "— subtotal —", g.qty, fmt(g.subtotal)]);
+      });
+      return {
+        columns: ["Room", "Item", "Qty", "Amount"],
+        rows,
+        totals: ["TOTAL", `${d.totals.rooms} room(s)`, "", fmt(d.totals.gross)],
+      };
+    },
+  },
+  "room-detail": {
+    label: "Room Detail (HK + frauds)",
+    path: "room-detail",
+    range: true,
+    note: "Per checked-out stay (by check-out date): check-in/out, cleaning started/ended, inspected time, cleaned-by, inspected-by, and any frauds.",
+    fetch: (p) => api.getRoomDetail(p),
+    project: (d) => {
+      const t = (s) => (s || "").replace("T", " ").slice(0, 16);
+      return {
+        columns: ["Room", "Guest", "Check-in", "Check-out", "Cleaning start", "Cleaning end",
+          "Inspected", "Cleaned by", "Inspected by", "Frauds"],
+        rows: d.rows.map((r) => [r.room, r.guest, t(r.check_in), t(r.check_out),
+          t(r.cleaning_started), t(r.cleaning_ended), t(r.inspected_at), r.cleaned_by || "",
+          r.inspected_by || "", r.frauds || ""]),
+      };
+    },
+  },
+  "maintenance-detail": {
+    label: "Maintenance Detail",
+    path: "maintenance-detail",
+    range: true,
+    note: "Per ticket raised in the range: issue, status (fixed?/inspected?), assignee, verified-by, items used and parts cost.",
+    fetch: (p) => api.getMaintenanceDetail(p),
+    project: (d) => ({
+      columns: ["Ticket", "Location", "Category", "Priority", "Issue", "Status", "Fixed",
+        "Inspected", "Assignee", "Verified by", "Items", "Parts ₹"],
+      rows: d.rows.map((r) => [r.ticket_id, r.location, r.category, r.priority, r.issue, r.status,
+        r.fixed ? "Yes" : "No", r.inspected ? "Yes" : "No", r.assignee || "", r.verified_by || "",
+        r.items.map((i) => `${i.item}×${i.qty} [${i.status}]`).join("; ") || "—", fmt(r.parts_cost)]),
+      totals: [`${d.totals.tickets} ticket(s)`, `${d.totals.fixed} fixed / ${d.totals.open} open`,
+        "", "", "", "", "", `${d.totals.inspected} insp.`, "", "", "", fmt(d.totals.parts_cost)],
     }),
   },
   "shift-payments": {
@@ -224,6 +321,7 @@ const persistViews = (v) => {
 export default function Reports() {
   const [tab, setTab] = useState("occupancy");
   const [range, setRange] = useState({ from: daysAgo(29), to: today() });
+  const [singleDate, setSingleDate] = useState(today());   // for single-date snapshot reports
   const [groupBy, setGroupBy] = useState("day");
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -267,9 +365,10 @@ export default function Reports() {
       p.from = range.from;
       p.to = range.to;
     }
+    if (cfg.dateParam) p[cfg.dateParam] = singleDate;
     if (cfg.groupBy) p.group_by = groupBy;
     return p;
-  }, [cfg, range, groupBy]);
+  }, [cfg, range, singleDate, groupBy]);
 
   const load = async () => {
     setLoading(true);
@@ -378,6 +477,10 @@ export default function Reports() {
                 <Field label="To" type="date" value={range.to}
                   onChange={(e) => setRange({ ...range, to: e.target.value })} />
               </>
+            )}
+            {cfg.dateParam && (
+              <Field label={cfg.dateParam === "as_on" ? "As on" : "Day"} type="date" value={singleDate}
+                onChange={(e) => setSingleDate(e.target.value)} />
             )}
             {cfg.groupBy && (
               <div className="flex flex-col">
