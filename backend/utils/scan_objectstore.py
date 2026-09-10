@@ -42,9 +42,22 @@ _client_lock = threading.Lock()
 
 def _config() -> dict | None:
     """The R2 config when fully set, else None. Note: no public_url — this bucket is private."""
+    account_id = (os.getenv("ID_SCAN_R2_ACCOUNT_ID") or "").strip()
+    endpoint = (os.getenv("ID_SCAN_R2_ENDPOINT") or "").strip()
+
+    # Cloudflare shows the S3 endpoint far more prominently than the bare account id, so pasting
+    # the whole URL into ACCOUNT_ID is the obvious mistake. Left alone it would build
+    # "https://https://<id>.r2.cloudflarestorage.com/.r2.cloudflarestorage.com" and fail with
+    # something that looks nothing like its cause. Accept either form.
+    if account_id.startswith(("http://", "https://")):
+        if not endpoint:
+            endpoint = account_id
+        account_id = ""
+    endpoint = endpoint.rstrip("/")
+
     cfg = {
-        "account_id": os.getenv("ID_SCAN_R2_ACCOUNT_ID"),
-        "endpoint": os.getenv("ID_SCAN_R2_ENDPOINT"),
+        "account_id": account_id or None,
+        "endpoint": endpoint or None,
         "access_key": os.getenv("ID_SCAN_R2_ACCESS_KEY"),
         "secret": os.getenv("ID_SCAN_R2_SECRET"),
         "bucket": os.getenv("ID_SCAN_R2_BUCKET"),
