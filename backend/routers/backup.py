@@ -624,7 +624,15 @@ def scans_purge(payload: PurgeRequest, request: Request, db: Session = Depends(g
     skipped = {}
 
     # One purge at a time across workers, so two runs cannot double-stamp the same rows.
-    got_lock = db.execute(text("SELECT pg_try_advisory_lock(:k)"),
+    #
+    # TRANSACTION-scoped (`_xact_`), not session-scoped, and that distinction is the whole
+    # point: a session-level pg_try_advisory_lock is tied to the CONNECTION, and SQLAlchemy
+    # hands the connection back to the pool on commit. The unlock then runs on a different
+    # connection, releases nothing, and the lock is stranded on an idle pooled connection --
+    # so every subsequent purge 409s until the process restarts. That is exactly what happened
+    # the first time this ran. A transaction lock is released by Postgres itself on COMMIT or
+    # ROLLBACK, so it cannot leak however the request ends.
+    got_lock = db.execute(text("SELECT pg_try_advisory_xact_lock(:k)"),
                           {"k": _PURGE_LOCK_KEY}).scalar()
     if not got_lock:
         raise HTTPException(status_code=409, detail="Another purge is already running.")
@@ -673,10 +681,11 @@ def scans_purge(payload: PurgeRequest, request: Request, db: Session = Depends(g
             deleted_refs.append(ref)
             results.append({"ref": ref, "status": "deleted"})
 
+        # Commit ends the transaction, which is also what releases the advisory lock above.
         db.commit()
-    finally:
-        db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _PURGE_LOCK_KEY})
-        db.commit()
+    except Exception:
+        db.rollback()          # releases the lock too — nothing to unlock by hand
+        raise
 
     if deleted_refs:
         set_setting(db, SCANS_LAST_PURGE_AT_KEY, datetime.utcnow().isoformat(),
