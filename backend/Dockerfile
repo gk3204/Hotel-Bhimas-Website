@@ -18,9 +18,27 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# Install runtime dependencies only
-RUN apt-get update && apt-get install -y \
-    postgresql-client \
+# Install runtime dependencies only.
+#
+# postgresql-client-18 from PGDG, NOT Debian's generic `postgresql-client`.
+# Bookworm ships client 15, and pg_dump REFUSES to dump a server newer than itself:
+#     pg_dump: error: aborting because of server version mismatch
+# The managed Postgres is 18.6, so the generic package silently gives you a backup endpoint
+# that 500s on every call — /admin/backup/export was broken exactly this way until a real
+# BhimasBackup run surfaced it. A newer pg_dump reads older servers fine, so pinning 18 is
+# safe if the database is ever moved back a version.
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && install -d /usr/share/postgresql-common/pgdg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+         -o /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+    # Read the codename from the base image rather than hardcoding it. python:3.11-slim moved
+    # from bookworm to trixie, and a stale codename here does not fail loudly — apt reports
+    # "held broken packages", which reads like a dependency problem rather than a wrong repo.
+    && . /etc/os-release \
+    && echo "deb [signed-by=/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+         > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update && apt-get install -y --no-install-recommends postgresql-client-18 \
+    && apt-get purge -y curl && apt-get autoremove -y \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python packages from builder (global site-packages)
