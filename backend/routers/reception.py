@@ -2344,6 +2344,13 @@ def desk_notifications(db: Session = Depends(get_db), user=Depends(require_recep
     pr_latest = int(db.query(func.coalesce(func.max(GuestRequest.id), 0))
                     .filter(GuestRequest.type != "room_service", _OPEN_REQ).scalar() or 0)
 
+    # Room-service orders still awaiting the kitchen docket — the desk chimes continuously while this
+    # is > 0 and stops the moment the KOT is printed (printed_kot_at set). Mirrors the web board's rule.
+    rs_awaiting_kot = int(db.query(func.count(GuestRequest.id))
+                          .filter(GuestRequest.type == "room_service",
+                                  GuestRequest.printed_kot_at.is_(None),
+                                  GuestRequest.status.notin_(("completed", "dismissed"))).scalar() or 0)
+
     # WhatsApp unread across conversations (same rule as /whatsapp/unread-count).
     wa_unread = int(db.query(func.count(WhatsAppMessage.id))
                     .outerjoin(WhatsAppConversationRead,
@@ -2365,6 +2372,7 @@ def desk_notifications(db: Session = Depends(get_db), user=Depends(require_recep
         "guest_tickets": {"open": tickets_open, "latest_id": tickets_latest},
         "whatsapp_unread": wa_unread,
         "room_service": {"open": rs_open, "latest_id": rs_latest},
+        "rs_awaiting_kot": rs_awaiting_kot,
         "portal_requests": {"open": pr_open, "latest_id": pr_latest},
         "extend": {"recent": ext_count, "latest_id": ext_latest},
     }
@@ -2529,6 +2537,7 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
         "check_in": booking.check_in,
         "check_out": booking.check_out,
         "checked_in_at": booking.checked_in_at,
+        "expected_check_out": booking_checkout_moment(booking),
         "booking_source": booking.booking_source,
         "grand_total": float(booking.grand_total or 0),
         "paid_total": total_paid(db, booking_id),

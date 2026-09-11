@@ -695,7 +695,10 @@ def generate_registration_slip_pdf(slip_data):
         ["ID Type", id_label, "ID Number", slip_data.get("id_number_masked") or "N/A"],
         ["Room(s)", ", ".join(slip_data.get("rooms") or []) or "N/A",
          "Source", (slip_data.get("booking_source") or "").replace("_", " ").title()],
-        ["Check-in", _d(slip_data.get("check_in")), "Check-out", _d(slip_data.get("check_out"))],
+        ["Check-in", _d(slip_data.get("check_in")),
+         "Exp. check-out",
+         _dt(slip_data.get("expected_check_out")) if slip_data.get("expected_check_out")
+         else _d(slip_data.get("check_out"))],
     ]
     meta_table = Table(meta_data, colWidths=[80, 190, 80, 130])
     meta_table.setStyle(TableStyle([
@@ -1435,9 +1438,29 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
         return str(v)
 
     header = [str(c) for c in columns]
+    ncols = len(header)
+    # Columns whose header reads monetary/numeric get right-aligned for a clean ledger look.
+    _money = ("amount", "receipt", "payment", "balance", "rent", "gst", "sgst", "cgst", "net",
+              "revenue", "gross", "discount", "advance", "refund", "total", "qty", "price",
+              "commission", "rack", "collected", "₹", "occ", "pax")
+    money_cols = [i for i, h in enumerate(header)
+                  if any(k in h.lower() for k in _money)]
+
     table_rows = [[Paragraph(f"<b>{h}</b>", styles["Normal"]) for h in header]]
+    # A row may be a plain list, or a marker dict: {"section": label} (full-width band) or
+    # {"subtotal": [cells...]} (bold summary line). Track their indices to style them precisely.
+    section_idx, subtotal_idx = [], []
     for r in rows:
-        table_rows.append([Paragraph(_cell(v), styles["Normal"]) for v in r])
+        idx = len(table_rows)
+        if isinstance(r, dict) and "section" in r:
+            cells = [Paragraph(f"<b>{_cell(r['section'])}</b>", styles["Normal"])] + [""] * (ncols - 1)
+            table_rows.append(cells)
+            section_idx.append(idx)
+        elif isinstance(r, dict) and "subtotal" in r:
+            table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", styles["Normal"]) for v in r["subtotal"]])
+            subtotal_idx.append(idx)
+        else:
+            table_rows.append([Paragraph(_cell(v), styles["Normal"]) for v in r])
     has_totals = totals_row is not None
     if has_totals:
         table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", styles["Normal"]) for v in totals_row])
@@ -1455,6 +1478,17 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
         ('LEFTPADDING', (0, 0), (-1, -1), 4),
         ('RIGHTPADDING', (0, 0), (-1, -1), 4),
     ]
+    for c in money_cols:
+        style.append(('ALIGN', (c, 1), (c, -1), 'RIGHT'))
+    # Section bands: merge across the row, shade, and keep left-aligned even in a money column.
+    for i in section_idx:
+        style.append(('SPAN', (0, i), (-1, i)))
+        style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#efe6cf")))
+        style.append(('TEXTCOLOR', (0, i), (-1, i), colors.HexColor("#7a5c00")))
+        style.append(('ALIGN', (0, i), (-1, i), 'LEFT'))
+    for i in subtotal_idx:
+        style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#f7f2e4")))
+        style.append(('LINEABOVE', (0, i), (-1, i), 0.5, colors.HexColor("#d9c48a")))
     if has_totals:
         style.append(('BACKGROUND', (0, -1), (-1, -1), colors.HexColor("#f0e6cc")))
         style.append(('LINEABOVE', (0, -1), (-1, -1), 0.7, colors.HexColor("#B8860B")))

@@ -839,61 +839,139 @@ def occupancy_analysis_data(db, as_on):
     }
 
 
-def cashier_summary_data(db, day):
-    """Front-office cashier summary for one day (adapted): paid Payments grouped by method into
-    advance receipts vs checkout receipts, plus paid-outs (refunds) and unsettled checkout bills."""
-    from models import Folio
-    pays = (db.query(Payment).filter(Payment.status == "paid",
-                                     func.date(Payment.created_at) == day).all())
-    methods = {}   # method -> {"advance","checkout","paidout"}
-    rows = []
+_CASHIER_MODE_LABELS = {"cash": "Cash", "card": "C.Card", "upi": "UPI", "bank": "Bank",
+                        "other": "Other"}
+_CASHIER_SECTIONS = [("checkout", "Guest Check-out Bills"),
+                     ("advance", "Advance Receipts"),
+                     ("paidout", "Paid-outs")]
 
-    def _mrow(m):
-        return methods.setdefault(m, {"advance": 0.0, "checkout": 0.0, "paidout": 0.0})
+
+def cashier_summary_data(db, day):
+    """Front-office cashier summary for one day, in the legacy printout shape: paid Payments grouped
+    by payment MODE (cash/card/upi/bank), each split into Guest Check-out Bills / Advance Receipts /
+    Paid-outs, with per-row Bill/Vou no, room, guest, receipt, payment, balance, CR no, remarks, user.
+    Plus per-mode totals, a grand total, unsettled checkout bills, and nil-amount checkouts. Uses our
+    invoice + payment ids for the bill/voucher references."""
+    from models import Folio
+    from routers.folio import _get_invoice
+    pays = (db.query(Payment).filter(Payment.status == "paid",
+                                     func.date(Payment.created_at) == day)
+            .order_by(Payment.created_at).all())
+    rcache = {}   # booking_id -> room label
+    modes = {}    # mode -> {section -> [rows], "receipt","payment"}
+
+    def _mode(m):
+        return modes.setdefault(m, {"checkout": [], "advance": [], "paidout": [],
+                                    "receipt": 0.0, "payment": 0.0})
+
+    def _ctx(p):
+        b = db.query(Booking).filter(Booking.booking_id == p.booking_id).first() if p.booking_id else None
+        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first() if b else None
+        folio = db.query(Folio).filter(Folio.booking_id == p.booking_id).first() if p.booking_id else None
+        room = _booking_room_label(db, p.booking_id, rcache) if p.booking_id else "—"
+        return b, guest, folio, room
 
     for p in pays:
         m = (p.method or "other")
-        b = db.query(Booking).filter(Booking.booking_id == p.booking_id).first()
-        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first() if b else None
+        b, guest, folio, room = _ctx(p)
+        at = p.created_at
+        base = {"date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
+                "room": room, "guest": guest.name if guest else None,
+                "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
+                "cr_no": p.client_ref or str(p.payment_id),
+                "user": _user_name(db, p.collected_by)}
         amt = float(p.amount or 0)
-        is_checkout = bool(b and b.checked_out_at and b.checked_out_at.date() == day
-                           and p.created_at >= b.checked_out_at)
-        section = "checkout" if is_checkout else "advance"
         if amt:
-            _mrow(m)[section] += amt
-            rows.append({"section": section, "method": m, "booking_id": p.booking_id,
-                         "guest": guest.name if guest else None, "amount": round(amt, 2),
-                         "at": p.created_at.isoformat() if p.created_at else None})
+            is_checkout = bool(b and b.checked_out_at and b.checked_out_at.date() == day
+                               and at and at >= b.checked_out_at)
+            mm = _mode(m)
+            if is_checkout:
+                inv = _get_invoice(db, folio.id) if folio else None
+                mm["checkout"].append({**base, "bill_no": (inv.invoice_no if inv else f"F{folio.id}" if folio else "—"),
+                                       "receipt": round(amt, 2), "payment": 0.0,
+                                       "remarks": (p.collect_method or "").upper() or "CHECKOUT"})
+            else:
+                mm["advance"].append({**base, "bill_no": f"A{p.payment_id}",
+                                      "receipt": round(amt, 2), "payment": 0.0, "remarks": "ADVANCE"})
+            mm["receipt"] += amt
         rf = float(p.refund_amount or 0)
-        if rf and (p.refund_status == "completed"):
-            _mrow(p.refund_mode or m)["paidout"] += rf
-            rows.append({"section": "paidout", "method": p.refund_mode or m,
-                         "booking_id": p.booking_id, "guest": guest.name if guest else None,
-                         "amount": round(-rf, 2), "at": p.created_at.isoformat() if p.created_at else None})
+        if rf and p.refund_status == "completed":
+            mm = _mode(p.refund_mode or m)
+            mm["paidout"].append({**base, "bill_no": f"P{p.payment_id}",
+                                  "receipt": 0.0, "payment": round(rf, 2),
+                                  "remarks": (p.refund_reason or "REFUND PAIDOUT")})
+            mm["payment"] += rf
 
-    # unsettled checkout bills = checked out today but folio still carries a balance
-    unsettled = []
+    mode_rows = []
+    for m in sorted(modes):
+        v = modes[m]
+        mode_rows.append({
+            "mode": m, "label": _CASHIER_MODE_LABELS.get(m, m.title()),
+            "sections": [{"key": k, "label": lbl, "rows": v[k]} for k, lbl in _CASHIER_SECTIONS if v[k]],
+            "receipt": round(v["receipt"], 2), "payment": round(v["payment"], 2),
+            "net": round(v["receipt"] - v["payment"], 2),
+        })
+    grand = {"receipt": round(sum(x["receipt"] for x in mode_rows), 2),
+             "payment": round(sum(x["payment"] for x in mode_rows), 2),
+             "net": round(sum(x["net"] for x in mode_rows), 2)}
+
+    # checked out today: unsettled (folio balance != 0) vs nil-amount (settled, no receipt today)
+    unsettled, nil_checkouts = [], []
+    receipted_bookings = {p.booking_id for p in pays if float(p.amount or 0)}
     for b in db.query(Booking).filter(Booking.status == "checked_out",
                                       func.date(Booking.checked_out_at) == day).all():
         f = db.query(Folio).filter(Folio.booking_id == b.booking_id).first()
-        if f and round(float(f.balance or 0), 2) != 0:
-            guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
-            unsettled.append({"booking_id": b.booking_id,
-                              "guest": guest.name if guest else None,
-                              "balance": round(float(f.balance or 0), 2)})
+        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
+        room = _booking_room_label(db, b.booking_id, rcache)
+        bal = round(float(f.balance or 0), 2) if f else 0.0
+        inv = _get_invoice(db, f.id) if f else None
+        rowc = {"bill_no": (inv.invoice_no if inv else f"F{f.id}" if f else "—"),
+                "room": room, "guest": guest.name if guest else None,
+                "booking_id": b.booking_id, "balance": bal}
+        if bal != 0:
+            unsettled.append(rowc)
+        elif b.booking_id not in receipted_bookings:
+            nil_checkouts.append(rowc)
 
-    method_rows = []
-    for m in sorted(methods):
-        v = methods[m]
-        method_rows.append({"method": m, "advance": round(v["advance"], 2),
-                            "checkout": round(v["checkout"], 2), "paidout": round(v["paidout"], 2),
-                            "net": round(v["advance"] + v["checkout"] - v["paidout"], 2)})
-    grand = {"advance": round(sum(x["advance"] for x in method_rows), 2),
-             "checkout": round(sum(x["checkout"] for x in method_rows), 2),
-             "paidout": round(sum(x["paidout"] for x in method_rows), 2),
-             "net": round(sum(x["net"] for x in method_rows), 2)}
-    return {"day": str(day), "by_method": method_rows, "rows": rows,
-            "unsettled": unsettled, "totals": grand}
+    return {"day": str(day), "modes": mode_rows, "grand": grand,
+            "unsettled": unsettled, "nil_checkouts": nil_checkouts}
+
+
+def _cashier_table(data):
+    """Flatten the grouped cashier summary into (columns, rows, totals) for the CSV/PDF export —
+    mode + section header rows, then detail rows, then a per-mode total, then unsettled / nil sections."""
+    cols = ["Bill/Vou", "Date", "Time", "Room", "Guest", "Receipt", "Payment", "Balance",
+            "CR No", "Remarks", "User"]
+
+    def _sub(label):
+        r = [""] * len(cols)
+        r[0] = label
+        return r
+    rows = []
+    for md in data["modes"]:
+        rows.append({"section": md["label"]})
+        for sec in md["sections"]:
+            rows.append({"section": f"   {sec['label']}"})
+            for x in sec["rows"]:
+                rows.append([x["bill_no"], x["date"], x["time"], x["room"], x["guest"] or "",
+                             x["receipt"] or "", x["payment"] or "", x["balance"], x["cr_no"],
+                             x["remarks"] or "", x["user"] or ""])
+        tr = _sub(f"Total ({md['label']})")
+        tr[5], tr[6] = md["receipt"], md["payment"]
+        rows.append({"subtotal": tr})
+    if data["unsettled"]:
+        rows.append({"section": "Unsettled Checkout Bills"})
+        for x in data["unsettled"]:
+            rows.append([x["bill_no"], "", "", x["room"], x["guest"] or "", "", "", x["balance"],
+                         "", "UNSETTLED", ""])
+    if data["nil_checkouts"]:
+        rows.append({"section": "Checkout Bills With Nil Amount"})
+        for x in data["nil_checkouts"]:
+            rows.append([x["bill_no"], "", "", x["room"], x["guest"] or "", "", "", x["balance"],
+                         "", "NIL", ""])
+    g = data["grand"]
+    totals = ["GRAND TOTAL", "", "", "", "", g["receipt"], g["payment"], "", "", f"net {g['net']}", ""]
+    return cols, rows, totals
 
 
 def checkout_summary_data(db, day):
@@ -964,10 +1042,18 @@ def room_service_by_room_data(db, dfrom, dto):
          .join(Booking, Booking.booking_id == Folio.booking_id)
          .outerjoin(MenuItem, MenuItem.id == FolioCharge.menu_item_id)
          .filter(*_room_service_filters(dfrom=dfrom, dto=dto)))
-    cache, groups = {}, {}
+    cache, groups, gcache = {}, {}, {}
     for fc, b, mi in q.all():
+        # Group by (room, booking) so a room used by two stays on the same day stays separate.
         room = _booking_room_label(db, b.booking_id, cache)
-        g = groups.setdefault(room, {"items": {}, "subtotal": 0.0, "qty": 0.0})
+        key = (room, b.booking_id)
+        if b.booking_id not in gcache:
+            gcache[b.booking_id] = (db.query(Guest.name)
+                                    .filter(Guest.guest_id == b.guest_id).scalar())
+        g = groups.setdefault(key, {"room": room, "booking_id": b.booking_id,
+                                    "guest": gcache[b.booking_id],
+                                    "check_in": str(b.check_in), "check_out": str(b.check_out),
+                                    "items": {}, "subtotal": 0.0, "qty": 0.0})
         name = (mi.name if mi else (fc.description or "Item"))
         it = g["items"].setdefault(name, {"qty": 0.0, "amount": 0.0})
         it["qty"] += float(fc.qty or 0)
@@ -975,15 +1061,32 @@ def room_service_by_room_data(db, dfrom, dto):
         g["subtotal"] += float(fc.amount or 0)
         g["qty"] += float(fc.qty or 0)
     rows = []
-    for room in sorted(groups):
-        g = groups[room]
+    for key in sorted(groups, key=lambda k: (k[0], k[1])):
+        g = groups[key]
         items = [{"item": n, "qty": round(v["qty"], 2), "amount": round(v["amount"], 2)}
                  for n, v in sorted(g["items"].items(), key=lambda x: -x[1]["amount"])]
-        rows.append({"room": room, "items": items, "qty": round(g["qty"], 2),
-                     "subtotal": round(g["subtotal"], 2)})
+        rows.append({"room": g["room"], "booking_id": g["booking_id"], "guest": g["guest"],
+                     "check_in": g["check_in"], "check_out": g["check_out"],
+                     "items": items, "qty": round(g["qty"], 2), "subtotal": round(g["subtotal"], 2)})
     grand = round(sum(r["subtotal"] for r in rows), 2)
     return {"from": str(dfrom), "to": str(dto), "rows": rows,
-            "totals": {"rooms": len(rows), "gross": grand}}
+            "totals": {"groups": len(rows), "rooms": len({r["room"] for r in rows}), "gross": grand}}
+
+
+def _rs_by_room_table(data):
+    """Flatten room-service-by-room into (cols, rows, totals): a section header per (room, booking),
+    its item lines, and a subtotal marker. Shared by the endpoint + the EOD PDF."""
+    cols = ["Item", "Qty", "Amount"]
+    rows = []
+    for g in data["rows"]:
+        bk = f"#{g['booking_id']} {g.get('guest') or ''}".strip()
+        rows.append({"section": f"Room {g['room']} · {bk}"})
+        for it in g["items"]:
+            rows.append([it["item"], it["qty"], it["amount"]])
+        rows.append({"subtotal": ["Subtotal", g["qty"], g["subtotal"]]})
+    t = data["totals"]
+    totals = [f"TOTAL — {t['groups']} stay(s) · {t['rooms']} room(s)", "", t["gross"]]
+    return cols, rows, totals
 
 
 def room_detail_data(db, dfrom, dto):
@@ -1107,10 +1210,7 @@ def _eod_report_pdf(db, key, day):
                  r["rack"], r["room_rent"], r["gst"], r["net"]] for r in d["rooms"]]
         totals = ["TOTAL", "", "", "", "", d["totals"]["pax"], "", "", "", d["totals"]["revenue"]]
     elif key == "cashier_summary":
-        d = cashier_summary_data(db, day)
-        cols = ["Method", "Advance", "Checkout", "Paid-out", "Net"]
-        rows = [[r["method"], r["advance"], r["checkout"], r["paidout"], r["net"]] for r in d["by_method"]]
-        t = d["totals"]; totals = ["GRAND TOTAL", t["advance"], t["checkout"], t["paidout"], t["net"]]
+        cols, rows, totals = _cashier_table(cashier_summary_data(db, day))
     elif key == "checkout_summary":
         d = checkout_summary_data(db, day)
         cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
@@ -1121,14 +1221,7 @@ def _eod_report_pdf(db, key, day):
                                    t["laundry"], t["misc"], t["discount"], t["advance"], t["refund"],
                                    t["bill_amount"]]
     elif key == "room_service_by_room":
-        d = room_service_by_room_data(db, day, day)
-        cols = ["Room", "Item", "Qty", "Amount"]
-        rows = []
-        for g in d["rows"]:
-            for it in g["items"]:
-                rows.append([g["room"], it["item"], it["qty"], it["amount"]])
-            rows.append([g["room"], "— subtotal —", g["qty"], g["subtotal"]])
-        totals = ["TOTAL", f"{d['totals']['rooms']} room(s)", "", d["totals"]["gross"]]
+        cols, rows, totals = _rs_by_room_table(room_service_by_room_data(db, day, day))
     elif key == "room_detail":
         d = room_detail_data(db, day, day)
         cols = ["Room", "Guest", "Check-in", "Check-out", "Cleaned", "Inspected", "Cleaned by",
@@ -1192,7 +1285,13 @@ def _csv_response(filename, columns, rows, totals_row=None):
     w = csv.writer(buf)
     w.writerow(columns)
     for r in rows:
-        w.writerow(r)
+        # Grouped reports may pass marker rows; flatten them to plain CSV lines.
+        if isinstance(r, dict) and "section" in r:
+            w.writerow([r["section"]])
+        elif isinstance(r, dict) and "subtotal" in r:
+            w.writerow(r["subtotal"])
+        else:
+            w.writerow(r)
     if totals_row is not None:
         w.writerow(totals_row)
     buf.seek(0)
@@ -1373,6 +1472,19 @@ def occupancy_analysis_report(as_on: str | None = Query(None), format: str = Que
              r["departure"], r["pax"], r["discount_pct"], r["rack"], r["room_rent"], r["discount"],
              r["gross_rent"], r["gst"], r["net"]] for r in data["rooms"]]
     t = data["totals"]
+    # Append the floor-wise / type-wise / source (recapitulation) summaries as labelled sections after
+    # the room table, so the CSV/PDF (and the EOD email) carry them like the legacy printout.
+    n = len(cols)
+
+    def _summary_block(title, items):
+        rows.append({"section": title})
+        rows.append({"subtotal": ["Group", "Occ", "Pax", "Room-nights", "Revenue", "ARR"] + [""] * (n - 6)})
+        for s in items:
+            rows.append([s["key"], s["occ"], s["pax"], s["room_nights"], s["revenue"], s["arr"]]
+                        + [""] * (n - 6))
+    _summary_block("FLOOR-WISE SUMMARY", [{**f, "key": f"Floor {f['floor']}"} for f in data["floor_summary"]])
+    _summary_block("TYPE-WISE REVENUE", data["by_type"])
+    _summary_block("RECAPITULATION (by source)", data["by_source"])
     totals = ["TOTAL", "", "", "", "", "", "", t["pax"], "", "", "", "", "", "", t["revenue"]]
     meta = {"As on": f"{d:%d-%m-%Y}", "Occupied rooms": t["occ_rooms"], "ARR": t["arr"],
             **_meta()}
@@ -1387,11 +1499,7 @@ def cashier_summary_report(day: str | None = Query(None), format: str = Query("j
     paid-outs, and unsettled checkout bills."""
     d = _parse_date(day, "day") if day else date.today()
     data = cashier_summary_data(db, d)
-    cols = ["Method", "Advance", "Checkout", "Paid-out", "Net"]
-    rows = [[r["method"], r["advance"], r["checkout"], r["paidout"], r["net"]]
-            for r in data["by_method"]]
-    t = data["totals"]
-    totals = ["GRAND TOTAL", t["advance"], t["checkout"], t["paidout"], t["net"]]
+    cols, rows, totals = _cashier_table(data)
     meta = {"Day": f"{d:%d-%m-%Y}", "Unsettled bills": len(data["unsettled"]), **_meta()}
     return _export_or_json(format, data, title="Front-Office Cashier Summary", columns=cols,
                            rows=rows, totals_row=totals, meta=meta, filename="cashier_summary")
@@ -1423,14 +1531,7 @@ def room_service_by_room_report(from_: str | None = Query(None, alias="from"), t
     """Room-service sales grouped by room, product-wise within each room."""
     dfrom, dto = _range(from_, to)
     data = room_service_by_room_data(db, dfrom, dto)
-    # flatten: an item row per line, then a room subtotal row
-    cols = ["Room", "Item", "Qty", "Amount"]
-    rows = []
-    for g in data["rows"]:
-        for it in g["items"]:
-            rows.append([g["room"], it["item"], it["qty"], it["amount"]])
-        rows.append([g["room"], "— subtotal —", g["qty"], g["subtotal"]])
-    totals = ["TOTAL", f"{data['totals']['rooms']} room(s)", "", data["totals"]["gross"]]
+    cols, rows, totals = _rs_by_room_table(data)
     return _export_or_json(format, data, title="Room Service by Room", columns=cols, rows=rows,
                            totals_row=totals, meta=_meta(dfrom, dto), filename="room_service_by_room")
 

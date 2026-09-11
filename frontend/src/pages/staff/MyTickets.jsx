@@ -1,6 +1,8 @@
-import React, { useEffect, useState } from "react";
-import { FaClipboardList, FaPlus } from "react-icons/fa";
+import React, { useEffect, useMemo, useState } from "react";
+import { FaClipboardList, FaPlus, FaBell, FaBellSlash } from "react-icons/fa";
 import { getTickets, getTicket, updateTicketStatus, addTicketItem, claimTicket } from "../../api/maintenance";
+import usePoll from "../../utils/usePoll";
+import useContinuousAlert from "../../utils/useContinuousAlert";
 
 const inputCls =
   "w-full px-3 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -30,21 +32,32 @@ export default function MyTickets() {
     setTimeout(() => setToast(null), 3500);
   };
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const data = await getTickets();
       setTickets(data.tickets || []);
     } catch (e) {
-      showToast(e.message, "error");
+      if (!silent) showToast(e.message, "error");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
   useEffect(() => {
     load();
   }, []);
+
+  // Keep the list live so a newly-assigned job alerts even if the tech leaves the screen open.
+  usePoll(() => load(true), 20000);
+
+  // Continuous alert while any job is unattended — open (unclaimed) or assigned-but-not-started.
+  // It stops the moment the tech taps Claim/Start (status -> in_progress) = "taken up".
+  const pending = useMemo(
+    () => tickets.filter((t) => t.status === "open" || t.status === "assigned").length,
+    [tickets],
+  );
+  const { muted, setMuted, audioBlocked } = useContinuousAlert(pending, "mt_alert_muted");
 
   const openDetail = async (id) => {
     if (detail[id]) {
@@ -92,10 +105,19 @@ export default function MyTickets() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-2">
-        <FaClipboardList /> My Tickets
-      </h1>
-      <p className="text-slate-400 mb-5 text-sm">Jobs assigned to you, plus open ones you can claim. Housekeeping signs off your work before a ticket is resolved.</p>
+      <div className="flex items-center justify-between mb-1">
+        <h1 className="text-2xl font-bold bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-2">
+          <FaClipboardList /> My Tickets
+        </h1>
+        <button onClick={() => setMuted((m) => !m)}
+          className={`px-3 py-1.5 rounded-lg text-sm font-semibold flex items-center gap-2 border ${muted ? "bg-slate-700/60 border-slate-600 text-slate-300" : "bg-[#E5C07B]/20 border-[#E5C07B]/40 text-[#E5C07B]"}`}>
+          {muted ? <FaBellSlash /> : <FaBell />} {muted ? "Alerts off" : "Alerts on"}
+        </button>
+      </div>
+      <p className="text-slate-400 mb-2 text-sm">Jobs assigned to you, plus open ones you can claim. Housekeeping signs off your work before a ticket is resolved.</p>
+      {audioBlocked && !muted && (
+        <p className="text-amber-300 text-xs mb-4">🔔 Tap anywhere once to enable the alert sound for new jobs.</p>
+      )}
 
       {loading ? (
         <div className="p-10 text-center text-slate-400">Loading…</div>

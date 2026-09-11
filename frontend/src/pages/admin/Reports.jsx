@@ -40,27 +40,58 @@ const REPORTS = {
     dateParam: "as_on",
     note: "Snapshot of every occupied room 'as on' the chosen date, with each stay's prorated revenue. Segments are our booking sources (direct / website / each OTA / agent / complimentary).",
     fetch: (p) => api.getOccupancyAnalysis(p),
-    project: (d) => ({
-      columns: ["Floor", "Room", "Guest", "Source", "Type", "Arrival", "Departure", "Pax",
-        "Dis %", "Rack", "Room Rent", "Discount", "Gross", "GST", "Net"],
-      rows: d.rooms.map((r) => [r.floor, r.room_no, r.guest, r.segment, r.room_type,
+    project: (d) => {
+      const rows = d.rooms.map((r) => [r.floor, r.room_no, r.guest, r.segment, r.room_type,
         (r.arrival || "").replace("T", " ").slice(0, 16), (r.departure || "").replace("T", " ").slice(0, 16),
         r.pax || "", r.discount_pct ? `${r.discount_pct}%` : "", fmt(r.rack), fmt(r.room_rent),
-        fmt(r.discount), fmt(r.gross_rent), fmt(r.gst), fmt(r.net)]),
-      totals: ["TOTAL", "", "", "", "", "", "", d.totals.pax, "", "", "", "", "", "", fmt(d.totals.revenue)],
-    }),
+        fmt(r.discount), fmt(r.gross_rent), fmt(r.gst), fmt(r.net)]);
+      const block = (title, items, keyLabel) => {
+        rows.push({ kind: "section", label: title });
+        rows.push({ kind: "subtotal", cells: ["Group", "Occ", "Pax", "Room-nights", "Revenue", "ARR"] });
+        items.forEach((s) => rows.push([keyLabel(s), s.occ, s.pax, s.room_nights, fmt(s.revenue), fmt(s.arr)]));
+      };
+      block("Floor-wise summary", d.floor_summary || [], (s) => `Floor ${s.floor}`);
+      block("Type-wise revenue", d.by_type || [], (s) => s.key);
+      block("Recapitulation (by source)", d.by_source || [], (s) => s.key);
+      return {
+        columns: ["Floor", "Room", "Guest", "Source", "Type", "Arrival", "Departure", "Pax",
+          "Dis %", "Rack", "Room Rent", "Discount", "Gross", "GST", "Net"],
+        rows,
+        totals: ["TOTAL", "", "", "", "", "", "", d.totals.pax, "", "", "", "", "", "", fmt(d.totals.revenue)],
+      };
+    },
   },
   "cashier-summary": {
     label: "Cashier Summary",
     path: "cashier-summary",
     dateParam: "day",
-    note: "Front-office collections for the day by method — advance receipts vs checkout bills, plus paid-outs. Unsettled checkout bills are listed in the JSON/PDF.",
+    note: "Front-office collections for the day, grouped by payment mode with Guest check-out bills / Advance receipts / Paid-outs, plus unsettled and nil-amount checkouts.",
     fetch: (p) => api.getCashierSummary(p),
-    project: (d) => ({
-      columns: ["Method", "Advance", "Checkout", "Paid-out", "Net"],
-      rows: d.by_method.map((r) => [r.method, fmt(r.advance), fmt(r.checkout), fmt(r.paidout), fmt(r.net)]),
-      totals: ["GRAND TOTAL", fmt(d.totals.advance), fmt(d.totals.checkout), fmt(d.totals.paidout), fmt(d.totals.net)],
-    }),
+    project: (d) => {
+      const rows = [];
+      (d.modes || []).forEach((m) => {
+        rows.push({ kind: "section", label: m.label });
+        (m.sections || []).forEach((sec) => {
+          rows.push({ kind: "section", label: `  ${sec.label}` });
+          sec.rows.forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room, x.guest || "",
+            x.receipt ? fmt(x.receipt) : "", x.payment ? fmt(x.payment) : "", fmt(x.balance),
+            x.cr_no, x.remarks || "", x.user || ""]));
+        });
+        rows.push({ kind: "subtotal", cells: [`Total (${m.label})`, "", "", "", "",
+          fmt(m.receipt), fmt(m.payment), "", "", "", ""] });
+      });
+      if ((d.unsettled || []).length) rows.push({ kind: "section", label: "Unsettled Checkout Bills" });
+      (d.unsettled || []).forEach((x) => rows.push([x.bill_no, "", "", x.room, x.guest || "", "", "", fmt(x.balance), "", "UNSETTLED", ""]));
+      if ((d.nil_checkouts || []).length) rows.push({ kind: "section", label: "Checkout Bills With Nil Amount" });
+      (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, "", "", x.room, x.guest || "", "", "", fmt(x.balance), "", "NIL", ""]));
+      return {
+        columns: ["Bill/Vou", "Date", "Time", "Room", "Guest", "Receipt", "Payment", "Balance",
+          "CR No", "Remarks", "User"],
+        rows,
+        totals: ["GRAND TOTAL", "", "", "", "", fmt(d.grand.receipt), fmt(d.grand.payment), "", "",
+          `net ${fmt(d.grand.net)}`, ""],
+      };
+    },
   },
   "checkout-summary": {
     label: "Check-Out Summary",
@@ -132,13 +163,15 @@ const REPORTS = {
     project: (d) => {
       const rows = [];
       d.rows.forEach((g) => {
-        g.items.forEach((it) => rows.push([g.room, it.item, it.qty, fmt(it.amount)]));
-        rows.push([g.room, "— subtotal —", g.qty, fmt(g.subtotal)]);
+        const bk = `#${g.booking_id}${g.guest ? ` ${g.guest}` : ""}`;
+        rows.push({ kind: "section", label: `Room ${g.room} · ${bk}` });
+        g.items.forEach((it) => rows.push([it.item, it.qty, fmt(it.amount)]));
+        rows.push({ kind: "subtotal", cells: ["Subtotal", g.qty, fmt(g.subtotal)] });
       });
       return {
-        columns: ["Room", "Item", "Qty", "Amount"],
+        columns: ["Item", "Qty", "Amount"],
         rows,
-        totals: ["TOTAL", `${d.totals.rooms} room(s)`, "", fmt(d.totals.gross)],
+        totals: [`TOTAL — ${d.totals.groups} stay(s) · ${d.totals.rooms} room(s)`, "", fmt(d.totals.gross)],
       };
     },
   },
@@ -411,6 +444,11 @@ export default function Reports() {
   const paged = usePaged(projected?.rows || [], 50);
   const onLastPage = paged.page >= paged.pageCount - 1;
 
+  // Right-align columns whose header reads monetary/numeric, for a clean ledger look.
+  const MONEY_RE = /amount|receipt|payment|balance|rent|gst|sgst|cgst|net|revenue|gross|discount|advance|refund|total|qty|price|commission|rack|₹|occ|pax|arr/i;
+  const moneyCols = new Set((projected?.columns || [])
+    .map((h, idx) => (MONEY_RE.test(String(h)) ? idx : -1)).filter((x) => x >= 0));
+
   return (
     <PageShell
       icon="📊"
@@ -542,19 +580,37 @@ export default function Reports() {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {paged.pageItems.map((r, i) => (
-                    <tr key={paged.page * 50 + i} className="hover:bg-slate-700/30 transition">
-                      {r.map((c, j) => (
-                        <td key={j} className="px-4 py-2.5 text-slate-200 whitespace-nowrap">
-                          {c == null ? "—" : String(c)}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
+                  {paged.pageItems.map((r, i) => {
+                    const key = paged.page * 50 + i;
+                    // Grouped reports emit marker rows: a full-width section band, or a bold subtotal.
+                    if (r && r.kind === "section") {
+                      return (
+                        <tr key={key}>
+                          <td colSpan={projected.columns.length}
+                              className="px-4 py-2 bg-slate-800 text-[#E5C07B] font-semibold uppercase text-xs tracking-wide">
+                            {r.label}
+                          </td>
+                        </tr>
+                      );
+                    }
+                    const isSub = r && r.kind === "subtotal";
+                    const cells = isSub ? r.cells : r;
+                    return (
+                      <tr key={key} className={isSub
+                        ? "bg-slate-800/40 font-semibold text-slate-100 border-t border-slate-600"
+                        : "hover:bg-slate-700/30 transition"}>
+                        {cells.map((c, j) => (
+                          <td key={j} className={`px-4 py-2.5 text-slate-200 whitespace-nowrap ${moneyCols.has(j) ? "text-right tabular-nums" : ""}`}>
+                            {c == null ? (isSub ? "" : "—") : String(c)}
+                          </td>
+                        ))}
+                      </tr>
+                    );
+                  })}
                   {projected.totals && onLastPage && (
                     <tr className="bg-[#E5C07B]/10 font-bold text-[#FCD34D] border-t border-[#E5C07B]/30">
                       {projected.totals.map((c, j) => (
-                        <td key={j} className="px-4 py-3 whitespace-nowrap">{c == null ? "" : String(c)}</td>
+                        <td key={j} className={`px-4 py-3 whitespace-nowrap ${moneyCols.has(j) ? "text-right tabular-nums" : ""}`}>{c == null ? "" : String(c)}</td>
                       ))}
                     </tr>
                   )}

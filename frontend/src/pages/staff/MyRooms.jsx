@@ -1,8 +1,10 @@
-import React, { useEffect, useState } from "react";
-import { FaBroom, FaCheck, FaWrench, FaWineBottle, FaTimes } from "react-icons/fa";
+import React, { useEffect, useMemo, useState } from "react";
+import { FaBroom, FaCheck, FaWrench, FaWineBottle, FaTimes, FaBell, FaBellSlash } from "react-icons/fa";
 import { getRooms, startTask, completeTask, minibarRestock, inspectRoom } from "../../api/housekeeping";
 import RaiseTicketModal from "../../components/RaiseTicketModal";
 import { useCategoryList, prettyCategory } from "../../utils/useCategoryList";
+import usePoll from "../../utils/usePoll";
+import useContinuousAlert from "../../utils/useContinuousAlert";
 
 const inputCls =
   "w-full px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -39,21 +41,32 @@ export default function MyRooms() {
     setTimeout(() => setToast(null), 3500);
   };
 
-  const load = async () => {
-    setLoading(true);
+  const load = async (silent = false) => {
+    if (!silent) setLoading(true);
     try {
       const data = await getRooms(true);
       setRooms(data.rooms || []);
     } catch (e) {
-      showToast(e.message, "error");
+      if (!silent) showToast(e.message, "error");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
 
   useEffect(() => {
     load();
   }, []);
+
+  // Keep the board live so a room turning dirty alerts even with the screen left open.
+  usePoll(() => load(true), 20000);
+
+  // Continuous alert while any room is dirty & not yet started (open cleaning task pending). It stops
+  // when the housekeeper taps Start cleaning (task -> in_progress) or the desk encodes its cleaning card.
+  const pending = useMemo(
+    () => rooms.filter((r) => r.open_task && r.open_task.status === "pending").length,
+    [rooms],
+  );
+  const { muted, setMuted, audioBlocked } = useContinuousAlert(pending, "hk_alert_muted");
 
   const doStart = async (room) => {
     setBusyId(room.room_id);
@@ -107,10 +120,19 @@ export default function MyRooms() {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-1 bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-2">
-        <FaBroom /> My Rooms
-      </h1>
-      <p className="text-slate-400 mb-5 text-sm">Rooms to clean. You set the status — the room is inspected before re-sale.</p>
+      <div className="flex items-center justify-between mb-1">
+        <h1 className="text-2xl font-bold bg-gradient-to-r from-[#E5C07B] to-[#FCD34D] bg-clip-text text-transparent flex items-center gap-2">
+          <FaBroom /> My Rooms
+        </h1>
+        <button onClick={() => setMuted((m) => !m)}
+          className={`px-3 py-1.5 rounded-lg text-sm font-semibold flex items-center gap-2 border ${muted ? "bg-slate-700/60 border-slate-600 text-slate-300" : "bg-[#E5C07B]/20 border-[#E5C07B]/40 text-[#E5C07B]"}`}>
+          {muted ? <FaBellSlash /> : <FaBell />} {muted ? "Alerts off" : "Alerts on"}
+        </button>
+      </div>
+      <p className="text-slate-400 mb-2 text-sm">Rooms to clean. You set the status — the room is inspected before re-sale.</p>
+      {audioBlocked && !muted && (
+        <p className="text-amber-300 text-xs mb-4">🔔 Tap anywhere once to enable the alert sound for rooms ready to clean.</p>
+      )}
 
       {loading ? (
         <div className="p-10 text-center text-slate-400">Loading…</div>
