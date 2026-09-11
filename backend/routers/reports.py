@@ -878,7 +878,9 @@ def cashier_summary_data(db, day):
         base = {"date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
                 "room": room, "guest": guest.name if guest else None,
                 "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
-                "cr_no": p.client_ref or str(p.payment_id),
+                # CR No = the card/UPI transaction reference (gateway txn id), blank for manual cash.
+                # (client_ref is the desk's offline-outbox dedupe UUID — internal, not a cashier ref.)
+                "cr_no": p.payment_id_gateway or "",
                 "user": _user_name(db, p.collected_by)}
         amt = float(p.amount or 0)
         if amt:
@@ -891,13 +893,16 @@ def cashier_summary_data(db, day):
                                        "receipt": round(amt, 2), "payment": 0.0,
                                        "remarks": (p.collect_method or "").upper() or "CHECKOUT"})
             else:
-                mm["advance"].append({**base, "bill_no": f"A{p.payment_id}",
+                # Match the printed receipt document number (routers/payments.receipt_payload).
+                mm["advance"].append({**base, "bill_no": f"RCPT-{p.payment_id}",
                                       "receipt": round(amt, 2), "payment": 0.0, "remarks": "ADVANCE"})
             mm["receipt"] += amt
         rf = float(p.refund_amount or 0)
         if rf and p.refund_status == "completed":
             mm = _mode(p.refund_mode or m)
-            mm["paidout"].append({**base, "bill_no": f"P{p.payment_id}",
+            # Match the printed refund-voucher number; CR No = the refund's own payout reference.
+            mm["paidout"].append({**base, "bill_no": f"RFND-{p.payment_id}",
+                                  "cr_no": p.refund_reference or "",
                                   "receipt": 0.0, "payment": round(rf, 2),
                                   "remarks": (p.refund_reason or "REFUND PAIDOUT")})
             mm["payment"] += rf
@@ -1480,8 +1485,10 @@ def occupancy_analysis_report(as_on: str | None = Query(None), format: str = Que
         rows.append({"section": title})
         rows.append({"subtotal": ["Group", "Occ", "Pax", "Room-nights", "Revenue", "ARR"] + [""] * (n - 6)})
         for s in items:
-            rows.append([s["key"], s["occ"], s["pax"], s["room_nights"], s["revenue"], s["arr"]]
-                        + [""] * (n - 6))
+            # .get(): floor-wise rows don't track room-nights (only by-type/by-source do), so a missing
+            # key renders as a blank cell instead of raising KeyError and 500-ing the whole report.
+            rows.append([s.get("key", ""), s.get("occ", ""), s.get("pax", ""), s.get("room_nights", ""),
+                         s.get("revenue", ""), s.get("arr", "")] + [""] * (n - 6))
     _summary_block("FLOOR-WISE SUMMARY", [{**f, "key": f"Floor {f['floor']}"} for f in data["floor_summary"]])
     _summary_block("TYPE-WISE REVENUE", data["by_type"])
     _summary_block("RECAPITULATION (by source)", data["by_source"])
