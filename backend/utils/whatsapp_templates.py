@@ -305,6 +305,19 @@ TEMPLATES = {
         "respect_optout": False,
         "body_preview": "Hotel Bhimas — your weekly report ({week}) is attached.",
     },
+    # v5d: ONE template for every end-of-day report PDF, named by {report_name}.
+    # Deliberately generic rather than one per report: EOD_REPORT_CHOICES (routers/reports.py)
+    # already holds seven titles and will grow. Per-report templates would mean a Meta review
+    # cycle each, plus another every time a report is added, while the message differs only by
+    # its title — so the title travels as a body variable instead.
+    "eod_report_doc": {
+        "meta_name": "eod_report_doc",
+        "category": "utility",
+        "lang": "en",
+        "param_order": ["report_name", "day"],
+        "respect_optout": False,
+        "body_preview": "Hotel Bhimas — your {report_name} report for {day} is attached.",
+    },
     # v5d-C: 6-hourly operational summary to the owner. Utility (owner-facing operations, not marketing).
     "operational_summary": {
         "meta_name": "operational_summary",
