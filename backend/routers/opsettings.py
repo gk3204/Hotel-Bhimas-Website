@@ -86,3 +86,20 @@ def set_registration_rules(text: str = Body(..., embed=True, max_length=4000),
     write_audit(db, user, "settings.registration_rules_update", "app_settings", None,
                 after={"length": len(text or "")}, client="web", commit=True)
     return {"text": app_settings.get_registration_rules(db)}
+
+
+@router.get("/desk-public-key", dependencies=[Depends(require_reception_or_admin)])
+def desk_public_key():
+    """The key the front desk seals ID scans with when it is OFFLINE.
+
+    Public by construction — it only lets the desk ENCRYPT. Sealing with it produces an envelope
+    only the server's ID_SCAN_DESK_PRIVATE_KEY can open (utils/scan_envelope.py). The desk fetches
+    this at login and caches it beside the outbox, so a desk that has been online once can capture
+    scans with the internet down. 503 means offline capture is simply not configured yet; the
+    online path is unaffected."""
+    from utils import scan_envelope
+    pk = scan_envelope.public_key()
+    if pk is None:
+        raise HTTPException(status_code=503,
+                            detail="Offline scan capture is not configured on the server.")
+    return pk

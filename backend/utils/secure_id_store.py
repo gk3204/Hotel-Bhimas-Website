@@ -123,11 +123,24 @@ def ref_belongs_to(ref: str | None, booking_id: int) -> bool:
     return valid_ref(ref) and ref.split("/", 1)[0] == f"booking_{int(booking_id)}"
 
 
-def save_scan(booking_id: int, data: bytes, content_type: str | None = None) -> str:
+def save_scan(booking_id: int, data: bytes, content_type: str | None = None, *,
+              ref: str | None = None) -> str:
     """Encrypt + persist an ID scan under booking_<id>/, returning its relative ref.
 
     Raises RuntimeError when encryption is unconfigured (caller maps to 503) — a scan is
-    never written in plaintext. Raises ValueError for an empty/oversized payload."""
+    never written in plaintext. Raises ValueError for an empty/oversized payload.
+
+    `ref` lets the CALLER choose the name. The front desk does this when it captured the scan
+    offline: it needs the ref at check-in time, before any upload has happened, and it gets it
+    by minting the same `booking_<id>/<uuid>.enc` shape itself. A caller-supplied ref must pass
+    `ref_belongs_to` for this booking.
+
+    ⚠️ AN EXISTING REF IS NEVER OVERWRITTEN. If the object is already there, its ref is returned
+    untouched and nothing is written. Two reasons, one of them subtle:
+      * a retry after a lost 2xx becomes a no-op instead of a second upload;
+      * Fernet uses a random IV, so re-encrypting the SAME plaintext yields DIFFERENT bytes —
+        and the weekly archive/purge compares the sha256 it archived against what is stored.
+        A rewrite would make every later purge skip that ref as "mismatch", forever."""
     f = _fernet()
     if f is None:
         raise RuntimeError("id_scan_encryption_unconfigured")
@@ -136,8 +149,16 @@ def save_scan(booking_id: int, data: bytes, content_type: str | None = None) -> 
     if len(data) > _MAX_BYTES:
         raise ValueError("file too large (max 8 MB)")
 
-    name = f"{uuid.uuid4().hex}.enc"
-    ref = f"booking_{int(booking_id)}/{name}"
+    if ref is not None:
+        if not ref_belongs_to(ref, booking_id):
+            raise ValueError("ref does not belong to this booking")
+        name = ref.split("/", 1)[1]
+        if stat_scan(ref) is not None:
+            logger.info(f"[secure_id_store] ref already stored, not rewriting: {ref}")
+            return ref
+    else:
+        name = f"{uuid.uuid4().hex}.enc"
+        ref = f"booking_{int(booking_id)}/{name}"
     blob = f.encrypt(data)
 
     if _backend() == "r2":

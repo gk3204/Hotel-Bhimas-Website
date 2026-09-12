@@ -14,7 +14,7 @@ import logging
 import os
 from datetime import date, datetime, time, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
@@ -2399,7 +2399,22 @@ def list_booking_guests(booking_id: int, db: Session = Depends(get_db),
         # The UI shows "Archived (offline)" instead of a viewer button that would only 410.
         "scan_archived": bool(g.id_scan_archived_at),
         "scan_back_archived": bool(g.id_scan_back_archived_at),
+        # A ref whose object never arrived: the desk captured it offline and died, or its queue
+        # was wiped, before the upload synced. Distinct from "archived" (deliberately offline)
+        # and from "no scan" (never captured). Only checked for refs that are not archived, so a
+        # purged scan does not get double-flagged.
+        "scan_missing": _scan_missing(g.id_scan_ref, g.id_scan_archived_at),
+        "scan_back_missing": _scan_missing(g.id_scan_back_ref, g.id_scan_back_archived_at),
     } for g in rows]}
+
+
+def _scan_missing(ref, archived_at) -> bool:
+    if not ref or archived_at:
+        return False
+    try:
+        return secure_id_store.stat_scan(ref) is None
+    except Exception:
+        return False        # storage unreachable is not "missing"; the viewer will say so
 
 
 @router.post("/bookings/{booking_id}/guests/scan")
@@ -2426,6 +2441,69 @@ async def upload_guest_scan(booking_id: int, file: UploadFile = File(...),
     write_audit(db, user, "reception.guest_scan_upload", "booking", booking_id,
                 after={"mime": file.content_type}, client="desktop", commit=True)
     return {"ref": ref, "mime": file.content_type}
+
+
+# Envelopes are ciphertext already, so the cap here is on the sealed size; the plaintext cap
+# is enforced again inside save_scan. RSA header + GCM tag add ~430 bytes, so this is generous.
+_ENVELOPE_MAX_BYTES = 9 * 1024 * 1024
+
+
+@router.post("/bookings/{booking_id}/guests/scan/envelope")
+async def upload_guest_scan_envelope(booking_id: int,
+                                     file: UploadFile = File(...),
+                                     ref: str = Form(...),
+                                     mime: str = Form(...),
+                                     db: Session = Depends(get_db),
+                                     user=Depends(require_reception_or_admin)):
+    """Ingest a scan the desk sealed while OFFLINE (utils/scan_envelope.py).
+
+    The desk chose `ref` at capture time — it had to, because the check-in it queued behind
+    this upload already carries that ref. We verify the ref belongs to this booking, open the
+    envelope, and hand the plaintext to save_scan, which Fernet-wraps it BEFORE the first write.
+    Plaintext exists only in this request's memory.
+
+    Idempotent by ref: if the object is already stored, nothing is rewritten and `already` is
+    true. A desk that lost the 2xx and retries gets the same answer, and the archived sha of an
+    existing object is never invalidated (see save_scan)."""
+    if not db.query(Booking).filter(Booking.booking_id == booking_id).first():
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if not secure_id_store.ref_belongs_to(ref, booking_id):
+        raise HTTPException(status_code=400, detail="ref does not belong to this booking")
+    if not secure_id_store.allowed_mime(mime):
+        raise HTTPException(status_code=400, detail="Unsupported file type (use JPG/PNG/WEBP/PDF)")
+
+    sealed = await file.read()
+    if not sealed:
+        raise HTTPException(status_code=400, detail="empty envelope")
+    if len(sealed) > _ENVELOPE_MAX_BYTES:
+        raise HTTPException(status_code=400, detail="envelope too large")
+
+    from utils import scan_envelope
+    if not scan_envelope.is_configured():
+        raise HTTPException(status_code=503,
+                            detail="Offline scan capture is not configured on the server")
+    try:
+        plaintext = scan_envelope.open_envelope(sealed)
+    except ValueError as e:
+        # A 4xx on purpose: the desk treats it as permanent and cancels the dependent check-in
+        # rather than retrying a corrupt or foreign-key envelope forever.
+        raise HTTPException(status_code=400, detail=f"envelope rejected: {e}")
+
+    already = secure_id_store.stat_scan(ref) is not None
+    try:
+        stored_ref = secure_id_store.save_scan(booking_id, plaintext, mime, ref=ref)
+    except RuntimeError:
+        raise HTTPException(status_code=503,
+                            detail="ID scans cannot be stored right now — check the server log")
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    finally:
+        del plaintext
+
+    write_audit(db, user, "reception.guest_scan_upload", "booking", booking_id,
+                after={"mime": mime, "offline": True, "ref": stored_ref, "already": already},
+                client="desktop", commit=True)
+    return {"ref": stored_ref, "mime": mime, "already": already}
 
 
 @router.get("/bookings/{booking_id}/guests/{guest_id}/scan")
