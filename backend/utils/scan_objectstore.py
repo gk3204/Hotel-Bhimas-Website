@@ -107,12 +107,18 @@ def _get_client():
         endpoint = cfg["endpoint"] or f"https://{cfg['account_id']}.r2.cloudflarestorage.com"
         # Timeouts are the important part: with `uvicorn --workers 2`, a default 60s socket
         # hang during check-in pins a worker and reads as an outage at the desk.
+        #
+        # The retry count is part of that budget, not separate from it. At 3 attempts x 20s a
+        # single stalled put could hold the request for a minute — longer than any desk client
+        # is willing to wait, so the receptionist sees a timeout while the server is still
+        # retrying something it will never get to report. Two attempts bounds the worst case to
+        # roughly 40s and still absorbs a single transient blip, which is what retries are for.
         _client = boto3.client(
             "s3", endpoint_url=endpoint,
             aws_access_key_id=cfg["access_key"], aws_secret_access_key=cfg["secret"],
             region_name="auto",
             config=Config(signature_version="s3v4",
-                          retries={"max_attempts": 3, "mode": "standard"},
+                          retries={"max_attempts": 2, "mode": "standard"},
                           connect_timeout=5, read_timeout=20,
                           s3={"addressing_style": "virtual"}),
         )
