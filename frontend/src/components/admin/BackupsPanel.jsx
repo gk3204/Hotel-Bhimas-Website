@@ -6,46 +6,52 @@
 // stated loudly when it is overdue.
 import React, { useCallback, useEffect, useState } from "react";
 import { FaDownload, FaSyncAlt } from "react-icons/fa";
-import { Card, GhostButton, PrimaryButton, Spinner } from "./BackofficeUI";
-import { downloadBackupNow, getBackupManifest, getBackupStatus } from "../../api/backup";
-
-const fmtBytes = (n) => {
-  if (!n) return "—";
-  const mb = n / (1024 * 1024);
-  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(n / 1024).toFixed(0)} KB`;
-};
-
-const fmtWhen = (iso) => {
-  if (!iso) return "never";
-  const d = new Date(iso.endsWith("Z") ? iso : iso + "Z");
-  return Number.isNaN(d.getTime()) ? iso : d.toLocaleString();
-};
+import { Card, GhostButton, PrimaryButton, Spinner, fmtBytes, fmtWhen } from "./BackofficeUI";
+import {
+  downloadBackupNow, getBackupManifest, getBackupRuns, getBackupStatus, getScansStatus,
+} from "../../api/backup";
+import BackupCustodyPanel from "./BackupCustodyPanel";
+import usePoll from "../../utils/usePoll";
 
 export default function BackupsPanel({ showToast }) {
   const [status, setStatus] = useState(null);
   const [manifest, setManifest] = useState(null);
+  const [scans, setScans] = useState(null);
+  const [runs, setRuns] = useState(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  // One load for both cards. Everything except the DB status is best-effort: an R2 outage or a
+  // backend too old to know about /runs must not blank out the "is the nightly job alive?" card,
+  // which is the one thing this screen exists to answer.
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
     setError("");
     try {
-      const [s, m] = await Promise.all([
+      const [s, m, sc, rr] = await Promise.all([
         getBackupStatus(),
         getBackupManifest().catch(() => null),   // manifest is nice-to-have, status is not
+        getScansStatus().catch(() => null),
+        getBackupRuns(10).catch(() => null),
       ]);
       setStatus(s);
       setManifest(m);
+      setScans(sc);
+      setRuns(rr);
     } catch (e) {
       setError(e.message || "Could not read the backup status.");
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // The one moment this screen is actually watched is while a scheduled run is in flight, and
+  // seeing it flip to green without pressing Refresh is the point. usePoll already skips hidden
+  // tabs and overlapping calls; `silent` keeps the spinner from flashing every minute.
+  usePoll(useCallback(() => load(true), [load]), 60000, { enabled: !busy });
 
   const download = async () => {
     setBusy(true);
@@ -153,6 +159,9 @@ export default function BackupsPanel({ showToast }) {
           )}
         </div>
       </Card>
+
+      {/* The fragment above was always here for a sibling: where the backups actually live. */}
+      <BackupCustodyPanel status={status} scans={scans} runs={runs} loading={loading} />
     </>
   );
 }

@@ -18,6 +18,35 @@ export const money = (v) =>
 
 export const today = () => new Date().toISOString().slice(0, 10);
 export const daysAgo = (n) => new Date(Date.now() - n * 86400000).toISOString().slice(0, 10);
+/** A byte size for humans. "—" for 0/null, because 0 bytes is never a real artifact. */
+export const fmtBytes = (n) => {
+  if (!n) return "—";
+  const mb = n / (1024 * 1024);
+  return mb >= 1 ? `${mb.toFixed(1)} MB` : `${(n / 1024).toFixed(0)} KB`;
+};
+
+/**
+ * A timestamp WITH its time, in the viewer's locale.
+ *
+ * The backend emits `datetime.utcnow().isoformat()` — naive UTC, no offset — so a browser
+ * would otherwise read it as local time and silently shift it by the timezone. Appending "Z"
+ * is that fix, and it belongs next to the other shared formatters rather than in whichever
+ * component needed it first.
+ *
+ * Only append "Z" when the string carries no zone at all: some values (a client machine's own
+ * clock) ARE offset-bearing, and "…+05:30Z" is an Invalid Date that would fall through to the
+ * raw ISO string.
+ *
+ * Returns "never" rather than "—": for a backup, "has not happened" is the whole point.
+ */
+export const fmtWhen = (iso) => {
+  if (!iso) return "never";
+  const s = String(iso);
+  const zoned = /(Z|[+-]\d{2}:?\d{2})$/.test(s);
+  const d = new Date(zoned ? s : s + "Z");
+  return Number.isNaN(d.getTime()) ? s : d.toLocaleString();
+};
+
 /** DD-MM-YYYY, the convention used everywhere in this product. */
 export const fmtDate = (iso) => {
   if (!iso) return "—";

@@ -65,3 +65,26 @@ export async function downloadBackupNow() {
   URL.revokeObjectURL(url);
   return { name, bytes: blob.size, sha256: sha };
 }
+
+// --- ID-scan archive -------------------------------------------------------------------
+//
+// Status only, deliberately. There is no downloadScansNow() and no purge client here, and
+// that is a decision rather than an omission:
+//   * the archive is guest identity documents. A browser download drops them into whatever
+//     machine the admin happens to be on, unencrypted at rest and never re-verified — the
+//     opposite of the custody chain the CLI maintains into one known, encrypted folder.
+//   * a purge from a web button has no verified local archive behind it to justify it, which
+//     is the whole basis on which deletion is allowed at all.
+// If you are here to "finish" this API client, read backend/routers/backup.py first.
+
+/** R2 state plus offsite custody of the ID-scan archive. */
+export async function getScansStatus() {
+  const res = await fetch(`${BASE_URL}/admin/backup/scans/status`, { headers: authHeaders() });
+  return handle(res);
+}
+
+/** Recent confirmed artifacts, newest first: when, where, which machine. */
+export async function getBackupRuns(limit = 10) {
+  const res = await fetch(`${BASE_URL}/admin/backup/runs?limit=${limit}`, { headers: authHeaders() });
+  return handle(res);
+}
