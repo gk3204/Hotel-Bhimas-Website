@@ -72,6 +72,14 @@ to_run.append("033_ota_draft_occupancy.sql")
 to_run.append("034_ota_actual_commission.sql")
 to_run.append("035_menu_availability_windows.sql")
 to_run.append("036_whatsapp_inbox.sql")
+# 037-041 were missing here for the same reason 022-024 once were: the list is hand-maintained
+# and easy to forget. All are idempotent, so appending them is safe on an already-migrated DB.
+# Prefer backend/scripts/run_migrations.py, which globs the directory and cannot drift.
+to_run.append("037_room_lock_type.sql")
+to_run.append("038_room_type_show_on_website.sql")
+to_run.append("039_ota_verification.sql")
+to_run.append("040_id_scan_archived.sql")
+to_run.append("041_backup_runs.sql")
 
 for f in to_run:
     path = os.path.join(BACKEND, "migrations", f)

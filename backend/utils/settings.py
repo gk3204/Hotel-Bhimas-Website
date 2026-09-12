@@ -149,6 +149,10 @@ PORTAL_CONTACTLESS_CHECKOUT_ENABLED_KEY = "portal_contactless_checkout_enabled"
 WIFI_SSID_KEY = "wifi_ssid"
 WIFI_VOUCHER_MODE_KEY = "wifi_voucher_mode"                       # auto (show a per-stay code) | manual (desk issues)
 
+# ⚠️ Backup and scan-archive STATE keys (backup_last_*, backup_offsite_*, scans_last_*,
+# scans_offsite_*) are deliberately ABSENT from this dict. They record what has actually
+# happened, so "never backed up" must read as missing. Seeding them with a value would turn a
+# system that has never run a backup into a permanent, convincing green.
 _DEFAULTS = {
     CASH_CYCLE_KEY: "shift",
     CASH_VARIANCE_THRESHOLD_KEY: "100",

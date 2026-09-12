@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Numeric, Date, Time, ForeignKey, DateTime, TIMESTAMP, Boolean, Float, Index, UniqueConstraint, Text
+from sqlalchemy import Column, Integer, BigInteger, String, Numeric, Date, Time, ForeignKey, DateTime, TIMESTAMP, Boolean, Float, Index, UniqueConstraint, Text
 from sqlalchemy.sql import func
 from database import Base
 from sqlalchemy.orm import relationship
@@ -282,7 +282,7 @@ class AuditLog(Base):
     before = Column(String, nullable=True)           # JSON snapshot before the change (text)
     after = Column(String, nullable=True)            # JSON snapshot after the change (text)
     ip = Column(String(50), nullable=True)
-    client = Column(String(20), nullable=True)       # "desktop" | "web" | "housekeeper" | "system"
+    client = Column(String(20), nullable=True)       # "desktop" | "web" | "housekeeper" | "system" | "cli"
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
 
 
@@ -1381,3 +1381,42 @@ class MenuItem(Base):
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
     updated_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     updated_at = Column(DateTime, nullable=True)
+
+
+class BackupRun(Base):
+    """One backup artifact, as confirmed BY THE MACHINE THAT HOLDS IT.
+
+    This is deliberately not the same fact as `backup_last_success_at` in app_settings. That
+    one is stamped when the SERVER finished producing a dump and began streaming it — before
+    the client has received a byte. A download that dies mid-transfer, fails its checksum and
+    is discarded still leaves that timestamp looking healthy. Only the machine that renamed a
+    verified file into place can assert custody, so only it writes rows here.
+
+    Roughly 420 rows a year (nightly dump + weekly scan archive); no pruner needed.
+    """
+    __tablename__ = "backup_runs"
+    id = Column(Integer, primary_key=True, index=True)
+    run_id = Column(String(40), nullable=False, index=True)   # one GUID per CLI process
+    kind = Column(String(20), nullable=False, index=True)     # database | scans
+    outcome = Column(String(20), nullable=False)              # ok | failed
+    machine = Column(String(100))                             # Environment.MachineName
+    folder = Column(String(400))
+    filename = Column(String(200))
+    # BigInteger, not Integer: a plain int overflows at 2.1 GB and a hotel database will pass
+    # that eventually.
+    size_bytes = Column(BigInteger)
+    sha256 = Column(String(64))
+    item_count = Column(Integer)                              # scans only
+    # The client's own clock, stored verbatim and shown only as "the machine said". Health is
+    # never computed from it — a wrong clock on the admin PC would otherwise make the panel lie.
+    client_local_time = Column(String(40))
+    started_at = Column(DateTime)
+    finished_at = Column(DateTime, index=True)                # server receipt time: authoritative
+    detail = Column(String(500))
+    tool_version = Column(String(40))
+    reported_by = Column(Integer, ForeignKey("users.user_id"))
+    ip = Column(String(50))
+    created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+
+    # A retried report is an update, not a duplicate row.
+    __table_args__ = (UniqueConstraint("run_id", "kind", name="uq_backup_runs_run_kind"),)

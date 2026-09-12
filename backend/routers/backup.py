@@ -23,6 +23,7 @@ their IP, and rate-limited to one per hour — the limit lives in `app_settings`
 memory, because uvicorn runs with `--workers 4` and an in-memory counter would allow four.
 """
 import hashlib
+import re
 import json
 import logging
 import os
@@ -36,14 +37,14 @@ from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 from starlette.background import BackgroundTask
 
 from database import SessionLocal
-from models import (Booking, BookingGuest, Folio, FolioCharge, Guest, Invoice,
-                    Payment, Room, User)
+from models import (Booking, BookingGuest, BackupRun, Folio, FolioCharge, Guest,
+                    Invoice, Payment, Room, User)
 from utils import scan_objectstore, secure_id_store
 from utils.audit import write_audit
 from utils.auth_utils import require_admin
@@ -59,6 +60,18 @@ LAST_SUCCESS_AT_KEY = "backup_last_success_at"      # ISO-8601, set only on a co
 LAST_SUCCESS_BY_KEY = "backup_last_success_by"
 LAST_SUCCESS_BYTES_KEY = "backup_last_success_bytes"
 LAST_SUCCESS_SHA_KEY = "backup_last_success_sha256"
+
+# Custody: written ONLY by the client, and only once a verified copy exists on its disk.
+OFFSITE_AT_KEY = "backup_offsite_last_at"
+OFFSITE_MACHINE_KEY = "backup_offsite_machine"
+OFFSITE_FOLDER_KEY = "backup_offsite_folder"
+OFFSITE_FILENAME_KEY = "backup_offsite_filename"
+OFFSITE_BYTES_KEY = "backup_offsite_bytes"
+OFFSITE_SHA_KEY = "backup_offsite_sha256"
+OFFSITE_OUTCOME_KEY = "backup_offsite_outcome"
+
+LAST_FAILURE_AT_KEY = "backup_last_failure_at"
+LAST_FAILURE_REASON_KEY = "backup_last_failure_reason"
 
 MIN_INTERVAL = timedelta(hours=1)
 DUMP_TIMEOUT_SECONDS = 900          # 15 min: a stuck pg_dump must not pin a worker forever
@@ -114,6 +127,42 @@ def _rate_limit_check(db: Session, key: str = LAST_EXPORT_AT_KEY, what: str = "b
             detail=f"A {what} was taken less than an hour ago. Try again in {mins} minute(s).")
 
 
+def _release_rate_limit_slot(db: Session, key: str, user=None) -> None:
+    """Hand the once-an-hour slot back after work that FAILED.
+
+    The slot is deliberately claimed before the work starts, so two simultaneous requests
+    cannot both run pg_dump. The cost was that a transient failure then locked out retries
+    for an hour. Releasing it on failure keeps the concurrency guard and drops the lockout.
+
+    Writes "" rather than deleting the row: `_parse_dt("")` is None, and none of these keys
+    are in settings._DEFAULTS, so an empty value reads exactly like "never" — and there is
+    no delete_setting helper to add.
+
+    NOTE: do NOT be tempted to replace the app_settings claim with a Postgres advisory lock.
+    The dump runs for minutes across a commit, so it would have to be a SESSION-scoped lock —
+    precisely the pooled-connection stranding that already broke the purge path once (see the
+    comment above `_PURGE_LOCK_KEY`). A settings row survives connection churn; a session lock
+    does not.
+    """
+    try:
+        # The failure may have left the session in a broken transaction, in which case the
+        # release write would itself throw. Roll back first.
+        db.rollback()
+        set_setting(db, key, "", user=user, commit=True)
+    except Exception:
+        logger.error("could not release the %s rate-limit slot", key, exc_info=True)
+
+
+def _record_failure(db: Session, at_key: str, reason_key: str, reason: str, user=None) -> None:
+    """Leave a breadcrumb the web panel can show. Without this a failed export is visible
+    only in the Railway logs, which the owner has no reason to be reading."""
+    try:
+        set_setting(db, at_key, datetime.utcnow().isoformat(), user=user)
+        set_setting(db, reason_key, (reason or "")[:300], user=user, commit=True)
+    except Exception:
+        logger.error("could not record the %s failure breadcrumb", at_key, exc_info=True)
+
+
 def _row_counts(db: Session) -> dict:
     """A cheap sanity check for the person holding the file: a dump of an empty database
     looks exactly like a dump of a full one until you restore it."""
@@ -135,14 +184,64 @@ def _server_version(db: Session) -> str | None:
         return None
 
 
+def _offsite_block(db: Session, keys: dict, stale_hours: int) -> dict:
+    """Where the last VERIFIED copy of this artifact actually lives.
+
+    Reported by the client after it renamed a checksum-verified file into place — the only
+    party that can honestly assert a copy exists off the server. `age_hours` is measured from
+    the SERVER's receipt time, never the client's clock, so a wrong clock on the admin PC
+    cannot make this read healthy (or falsely stale)."""
+    at = _parse_dt(get_setting(db, keys["at"]))
+    age_hours = None
+    if at:
+        age_hours = round((datetime.utcnow() - at).total_seconds() / 3600, 1)
+    block = {
+        "reported": at is not None,
+        "last_at": at.isoformat() if at else None,
+        "machine": get_setting(db, keys["machine"]),
+        "folder": get_setting(db, keys["folder"]),
+        "filename": get_setting(db, keys["filename"]),
+        "bytes": int(get_setting(db, keys["bytes"]) or 0) or None,
+        "sha256": get_setting(db, keys["sha"]),
+        "outcome": get_setting(db, keys["outcome"]),
+        "age_hours": age_hours,
+        "stale": at is None or age_hours is None or age_hours > stale_hours,
+        "stale_hours": stale_hours,
+    }
+    if "count" in keys:
+        block["count"] = int(get_setting(db, keys["count"]) or 0) or None
+    return block
+
+
+_DB_OFFSITE_KEYS = {"at": OFFSITE_AT_KEY, "machine": OFFSITE_MACHINE_KEY,
+                    "folder": OFFSITE_FOLDER_KEY, "filename": OFFSITE_FILENAME_KEY,
+                    "bytes": OFFSITE_BYTES_KEY, "sha": OFFSITE_SHA_KEY,
+                    "outcome": OFFSITE_OUTCOME_KEY}
+
+
 @router.get("/status", dependencies=[Depends(require_admin)])
 def backup_status(db: Session = Depends(get_db)):
     """Is the nightly backup still running? The failure mode this exists to prevent is a job
-    that quietly stopped weeks ago and is discovered at restore time."""
+    that quietly stopped weeks ago and is discovered at restore time.
+
+    Two different facts live here, and conflating them is how a broken backup reads green:
+      * `last_success_*` — the SERVER produced a dump and began streaming it.
+      * `offsite` — a verified copy exists on a named machine, at a named path.
+    Health follows `offsite` whenever the client has ever reported. Until then it falls back
+    to the server-side view, so an up-to-date backend with an old CLI is not permanently red."""
     last_success = _parse_dt(get_setting(db, LAST_SUCCESS_AT_KEY))
     age_hours = None
     if last_success:
         age_hours = round((datetime.utcnow() - last_success).total_seconds() / 3600, 1)
+
+    offsite = _offsite_block(db, _DB_OFFSITE_KEYS, 36)
+    # Informational only, never an alarm: the server legitimately produces a newer dump than
+    # the one on the admin PC the moment anyone presses "Download backup now".
+    sha_matches = None
+    if offsite["sha256"] and get_setting(db, LAST_SUCCESS_SHA_KEY):
+        sha_matches = offsite["sha256"] == get_setting(db, LAST_SUCCESS_SHA_KEY)
+
+    server_stale = last_success is None or age_hours is None or age_hours > 36
     return {
         "last_success_at": last_success.isoformat() if last_success else None,
         "last_success_by": get_setting(db, LAST_SUCCESS_BY_KEY),
@@ -150,8 +249,12 @@ def backup_status(db: Session = Depends(get_db)):
         "last_success_sha256": get_setting(db, LAST_SUCCESS_SHA_KEY),
         "age_hours": age_hours,
         # A nightly job that has not run for over 36 hours has missed at least one night.
-        "stale": last_success is None or age_hours is None or age_hours > 36,
+        "stale": offsite["stale"] if offsite["reported"] else server_stale,
+        "server_stale": server_stale,
         "pg_dump_available": shutil.which("pg_dump") is not None,
+        "offsite": {**offsite, "sha_matches_server": sha_matches},
+        "last_failure_at": get_setting(db, LAST_FAILURE_AT_KEY),
+        "last_failure_reason": get_setting(db, LAST_FAILURE_REASON_KEY),
     }
 
 
@@ -229,7 +332,7 @@ def backup_export(request: Request, db: Session = Depends(get_db),
         write_audit(db, user, "backup.export", "database", None,
                     after={"filename": filename, "bytes": size, "sha256": digest,
                            "took_seconds": round((datetime.utcnow() - started).total_seconds(), 1)},
-                    ip=ip, client="web", commit=True)
+                    ip=ip, client=_client_kind(request), commit=True)
         logger.info("💾 Database backup exported by %s from %s — %s bytes",
                     (user or {}).get("sub"), ip, size)
 
@@ -246,13 +349,23 @@ def backup_export(request: Request, db: Session = Depends(get_db),
             background=BackgroundTask(_cleanup, tmp_path),
         )
     except subprocess.TimeoutExpired:
+        # Released on timeout too: the CLI retries once a night and the web button is a human,
+        # so an hour's lockout after a transient stall is the complaint this fixes.
+        _release_rate_limit_slot(db, LAST_EXPORT_AT_KEY, user)
+        _record_failure(db, LAST_FAILURE_AT_KEY, LAST_FAILURE_REASON_KEY,
+                        f"pg_dump timed out after {DUMP_TIMEOUT_SECONDS}s", user)
         _cleanup(tmp_path)
         logger.error("pg_dump timed out after %ss", DUMP_TIMEOUT_SECONDS)
         raise HTTPException(status_code=504, detail="The database dump timed out.")
-    except HTTPException:
+    except HTTPException as e:
+        _release_rate_limit_slot(db, LAST_EXPORT_AT_KEY, user)
+        _record_failure(db, LAST_FAILURE_AT_KEY, LAST_FAILURE_REASON_KEY,
+                        getattr(e, "detail", "The database dump failed."), user)
         _cleanup(tmp_path)
         raise
     except Exception as e:
+        _release_rate_limit_slot(db, LAST_EXPORT_AT_KEY, user)
+        _record_failure(db, LAST_FAILURE_AT_KEY, LAST_FAILURE_REASON_KEY, str(e), user)
         _cleanup(tmp_path)
         logger.error("backup export failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="The backup export failed.")
@@ -282,6 +395,20 @@ SCANS_LAST_SUCCESS_AT_KEY = "scans_last_success_at"
 SCANS_LAST_SUCCESS_COUNT_KEY = "scans_last_success_count"
 SCANS_LAST_SUCCESS_SHA_KEY = "scans_last_success_sha256"
 SCANS_LAST_PURGE_AT_KEY = "scans_last_purge_at"
+SCANS_OFFSITE_AT_KEY = "scans_offsite_last_at"
+SCANS_OFFSITE_MACHINE_KEY = "scans_offsite_machine"
+SCANS_OFFSITE_FOLDER_KEY = "scans_offsite_folder"
+SCANS_OFFSITE_FILENAME_KEY = "scans_offsite_filename"
+SCANS_OFFSITE_BYTES_KEY = "scans_offsite_bytes"
+SCANS_OFFSITE_SHA_KEY = "scans_offsite_sha256"
+SCANS_OFFSITE_COUNT_KEY = "scans_offsite_count"
+SCANS_OFFSITE_OUTCOME_KEY = "scans_offsite_outcome"
+
+# The scan archive runs WEEKLY, so the dump's 36-hour rule would flag a healthy job every time.
+SCANS_STALE_HOURS = 192   # 8 days
+
+SCANS_LAST_FAILURE_AT_KEY = "scans_last_failure_at"
+SCANS_LAST_FAILURE_REASON_KEY = "scans_last_failure_reason"
 
 # Nothing may be deleted from object storage until it is at least this old, regardless of what
 # any client asks for. Enforced server-side in the purge path (stage 4).
@@ -341,6 +468,21 @@ def _naive(dt):
     return dt.replace(tzinfo=None) if getattr(dt, "tzinfo", None) else dt
 
 
+_SCANS_OFFSITE_KEYS = {"at": SCANS_OFFSITE_AT_KEY, "machine": SCANS_OFFSITE_MACHINE_KEY,
+                       "folder": SCANS_OFFSITE_FOLDER_KEY, "filename": SCANS_OFFSITE_FILENAME_KEY,
+                       "bytes": SCANS_OFFSITE_BYTES_KEY, "sha": SCANS_OFFSITE_SHA_KEY,
+                       "outcome": SCANS_OFFSITE_OUTCOME_KEY, "count": SCANS_OFFSITE_COUNT_KEY}
+
+
+def _client_kind(request: Request | None) -> str:
+    """Browser or nightly job? Both hold an admin JWT, so only the User-Agent separates them.
+
+    `client="web"` used to be hard-coded on these audit rows, which quietly mislabelled every
+    unattended run as a person clicking a button."""
+    ua = (request.headers.get("user-agent") or "") if request is not None else ""
+    return "cli" if ua.startswith("BhimasBackup/") else "web"
+
+
 @router.get("/scans/status", dependencies=[Depends(require_admin)])
 def scans_status(db: Session = Depends(get_db)):
     """Health of the ID-scan archive.
@@ -366,6 +508,7 @@ def scans_status(db: Session = Depends(get_db)):
     age_hours = None
     if last_ok:
         age_hours = round((datetime.utcnow() - last_ok).total_seconds() / 3600.0, 1)
+    offsite = _offsite_block(db, _SCANS_OFFSITE_KEYS, SCANS_STALE_HOURS)
     return {
         "backend": backend,
         "storage_ready": secure_id_store.storage_ready(),
@@ -383,6 +526,12 @@ def scans_status(db: Session = Depends(get_db)):
         "purge_enabled": (os.getenv("SCAN_PURGE_ENABLED", "false").strip().lower()
                           in ("1", "true", "yes")),
         "error": error,
+        # Weekly job, so 8 days — not the dump's 36 hours.
+        "stale": offsite["stale"] if offsite["reported"] else (
+            last_ok is None or age_hours is None or age_hours > SCANS_STALE_HOURS),
+        "offsite": offsite,
+        "last_failure_at": get_setting(db, SCANS_LAST_FAILURE_AT_KEY),
+        "last_failure_reason": get_setting(db, SCANS_LAST_FAILURE_REASON_KEY),
     }
 
 
@@ -506,7 +655,7 @@ def scans_export(request: Request, db: Session = Depends(get_db),
         write_audit(db, user, "backup.scans_export", "id_scans", None,
                     after={"batch_id": batch_id, "count": len(members), "bytes": size,
                            "sha256": digest},
-                    ip=ip, client="web", commit=True)
+                    ip=ip, client=_client_kind(request), commit=True)
         logger.info("🗄️ ID scan archive exported by %s from %s — %s scans, %s bytes",
                     (user or {}).get("sub"), ip, len(members), size)
 
@@ -523,10 +672,15 @@ def scans_export(request: Request, db: Session = Depends(get_db),
             },
             background=BackgroundTask(_cleanup, tmp_path),
         )
-    except HTTPException:
+    except HTTPException as e:
+        _release_rate_limit_slot(db, SCANS_LAST_EXPORT_AT_KEY, user)
+        _record_failure(db, SCANS_LAST_FAILURE_AT_KEY, SCANS_LAST_FAILURE_REASON_KEY,
+                        getattr(e, "detail", "The scan archive export failed."), user)
         _cleanup(tmp_path)
         raise
     except Exception as e:
+        _release_rate_limit_slot(db, SCANS_LAST_EXPORT_AT_KEY, user)
+        _record_failure(db, SCANS_LAST_FAILURE_AT_KEY, SCANS_LAST_FAILURE_REASON_KEY, str(e), user)
         _cleanup(tmp_path)
         logger.error("scan archive export failed: %s", e, exc_info=True)
         raise HTTPException(status_code=500, detail="The scan archive export failed.")
@@ -696,7 +850,7 @@ def scans_purge(payload: PurgeRequest, request: Request, db: Session = Depends(g
                 after={"batch_id": payload.batch_id, "requested": len(payload.refs),
                        "deleted": len(deleted_refs), "skipped": skipped,
                        "forced": payload.force, "refs_deleted": deleted_refs},
-                ip=ip, client="web", commit=True)
+                ip=ip, client=_client_kind(request), commit=True)
     logger.warning("🗑️ purge by %s from %s — %s deleted, %s skipped (batch %s)",
                    (user or {}).get("sub"), ip, len(deleted_refs), sum(skipped.values()),
                    payload.batch_id)
@@ -718,3 +872,136 @@ def _stamp_archived(db: Session, owner: dict | None) -> None:
         g.id_scan_back_archived_at = datetime.utcnow()
     else:
         g.id_scan_archived_at = datetime.utcnow()
+
+
+# =========================================================================================
+# Custody reporting
+#
+# The server can say "I produced a dump". Only the machine that renamed a checksum-verified
+# file into place can say "a copy exists, here, on me". Those are different facts, and the
+# gap between them is a real failure mode: a download that dies mid-transfer and is discarded
+# still leaves the server's own timestamp looking healthy.
+#
+# So the client reports back, and the panel's health follows THIS, not the server's view.
+# =========================================================================================
+
+_SHA_RE = re.compile(r"^[0-9a-f]{64}$")
+
+_REPORT_KEYS = {
+    "database": {**_DB_OFFSITE_KEYS,
+                 "fail_at": LAST_FAILURE_AT_KEY, "fail_reason": LAST_FAILURE_REASON_KEY},
+    "scans": {**_SCANS_OFFSITE_KEYS,
+              "fail_at": SCANS_LAST_FAILURE_AT_KEY, "fail_reason": SCANS_LAST_FAILURE_REASON_KEY},
+}
+
+
+class BackupReportIn(BaseModel):
+    run_id: str = Field(max_length=40)
+    kind: str                                   # database | scans
+    outcome: str                                # ok | failed
+    machine: str = Field(default="", max_length=100)
+    folder: str = Field(default="", max_length=400)
+    filename: str | None = Field(default=None, max_length=200)
+    bytes: int | None = None
+    sha256: str | None = Field(default=None, max_length=64)
+    count: int | None = None                    # scans only
+    started_at: str | None = Field(default=None, max_length=40)
+    finished_at: str | None = Field(default=None, max_length=40)
+    tool_version: str | None = Field(default=None, max_length=40)
+    detail: str | None = Field(default=None, max_length=500)
+
+
+@router.post("/report")
+def backup_report(payload: BackupReportIn, request: Request,
+                  db: Session = Depends(get_db), user=Depends(require_admin)):
+    """The client confirming what it actually holds.
+
+    ⚠️ `require_admin` is not optional here and the router carries no default gate: an open
+    endpoint would let anyone forge a green backup status, which is worse than having no
+    status at all."""
+    kind = (payload.kind or "").strip().lower()
+    outcome = (payload.outcome or "").strip().lower()
+    if kind not in _REPORT_KEYS:
+        raise HTTPException(status_code=422, detail='kind must be "database" or "scans".')
+    if outcome not in ("ok", "failed"):
+        raise HTTPException(status_code=422, detail='outcome must be "ok" or "failed".')
+
+    sha = (payload.sha256 or "").strip().lower() or None
+    if outcome == "ok":
+        # A success claim without a real checksum and a real size is not evidence of custody.
+        if not sha or not _SHA_RE.match(sha):
+            raise HTTPException(status_code=422, detail="A successful report needs a sha256.")
+        if not payload.bytes or payload.bytes <= 0:
+            raise HTTPException(status_code=422, detail="A successful report needs bytes > 0.")
+
+    keys = _REPORT_KEYS[kind]
+    # Server receipt time is authoritative. The client's own clock is recorded separately and
+    # only ever displayed, so a wrong clock on the admin PC cannot fake freshness.
+    now = datetime.utcnow()
+    ip = _client_ip(request)
+
+    if outcome == "ok":
+        set_setting(db, keys["at"], now.isoformat(), user=user)
+        set_setting(db, keys["machine"], payload.machine or "", user=user)
+        set_setting(db, keys["folder"], payload.folder or "", user=user)
+        set_setting(db, keys["filename"], payload.filename or "", user=user)
+        set_setting(db, keys["bytes"], str(payload.bytes or 0), user=user)
+        set_setting(db, keys["sha"], sha or "", user=user)
+        if "count" in keys:
+            set_setting(db, keys["count"], str(payload.count or 0), user=user)
+        set_setting(db, keys["outcome"], "ok", user=user, commit=True)
+    else:
+        # ⚠️ A failed report must NEVER touch the offsite keys. If it did, a run that failed
+        # would refresh "last verified copy" and read as recent. The truth we want on screen is
+        # "last good copy: Tuesday on OWNER-PC — and the last attempt failed 20 minutes ago",
+        # which needs both records to survive independently of each other.
+        _record_failure(db, keys["fail_at"], keys["fail_reason"],
+                        payload.detail or "The client reported a failure.", user)
+
+    # History. (run_id, kind) is unique, so a retried POST updates rather than duplicating.
+    row = (db.query(BackupRun)
+           .filter(BackupRun.run_id == payload.run_id, BackupRun.kind == kind).first())
+    duplicate = row is not None
+    if row is None:
+        row = BackupRun(run_id=payload.run_id, kind=kind)
+        db.add(row)
+    row.outcome = outcome
+    row.machine = payload.machine or None
+    row.folder = payload.folder or None
+    row.filename = payload.filename
+    row.size_bytes = payload.bytes
+    row.sha256 = sha
+    row.item_count = payload.count
+    row.client_local_time = payload.finished_at or payload.started_at
+    row.started_at = _parse_dt((payload.started_at or "").replace("Z", ""))
+    row.finished_at = now
+    row.detail = (payload.detail or None)
+    row.tool_version = payload.tool_version
+    row.ip = ip
+    db.commit()
+
+    write_audit(db, user, "backup.report", "backup_run", row.id,
+                after={"kind": kind, "outcome": outcome, "machine": payload.machine,
+                       "folder": payload.folder, "filename": payload.filename,
+                       "bytes": payload.bytes, "sha256": sha},
+                ip=ip, client=_client_kind(request), commit=True)
+    logger.info("📥 backup report: %s %s from %s (%s)", kind, outcome, payload.machine, ip)
+    return {"recorded": True, "duplicate": duplicate, "kind": kind, "outcome": outcome}
+
+
+@router.get("/runs", dependencies=[Depends(require_admin)])
+def backup_runs(db: Session = Depends(get_db), kind: str | None = None, limit: int = 20):
+    """Recent confirmed artifacts, newest first — the when / where / which-machine history."""
+    limit = max(1, min(int(limit), 100))
+    q = db.query(BackupRun)
+    if kind in _REPORT_KEYS:
+        q = q.filter(BackupRun.kind == kind)
+    rows = q.order_by(BackupRun.finished_at.desc().nullslast(), BackupRun.id.desc()).limit(limit).all()
+    return {"count": len(rows), "runs": [{
+        "id": r.id, "run_id": r.run_id, "kind": r.kind, "outcome": r.outcome,
+        "machine": r.machine, "folder": r.folder, "filename": r.filename,
+        "bytes": r.size_bytes, "sha256": r.sha256, "count": r.item_count,
+        "client_local_time": r.client_local_time,
+        "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+        "detail": r.detail, "tool_version": r.tool_version,
+    } for r in rows]}
