@@ -212,11 +212,19 @@ export default function RoomService() {
     [cart],
   );
 
+  // v5k: live search over the dish list (name / description / category). The cart total and
+  // count above keep summing the WHOLE menu, so filtering never hides what is already in it.
+  const [search, setSearch] = useState("");
   const byCategory = useMemo(() => {
+    const q = search.trim().toLowerCase();
     const g = {};
-    for (const m of menu) (g[m.category] ||= []).push(m);
+    for (const m of menu) {
+      if (q && !`${m.name} ${m.description || ""} ${m.category || ""}`.toLowerCase().includes(q)) continue;
+      (g[m.category] ||= []).push(m);
+    }
     return g;
-  }, [menu]);
+  }, [menu, search]);
+  const noMatches = menu.length > 0 && Object.keys(byCategory).length === 0;
 
   // v4b5 (R1): ONE press — order, kitchen docket, charge and guest bill.
   // Staff are standing at the counter with the guest, so the old two-step "place now, come
@@ -483,6 +491,22 @@ export default function RoomService() {
               <p className="text-slate-500 text-xs mt-2">Nobody is checked in right now.</p>
             )}
           </div>
+
+          <div className="relative">
+            <input value={search} onChange={(e) => setSearch(e.target.value)}
+                   aria-label="Search dishes"
+                   placeholder="Search dishes by name or category…"
+                   className="w-full px-3 py-3 pr-11 bg-slate-800/60 border border-slate-700 rounded-xl text-white text-lg" />
+            {search && (
+              <button type="button" onClick={() => setSearch("")} aria-label="Clear search"
+                      className="absolute right-2 top-1/2 -translate-y-1/2 w-9 h-9 rounded-lg bg-slate-700 hover:bg-slate-600 text-slate-200">
+                ×
+              </button>
+            )}
+          </div>
+          {noMatches && (
+            <div className="p-6 text-center text-slate-400">No dishes match &ldquo;{search.trim()}&rdquo;.</div>
+          )}
 
           {Object.entries(byCategory).map(([cat, items]) => (
             <div key={cat}>
