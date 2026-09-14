@@ -147,12 +147,14 @@ export function BillSheet({ bill, onDone }) {
       <Rule solid />
       <Row cols={BILL_COLS} cells={["ITEM", "QTY", "RATE", "AMT"]} bold size="10px" />
       <Rule />
+      {/* Rate is the ex-GST menu price; AMT is the line WITH its GST (same convention as the invoice). */}
       {items.map((it, i) => (
         <Row key={i} cols={BILL_COLS}
-          cells={[it.name, Number(it.qty || 0).toLocaleString("en-IN"), fmt2(it.unit_price), fmt2(it.amount)]} />
+          cells={[it.name, Number(it.qty || 0).toLocaleString("en-IN"), fmt2(it.unit_price),
+            fmt2(it.line_total != null ? it.line_total : it.amount)]} />
       ))}
       <Rule />
-      <Kv k="Subtotal (excl. GST)" v={money(subtotal)} />
+      <Kv k="Taxable value (excl. GST)" v={money(subtotal)} />
       {gstRows.map((r, i) => (
         <React.Fragment key={i}>
           <Kv k={`CGST ${(r.percent / 2)}%`} v={money(r.cgst)} size="10px" />
@@ -162,6 +164,7 @@ export function BillSheet({ bill, onDone }) {
       {gstRows.length === 0 && gstTotal > 0 && <Kv k="GST" v={money(gstTotal)} size="10px" />}
       <Rule solid />
       <Kv k="TOTAL" v={money(total)} bold size="14px" />
+      <div style={{ fontSize: "9px", textAlign: "right" }}>Rate before GST · Amounts include GST</div>
       <Rule solid />
       <div style={{ textAlign: "center", fontWeight: "bold" }}>CHARGED TO ROOM</div>
       <div style={{ textAlign: "center", fontSize: "10px", marginTop: "2px" }}>
