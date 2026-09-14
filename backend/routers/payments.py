@@ -765,10 +765,13 @@ def _mark_payment_paid(db: Session, payment: Payment, gateway_payment_id, method
     if folio and folio.status == "open":
         fee = float(payment.convenience_fee_amount or 0)
         if fee > 0:
+            # v5i: the fee already carries GST at the configured rate (default 18%), so file it in
+            # that slab instead of 0% — otherwise the GST invoice shows a spurious "0%" row.
+            fee_gst = get_desk_pay_config(db)["fee_gst_percent"]
             db.add(FolioCharge(
                 folio_id=folio.id, type="misc",
                 description=f"Convenience fee ({payment.collect_method or payment.method})",
-                qty=1, unit_price=fee, amount=fee, gst_percent=0,
+                qty=1, unit_price=fee, amount=fee, gst_percent=fee_gst,
                 posted_by=payment.collected_by))
         amt = round(float(payment.amount or 0), 2)
         ref = f" ({gateway_payment_id})" if gateway_payment_id else ""

@@ -569,7 +569,11 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # v4b1: "paid" includes a prepayment collected by the channel that sold the stay.
         # An OTA booking has no Payment row (MakeMyTrip took the money), so this gate used to
         # refuse every OTA guest at check-in.
-        if total_paid_including_prepaid(db, booking.booking_id) <= 0:
+        # v5i: a complimentary stay ('all' = everything free, 'room' = room free, extras billed
+        # later) has nothing to collect at check-in, so — like a prepaid channel booking — it
+        # is not asked for money. The owner's OTP already approved the comp itself.
+        is_comp = (getattr(booking, "comp_mode", "none") or "none") in ("all", "room")
+        if not is_comp and total_paid_including_prepaid(db, booking.booking_id) <= 0:
             raise HTTPException(status_code=409,
                                 detail="No payment recorded for this booking — record a desk payment first")
 

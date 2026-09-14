@@ -852,11 +852,38 @@ def cashier_summary_data(db, day):
     Paid-outs, with per-row Bill/Vou no, room, guest, receipt, payment, balance, CR no, remarks, user.
     Plus per-mode totals, a grand total, unsettled checkout bills, and nil-amount checkouts. Uses our
     invoice + payment ids for the bill/voucher references."""
-    from models import Folio
-    from routers.folio import _get_invoice
     pays = (db.query(Payment).filter(Payment.status == "paid",
                                      func.date(Payment.created_at) == day)
             .order_by(Payment.created_at).all())
+    out = _cashier_summary_core(db, receipts=pays, refunds=pays, checkouts_day=day)
+    return {"day": str(day), **out}
+
+
+def cashier_summary_for_shift(db, shift):
+    """v5i: the same cashier rows scoped to ONE cash shift, for the close-shift report — every
+    receipt and paid-out the shift handled, whatever the payment mode. Money-IN is attributed by
+    Payment.shift_id (plus cash_shift's time-window fallback for pre-v3 rows without one), money-OUT
+    by Payment.refund_shift_id — the same rules _totals_by_method uses, so the rows reconcile with
+    the method totals printed above them. No unsettled/nil sections (those are day concepts)."""
+    from routers.cash_shift import _method_window
+    from sqlalchemy import and_, or_
+    receipts = (db.query(Payment)
+                .filter(Payment.status == "paid",
+                        or_(Payment.shift_id == shift.id, and_(*_method_window(shift))))
+                .order_by(Payment.created_at).all())
+    refunds = (db.query(Payment)
+               .filter(Payment.refund_status == "completed", Payment.refund_shift_id == shift.id)
+               .order_by(Payment.payment_id).all())
+    out = _cashier_summary_core(db, receipts=receipts, refunds=refunds, checkouts_day=None)
+    return {"shift_id": shift.id, **out}
+
+
+def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
+    """Shared body of the two cashier summaries. `receipts` = paid Payment rows to list as
+    check-out bills / advances; `refunds` = Payment rows whose completed refund is a paid-out.
+    `checkouts_day` adds the unsettled / nil-amount checkout sections for that calendar day."""
+    from models import Folio
+    from routers.folio import _get_invoice
     rcache = {}   # booking_id -> room label
     modes = {}    # mode -> {section -> [rows], "receipt","payment"}
 
@@ -871,21 +898,27 @@ def cashier_summary_data(db, day):
         room = _booking_room_label(db, p.booking_id, rcache) if p.booking_id else "—"
         return b, guest, folio, room
 
-    for p in pays:
-        m = (p.method or "other")
+    def _base(p, at):
         b, guest, folio, room = _ctx(p)
+        return b, folio, {
+            "date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
+            "room": room, "guest": guest.name if guest else None, "booking_id": p.booking_id,
+            "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
+            # CR No = the card/UPI transaction reference (gateway txn id), blank for manual cash.
+            # (client_ref is the desk's offline-outbox dedupe UUID — internal, not a cashier ref.)
+            "cr_no": p.payment_id_gateway or "",
+            "user": _user_name(db, p.collected_by)}
+
+    for p in receipts:
+        m = (p.method or "other")
         at = p.created_at
-        base = {"date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
-                "room": room, "guest": guest.name if guest else None,
-                "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
-                # CR No = the card/UPI transaction reference (gateway txn id), blank for manual cash.
-                # (client_ref is the desk's offline-outbox dedupe UUID — internal, not a cashier ref.)
-                "cr_no": p.payment_id_gateway or "",
-                "user": _user_name(db, p.collected_by)}
+        b, folio, base = _base(p, at)
         amt = float(p.amount or 0)
         if amt:
-            is_checkout = bool(b and b.checked_out_at and b.checked_out_at.date() == day
-                               and at and at >= b.checked_out_at)
+            # A receipt taken at/after the guest's checkout moment settles their bill; earlier
+            # ones are advances. (Relaxed from "checked out the same day" so a bill settled the
+            # morning after still files as a check-out bill on that day's/shift's summary.)
+            is_checkout = bool(b and b.checked_out_at and at and at >= b.checked_out_at)
             mm = _mode(m)
             if is_checkout:
                 inv = _get_invoice(db, folio.id) if folio else None
@@ -897,9 +930,12 @@ def cashier_summary_data(db, day):
                 mm["advance"].append({**base, "bill_no": f"RCPT-{p.payment_id}",
                                       "receipt": round(amt, 2), "payment": 0.0, "remarks": "ADVANCE"})
             mm["receipt"] += amt
+
+    for p in refunds:
         rf = float(p.refund_amount or 0)
         if rf and p.refund_status == "completed":
-            mm = _mode(p.refund_mode or m)
+            _, _, base = _base(p, p.created_at)
+            mm = _mode(p.refund_mode or (p.method or "other"))
             # Match the printed refund-voucher number; CR No = the refund's own payout reference.
             mm["paidout"].append({**base, "bill_no": f"RFND-{p.payment_id}",
                                   "cr_no": p.refund_reference or "",
@@ -922,9 +958,11 @@ def cashier_summary_data(db, day):
 
     # checked out today: unsettled (folio balance != 0) vs nil-amount (settled, no receipt today)
     unsettled, nil_checkouts = [], []
-    receipted_bookings = {p.booking_id for p in pays if float(p.amount or 0)}
-    for b in db.query(Booking).filter(Booking.status == "checked_out",
-                                      func.date(Booking.checked_out_at) == day).all():
+    receipted_bookings = {p.booking_id for p in receipts if float(p.amount or 0)}
+    checkouts = (db.query(Booking).filter(Booking.status == "checked_out",
+                                          func.date(Booking.checked_out_at) == checkouts_day).all()
+                 if checkouts_day else [])
+    for b in checkouts:
         f = db.query(Folio).filter(Folio.booking_id == b.booking_id).first()
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
         room = _booking_room_label(db, b.booking_id, rcache)
@@ -938,7 +976,7 @@ def cashier_summary_data(db, day):
         elif b.booking_id not in receipted_bookings:
             nil_checkouts.append(rowc)
 
-    return {"day": str(day), "modes": mode_rows, "grand": grand,
+    return {"modes": mode_rows, "grand": grand,
             "unsettled": unsettled, "nil_checkouts": nil_checkouts}
 
 
@@ -958,7 +996,8 @@ def _cashier_table(data):
         for sec in md["sections"]:
             rows.append({"section": f"   {sec['label']}"})
             for x in sec["rows"]:
-                rows.append([x["bill_no"], x["date"], x["time"], x["room"], x["guest"] or "",
+                guest = " · ".join(str(v) for v in (x.get("guest"), f"#{x['booking_id']}" if x.get("booking_id") else None) if v)
+                rows.append([x["bill_no"], x["date"], x["time"], x["room"], guest,
                              x["receipt"] or "", x["payment"] or "", x["balance"], x["cr_no"],
                              x["remarks"] or "", x["user"] or ""])
         tr = _sub(f"Total ({md['label']})")

@@ -211,10 +211,13 @@ const Booking = () => {
     if (totalBase === 0) return null;
 
     const roomTotal = totalBase - totalDiscount + totalGST;
-    const convenienceBase = roomTotal * 0.02;
-    const convenienceGST = convenienceBase * 0.18;
-    const convenienceFeeTotal = convenienceBase + convenienceGST;
-    const grandTotal = roomTotal + convenienceFeeTotal;
+    // Gateway fee, GROSSED UP to mirror the server (routers/bookings.py): Razorpay deducts
+    // 2% + 18% GST (= 2.36%) of the gross amount charged, so fee = roomTotal * r / (1 - r) —
+    // the hotel then nets exactly the room total. Rounded to 2 dp like the server so the
+    // breakdown shown here matches grand_total to the paisa.
+    const RZP_RATE = 0.02 * 1.18;
+    const convenienceFeeTotal = Math.round((roomTotal * RZP_RATE / (1 - RZP_RATE)) * 100) / 100;
+    const grandTotal = Math.round((roomTotal + convenienceFeeTotal) * 100) / 100;
 
     return {
       nights,

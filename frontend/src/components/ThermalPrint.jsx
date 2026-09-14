@@ -14,6 +14,9 @@ import React, { useEffect } from "react";
 const money = (v) =>
   `Rs.${Number(v || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
+const fmt2 = (v) =>
+  Number(v || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
 const dt = (iso) => {
   if (!iso) return "";
   const [d, t] = String(iso).split("T");
@@ -58,82 +61,118 @@ export function ThermalSheet({ children, onDone }) {
   );
 }
 
-const Rule = () => <div style={{ borderTop: "1px dashed #000", margin: "4px 0" }} />;
+const Rule = ({ solid }) => (
+  <div style={{ borderTop: solid ? "1px solid #000" : "1px dashed #000", margin: "4px 0" }} />
+);
+
+// v5i: fixed column grids so numbers line up down the sheet (monospace + right-aligned cells).
+const KOT_COLS = "34px 1fr";                    // QTY | ITEM
+const BILL_COLS = "1fr 26px 52px 60px";          // ITEM | QTY | RATE | AMT
+const Row = ({ cols, cells, bold, size }) => (
+  <div style={{ display: "grid", gridTemplateColumns: cols, columnGap: "4px", alignItems: "baseline",
+    fontWeight: bold ? "bold" : "normal", fontSize: size || "11px", margin: "1px 0" }}>
+    {cells.map((c, i) => (
+      <span key={i} style={{ textAlign: i === 0 ? "left" : "right", overflowWrap: "anywhere" }}>{c}</span>
+    ))}
+  </div>
+);
+const Kv = ({ k, v, bold, size }) => (
+  <div style={{ display: "flex", justifyContent: "space-between", fontWeight: bold ? "bold" : "normal",
+    fontSize: size || "11px" }}>
+    <span>{k}</span><span>{v}</span>
+  </div>
+);
+const hhmm = () => {
+  const d = new Date();
+  return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+};
 
 /** Kitchen docket — what to cook, for which room. Deliberately no prices. */
 export function KotSheet({ kot, onDone }) {
   if (!kot) return null;
   return (
     <ThermalSheet onDone={onDone}>
-      <div style={{ textAlign: "center", fontWeight: "bold", fontSize: "14px" }}>KITCHEN ORDER</div>
-      <div style={{ textAlign: "center", fontSize: "16px", fontWeight: "bold", margin: "2px 0" }}>
-        {kot.kot_no}
+      <div style={{ textAlign: "center", fontWeight: "bold", fontSize: "14px", letterSpacing: "1px" }}>KITCHEN ORDER</div>
+      <div style={{ textAlign: "center", fontSize: "17px", fontWeight: "bold", margin: "2px 0" }}>{kot.kot_no}</div>
+      {kot.reprint && <div style={{ textAlign: "center", fontWeight: "bold" }}>*** REPRINT ***</div>}
+      <Rule solid />
+      <div style={{ textAlign: "center", fontSize: "22px", fontWeight: "bold", margin: "3px 0" }}>
+        ROOM {kot.room_number || "—"}
       </div>
-      {kot.reprint && (
-        <div style={{ textAlign: "center", fontWeight: "bold" }}>*** REPRINT ***</div>
-      )}
-      <Rule />
-      <div style={{ fontSize: "15px", fontWeight: "bold" }}>ROOM {kot.room_number || "—"}</div>
-      <div>{dt(kot.placed_at)}</div>
-      <div>Source: {kot.source === "portal" ? "Guest (QR)" : "Staff"}</div>
+      <Kv k={dt(kot.placed_at)} v={kot.source === "portal" ? "Guest (QR)" : "Staff"} />
+      <Kv k={`Order #${kot.order_id}`} v="" />
+      <Rule solid />
+      <Row cols={KOT_COLS} cells={["QTY", "ITEM"]} bold size="10px" />
       <Rule />
       {(kot.items || []).map((it, i) => (
-        <div key={i} style={{ display: "flex", fontSize: "13px", margin: "2px 0" }}>
-          <span style={{ width: "26px", fontWeight: "bold" }}>{it.qty}x</span>
-          <span style={{ flex: 1 }}>{it.name}</span>
+        <div key={i} style={{ display: "grid", gridTemplateColumns: KOT_COLS, columnGap: "4px",
+          fontSize: "14px", margin: "3px 0", alignItems: "baseline" }}>
+          <span style={{ textAlign: "right", fontWeight: "bold" }}>{it.qty}x</span>
+          <span style={{ overflowWrap: "anywhere" }}>{it.name}</span>
         </div>
       ))}
       {kot.note && (
         <>
           <Rule />
-          <div style={{ fontWeight: "bold" }}>NOTE: {kot.note}</div>
+          <div style={{ fontWeight: "bold", fontSize: "12px", textTransform: "uppercase" }}>NOTE: {kot.note}</div>
         </>
       )}
-      <Rule />
-      <div style={{ textAlign: "center" }}>Order #{kot.order_id}</div>
+      <Rule solid />
+      <div style={{ textAlign: "center", fontSize: "10px" }}>
+        {(kot.items || []).reduce((n, it) => n + (Number(it.qty) || 0), 0)} item(s) · printed {hhmm()}
+      </div>
       <div style={{ height: "12mm" }} />
     </ThermalSheet>
   );
 }
 
-/** Guest copy of a delivered order. Not a tax invoice — the stay's GST invoice is. */
+/** Guest copy of a delivered order. Not a tax invoice — the stay's GST invoice is.
+ *  v5i: menu prices are ex-GST; the bill shows Rate x Qty, then GST per slab, then the total. */
 export function BillSheet({ bill, onDone }) {
   if (!bill) return null;
+  const items = bill.items || [];
+  const subtotal = bill.subtotal != null ? bill.subtotal : items.reduce((s, it) => s + (Number(it.amount) || 0), 0);
+  const gstRows = bill.gst_rows || [];
+  const gstTotal = bill.gst_total != null ? bill.gst_total : gstRows.reduce((s, r) => s + (Number(r.gst) || 0), 0);
+  const total = bill.total != null ? bill.total : subtotal + gstTotal;
   return (
     <ThermalSheet onDone={onDone}>
-      <div style={{ textAlign: "center", fontWeight: "bold", fontSize: "14px" }}>HOTEL BHIMAS</div>
-      <div style={{ textAlign: "center" }}>Room Service</div>
+      <div style={{ textAlign: "center", fontWeight: "bold", fontSize: "15px", letterSpacing: "1px" }}>HOTEL BHIMAS</div>
+      <div style={{ textAlign: "center", fontSize: "10px" }}>42, G Car Street, Tirupati - 517501</div>
+      <div style={{ textAlign: "center", fontWeight: "bold", marginTop: "3px" }}>ROOM SERVICE BILL</div>
+      <Rule solid />
+      <Kv k={`Room: ${bill.room_number || "—"}`} v={bill.guest_name || ""} bold />
+      <Kv k={`KOT: ${bill.kot_no || "—"}`} v={`Bill #${bill.order_id}`} />
+      <Kv k={dt(bill.delivered_at || bill.placed_at)} v="" />
+      <Rule solid />
+      <Row cols={BILL_COLS} cells={["ITEM", "QTY", "RATE", "AMT"]} bold size="10px" />
       <Rule />
-      <div>Room: <b>{bill.room_number || "—"}</b></div>
-      {bill.guest_name && <div>Guest: {bill.guest_name}</div>}
-      <div>KOT: {bill.kot_no}</div>
-      <div>{dt(bill.delivered_at || bill.placed_at)}</div>
-      <Rule />
-      {(bill.items || []).map((it, i) => (
-        <div key={i} style={{ margin: "2px 0" }}>
-          <div>{it.name}</div>
-          <div style={{ display: "flex", justifyContent: "space-between" }}>
-            <span>{it.qty} x {money(it.unit_price)}</span>
-            <span>{money(it.amount)}</span>
-          </div>
-        </div>
+      {items.map((it, i) => (
+        <Row key={i} cols={BILL_COLS}
+          cells={[it.name, Number(it.qty || 0).toLocaleString("en-IN"), fmt2(it.unit_price), fmt2(it.amount)]} />
       ))}
       <Rule />
-      <div style={{ display: "flex", justifyContent: "space-between", fontSize: "13px", fontWeight: "bold" }}>
-        <span>TOTAL</span>
-        <span>{money(bill.total)}</span>
-      </div>
-      <div style={{ fontSize: "10px", marginTop: "2px" }}>(inclusive of GST)</div>
-      <Rule />
+      <Kv k="Subtotal (excl. GST)" v={money(subtotal)} />
+      {gstRows.map((r, i) => (
+        <React.Fragment key={i}>
+          <Kv k={`CGST ${(r.percent / 2)}%`} v={money(r.cgst)} size="10px" />
+          <Kv k={`SGST ${(r.percent / 2)}%`} v={money(r.sgst)} size="10px" />
+        </React.Fragment>
+      ))}
+      {gstRows.length === 0 && gstTotal > 0 && <Kv k="GST" v={money(gstTotal)} size="10px" />}
+      <Rule solid />
+      <Kv k="TOTAL" v={money(total)} bold size="14px" />
+      <Rule solid />
       <div style={{ textAlign: "center", fontWeight: "bold" }}>CHARGED TO ROOM</div>
       <div style={{ textAlign: "center", fontSize: "10px", marginTop: "2px" }}>
         Payable with your room bill at check-out.
         <br />
-        This is not a tax invoice.
+        This is not a tax invoice — GST is shown on the stay's invoice.
       </div>
       {bill.reprint && (
         <div style={{ textAlign: "center", fontWeight: "bold", marginTop: "3px" }}>*** REPRINT ***</div>
       )}
+      <div style={{ textAlign: "center", fontSize: "10px", marginTop: "4px" }}>Thank you — Hotel Bhimas</div>
       <div style={{ height: "12mm" }} />
     </ThermalSheet>
   );

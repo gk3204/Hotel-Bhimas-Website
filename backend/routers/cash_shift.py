@@ -186,6 +186,11 @@ def _report_data(db: Session, shift: CashShift) -> dict:
                      "reference": p.refund_reference} for p in payouts]
     s["denominations"] = denoms
     s["close_note"] = shift.close_note
+    # v5i: receipt-level rows (every payment mode) in the cashier-summary layout, scoped to this
+    # shift. Imported here, not at module level: reports imports this module's _serialize.
+    from routers.reports import _cashier_table, cashier_summary_for_shift
+    cols, rows, totals = _cashier_table(cashier_summary_for_shift(db, shift))
+    s["receipts"] = {"columns": cols, "rows": rows, "totals": totals}
     return s
 
 

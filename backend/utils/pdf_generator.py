@@ -452,24 +452,34 @@ def generate_folio_invoice_pdf(invoice_data):
     elements.append(meta_table)
     elements.append(Spacer(1, 0.3 * inch))
 
-    # Line items (GST-inclusive amounts)
+    # Line items — v5i: Rate is BEFORE GST, Amount INCLUDES it, with the GST shown in between so
+    # a guest can follow rate x qty + GST = amount on every line.
     elements.append(Paragraph("<b>Charges</b>", styles["Heading2"]))
     elements.append(Spacer(1, 0.12 * inch))
-    items_data = [["Description", "Qty", "Rate", "GST %", "Amount"]]
+    items_data = [["Description", "Qty", "Rate (excl. GST)", "GST %", "GST", "Amount (incl. GST)"]]
     for line in invoice_data["lines"]:
+        g = line["gst_percent"]
+        rate = line.get("rate_ex_gst")
+        if rate is None:   # older payloads: derive from the inclusive amount
+            q = line["qty"] or 1
+            rate = round(line["amount"] / (1 + (g or 0) / 100) / q, 2)
+        gst_amt = line.get("gst_amount")
+        if gst_amt is None:
+            gst_amt = round(line["amount"] - line["amount"] / (1 + (g or 0) / 100), 2)
         items_data.append([
             Paragraph(line["description"] or "", styles["Normal"]),
             f"{line['qty']:g}",
-            f"Rs. {line['unit_price']:,.2f}",
-            f"{line['gst_percent']:g}%" if line["gst_percent"] is not None else "-",
+            f"Rs. {rate:,.2f}",
+            f"{g:g}%" if g is not None else "-",
+            f"Rs. {gst_amt:,.2f}",
             f"Rs. {line['amount']:,.2f}",
         ])
     for line in invoice_data["discount_lines"]:
         items_data.append([
             Paragraph(line["description"] or "Discount", styles["Normal"]),
-            "", "", "", f"- Rs. {abs(line['amount']):,.2f}",
+            "", "", "", "", f"- Rs. {abs(line['amount']):,.2f}",
         ])
-    items_table = Table(items_data, colWidths=[220, 40, 80, 50, 90])
+    items_table = Table(items_data, colWidths=[190, 34, 82, 44, 66, 94])
     items_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -482,6 +492,9 @@ def generate_folio_invoice_pdf(invoice_data):
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
     ]))
     elements.append(items_table)
+    note_style = ParagraphStyle(name="RateNote", parent=styles["Normal"], fontSize=7.5,
+                                textColor=colors.grey, spaceBefore=3)
+    elements.append(Paragraph("Rate is before GST; Amount includes GST.", note_style))
     elements.append(Spacer(1, 0.25 * inch))
 
     # GST summary per slab (CGST/SGST split)
@@ -1090,6 +1103,19 @@ def generate_shift_report_pdf(shift_data):
         elements.append(method_table)
         elements.append(Spacer(1, 0.25 * inch))
 
+    # v5i: every receipt and paid-out this shift handled, in the cashier-summary layout (grouped
+    # by mode -> check-out bills / advances / paid-outs, with bill no, room, guest, CR no, user),
+    # so the person signing the report can tie the method totals above to real receipts.
+    receipts = shift_data.get("receipts") or {}
+    elements.append(Paragraph("<b>Receipts &amp; payments — this shift</b>", styles["Heading2"]))
+    if receipts.get("rows"):
+        elements.append(build_marker_table(receipts["columns"], receipts["rows"],
+                                           receipts.get("totals"), styles, font_size=7))
+    else:
+        elements.append(Paragraph("No receipts or paid-outs were recorded in this shift.",
+                                  styles["Normal"]))
+    elements.append(Spacer(1, 0.25 * inch))
+
     # Expenses breakdown
     expenses = shift_data.get("expenses") or []
     elements.append(Paragraph("<b>Expenses</b>", styles["Heading2"]))
@@ -1377,6 +1403,82 @@ def generate_company_invoice_pdf(payload):
     return file_path
 
 
+def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=None):
+    """The branded report table used by generate_report_pdf, as a reusable flowable (v5i — the
+    close-shift report embeds the cashier rows with it).
+
+    `rows` may mix plain lists with marker dicts: {"section": label} renders as a full-width
+    shaded band, {"subtotal": [cells...]} as a bold ruled line (the v5g row-marker convention).
+    Columns whose header reads monetary/numeric are right-aligned."""
+    styles = styles or getSampleStyleSheet()
+    body = styles["Normal"]
+    if font_size:
+        body = ParagraphStyle(name=f"MarkerBody{font_size}", parent=body, fontSize=font_size,
+                              leading=font_size + 2)
+
+    def _cell(v):
+        if v is None:
+            return ""
+        if isinstance(v, float):
+            return f"{v:,.2f}"
+        return str(v)
+
+    header = [str(c) for c in columns]
+    ncols = len(header)
+    _money = ("amount", "receipt", "payment", "balance", "rent", "gst", "sgst", "cgst", "net",
+              "revenue", "gross", "discount", "advance", "refund", "total", "qty", "price",
+              "commission", "rack", "collected", "₹", "occ", "pax")
+    money_cols = [i for i, h in enumerate(header)
+                  if any(k in h.lower() for k in _money)]
+
+    table_rows = [[Paragraph(f"<b>{h}</b>", body) for h in header]]
+    section_idx, subtotal_idx = [], []
+    for r in rows:
+        idx = len(table_rows)
+        if isinstance(r, dict) and "section" in r:
+            cells = [Paragraph(f"<b>{_cell(r['section'])}</b>", body)] + [""] * (ncols - 1)
+            table_rows.append(cells)
+            section_idx.append(idx)
+        elif isinstance(r, dict) and "subtotal" in r:
+            table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", body) for v in r["subtotal"]])
+            subtotal_idx.append(idx)
+        else:
+            table_rows.append([Paragraph(_cell(v), body) for v in r])
+    has_totals = totals_row is not None
+    if has_totals:
+        table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", body) for v in totals_row])
+
+    table = Table(table_rows, repeatRows=1)
+    style = [
+        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
+        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
+        ('ROWBACKGROUNDS', (0, 1), (-1, -2 if has_totals else -1),
+         [colors.white, colors.HexColor("#f5f5f5")]),
+        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
+        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+        ('TOPPADDING', (0, 0), (-1, -1), 3),
+        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+        ('LEFTPADDING', (0, 0), (-1, -1), 4),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+    ]
+    for c in money_cols:
+        style.append(('ALIGN', (c, 1), (c, -1), 'RIGHT'))
+    # Section bands: merge across the row, shade, and keep left-aligned even in a money column.
+    for i in section_idx:
+        style.append(('SPAN', (0, i), (-1, i)))
+        style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#efe6cf")))
+        style.append(('TEXTCOLOR', (0, i), (-1, i), colors.HexColor("#7a5c00")))
+        style.append(('ALIGN', (0, i), (-1, i), 'LEFT'))
+    for i in subtotal_idx:
+        style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#f7f2e4")))
+        style.append(('LINEABOVE', (0, i), (-1, i), 0.5, colors.HexColor("#d9c48a")))
+    if has_totals:
+        style.append(('BACKGROUND', (0, -1), (-1, -1), colors.HexColor("#f0e6cc")))
+        style.append(('LINEABOVE', (0, -1), (-1, -1), 0.7, colors.HexColor("#B8860B")))
+    table.setStyle(TableStyle(style))
+    return table
+
+
 def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
     """Generic branded tabular report (prompt 16 Reports & Dashboard).
 
@@ -1430,69 +1532,7 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
             " &nbsp;|&nbsp; ".join(f"{k}: {v}" for k, v in meta.items()), meta_style))
     elements.append(Spacer(1, 0.08 * inch))
 
-    def _cell(v):
-        if v is None:
-            return ""
-        if isinstance(v, float):
-            return f"{v:,.2f}"
-        return str(v)
-
-    header = [str(c) for c in columns]
-    ncols = len(header)
-    # Columns whose header reads monetary/numeric get right-aligned for a clean ledger look.
-    _money = ("amount", "receipt", "payment", "balance", "rent", "gst", "sgst", "cgst", "net",
-              "revenue", "gross", "discount", "advance", "refund", "total", "qty", "price",
-              "commission", "rack", "collected", "₹", "occ", "pax")
-    money_cols = [i for i, h in enumerate(header)
-                  if any(k in h.lower() for k in _money)]
-
-    table_rows = [[Paragraph(f"<b>{h}</b>", styles["Normal"]) for h in header]]
-    # A row may be a plain list, or a marker dict: {"section": label} (full-width band) or
-    # {"subtotal": [cells...]} (bold summary line). Track their indices to style them precisely.
-    section_idx, subtotal_idx = [], []
-    for r in rows:
-        idx = len(table_rows)
-        if isinstance(r, dict) and "section" in r:
-            cells = [Paragraph(f"<b>{_cell(r['section'])}</b>", styles["Normal"])] + [""] * (ncols - 1)
-            table_rows.append(cells)
-            section_idx.append(idx)
-        elif isinstance(r, dict) and "subtotal" in r:
-            table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", styles["Normal"]) for v in r["subtotal"]])
-            subtotal_idx.append(idx)
-        else:
-            table_rows.append([Paragraph(_cell(v), styles["Normal"]) for v in r])
-    has_totals = totals_row is not None
-    if has_totals:
-        table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", styles["Normal"]) for v in totals_row])
-
-    table = Table(table_rows, repeatRows=1)
-    style = [
-        ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
-        ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
-        ('ROWBACKGROUNDS', (0, 1), (-1, -2 if has_totals else -1),
-         [colors.white, colors.HexColor("#f5f5f5")]),
-        ('GRID', (0, 0), (-1, -1), 0.4, colors.HexColor("#e0e0e0")),
-        ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
-        ('TOPPADDING', (0, 0), (-1, -1), 3),
-        ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
-    ]
-    for c in money_cols:
-        style.append(('ALIGN', (c, 1), (c, -1), 'RIGHT'))
-    # Section bands: merge across the row, shade, and keep left-aligned even in a money column.
-    for i in section_idx:
-        style.append(('SPAN', (0, i), (-1, i)))
-        style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#efe6cf")))
-        style.append(('TEXTCOLOR', (0, i), (-1, i), colors.HexColor("#7a5c00")))
-        style.append(('ALIGN', (0, i), (-1, i), 'LEFT'))
-    for i in subtotal_idx:
-        style.append(('BACKGROUND', (0, i), (-1, i), colors.HexColor("#f7f2e4")))
-        style.append(('LINEABOVE', (0, i), (-1, i), 0.5, colors.HexColor("#d9c48a")))
-    if has_totals:
-        style.append(('BACKGROUND', (0, -1), (-1, -1), colors.HexColor("#f0e6cc")))
-        style.append(('LINEABOVE', (0, -1), (-1, -1), 0.7, colors.HexColor("#B8860B")))
-    table.setStyle(TableStyle(style))
+    table = build_marker_table(columns, rows, totals_row, styles)
     elements.append(table)
 
     if not rows:

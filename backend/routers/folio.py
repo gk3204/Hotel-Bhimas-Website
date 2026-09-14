@@ -4,6 +4,9 @@ Conventions (see docs/PROJECT_STATE.md, prompt 07):
 - FolioCharge.amount is the authoritative SIGNED, GST-INCLUSIVE value
   (charges +, discounts/payments -). gst_percent records the slab for the
   invoice CGST/SGST split only; qty/unit_price are informational.
+  v5i: for FOOD lines unit_price is the EX-GST menu price (menu prices exclude GST) and
+  amount = qty x unit_price + GST; the invoice derives its Rate (excl. GST) / GST / Amount
+  (incl. GST) columns from `amount` + `gst_percent` so every line type reads the same.
 - Void never hard-deletes: the original line gets void=True + reason AND a
   reversing line (amount negated, reversal_of_id set, also void=True) is
   appended for the paper trail. All totals sum only void == False lines.
@@ -441,6 +444,9 @@ def open_folio(data: FolioOpenRequest, db: Session = Depends(get_db),
                 qty=1,
                 unit_price=conv,
                 amount=conv,
+                # v5i: the fee is convenience_fee + 18% GST on it, so it belongs in the 18% slab —
+                # leaving gst_percent NULL parked it in a spurious "0%" row on the GST invoice.
+                gst_percent=18,
                 posted_by=uid,
             ))
 
@@ -842,12 +848,21 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
     totals = _invoice_totals(charges)
 
     def _line(c):
+        # v5i: the invoice shows Rate WITHOUT GST and Amount WITH it. Both derive from the
+        # authoritative GST-inclusive `amount` (not unit_price, whose meaning differs by line
+        # type: room/misc carry an inclusive unit price, food an ex-GST menu price).
+        amount = float(c.amount)
+        qty = float(c.qty or 0) or 1.0
+        g = float(c.gst_percent or 0)
+        taxable = round(amount / (1 + g / 100), 2)
         return {
             "description": c.description,
             "qty": float(c.qty or 0),
             "unit_price": float(c.unit_price or 0),
             "gst_percent": float(c.gst_percent) if c.gst_percent is not None else None,
-            "amount": float(c.amount),
+            "rate_ex_gst": round(taxable / qty, 2),
+            "gst_amount": round(amount - taxable, 2),
+            "amount": amount,
             "posted_at": c.posted_at,
         }
 

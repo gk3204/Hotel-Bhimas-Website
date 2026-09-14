@@ -200,8 +200,11 @@ export default function RoomService() {
       return next;
     });
 
+  // v5i: menu prices are ex-GST — the cart shows the payable total with each item's GST added,
+  // which is what the order will post to the folio.
   const cartTotal = useMemo(
-    () => menu.reduce((sum, m) => sum + (cart[m.id] || 0) * Number(m.price || 0), 0),
+    () => menu.reduce((sum, m) => sum + (cart[m.id] || 0) * Number(m.price || 0)
+      * (1 + Number(m.gst_percent || 0) / 100), 0),
     [cart, menu],
   );
   const cartCount = useMemo(
@@ -531,7 +534,7 @@ export default function RoomService() {
                     className="w-full bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-bold py-4 rounded-xl text-lg disabled:opacity-50 shadow-xl">
               {placing
                 ? "Sending…"
-                : `Order · KOT · Bill — ${cartCount} item(s) · ${money(cartTotal)}`}
+                : `Order · KOT · Bill — ${cartCount} item(s) · ${money(cartTotal)} incl. GST`}
             </button>
             <p className="text-slate-500 text-xs text-center mt-2">
               One press: the kitchen docket and the guest's bill both print, and the amount goes

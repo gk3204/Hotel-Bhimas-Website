@@ -100,7 +100,9 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
             reasons.append("card_without_booking")  # not an in-house stay
         # v4b1: counts a prepayment collected by the channel that sold the stay. Without it
         # every OTA guest was refused a key card as "unpaid" — they had paid, just not to us.
-        if booking and total_paid_including_prepaid(db, booking.booking_id) <= 0:
+        # v5i: a complimentary stay owes nothing at check-in, so a key card for it is not fraud.
+        is_comp = bool(booking) and (getattr(booking, "comp_mode", "none") or "none") in ("all", "room")
+        if booking and not is_comp and total_paid_including_prepaid(db, booking.booking_id) <= 0:
             reasons.append("card_without_payment")
         if not room:
             reasons.append("card_without_booking")

@@ -580,6 +580,7 @@ def order_room_service(token: str, data: RoomServiceOrder, db: Session = Depends
     _feature_gate(cfg, "room_service_enabled")
     s, booking = _resolve_token(db, token)
     # snapshot each line's menu details so the desk posts the right price/GST even if the menu changes
+    from services import room_service          # lazy, as elsewhere in this module (import cycle)
     items, total = [], 0.0
     for ln in data.items:
         m = db.query(MenuItem).filter(MenuItem.id == ln.menu_item_id).first()
@@ -590,7 +591,7 @@ def order_room_service(token: str, data: RoomServiceOrder, db: Session = Depends
         items.append({"menu_item_id": m.id, "name": m.name, "qty": ln.qty,
                       "unit_price": price, "gst_percent": float(m.gst_percent) if m.gst_percent is not None else None,
                       "stock_item_id": m.stock_item_id})
-        total += price * ln.qty
+        total += room_service.line_total(price, ln.qty, m.gst_percent)   # v5i: menu price + its GST
     r = _create_request(db, s, booking, "room_service",
                         payload={"items": items, "note": data.note}, amount=round(total, 2),
                         note=data.note, client_ref=data.client_ref)

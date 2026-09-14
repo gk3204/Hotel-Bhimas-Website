@@ -50,6 +50,44 @@ def allocate_kot_no(db: Session, when: date | None = None) -> str:
     return f"KOT/{day}/{row.last_seq:03d}"
 
 
+# ---------------------------------------------------------------- pricing
+
+# v5i: MENU PRICES ARE EX-GST (owner's rule). A line's payable amount is qty x price plus the
+# item's own GST slab on top; that inclusive figure is what goes on the order, the bill and the
+# folio (FolioCharge.amount is GST-inclusive by convention — see routers/folio.py). The
+# ex-GST menu price is kept on the line / charge as unit_price for the "Rate" column.
+
+def line_gst(unit_price, qty, gst_percent) -> float:
+    """GST added on top of an ex-GST menu line."""
+    g = float(gst_percent or 0)
+    return round(float(qty) * float(unit_price) * g / 100.0, 2)
+
+
+def line_total(unit_price, qty, gst_percent) -> float:
+    """GST-inclusive payable for an ex-GST menu line."""
+    return round(float(qty) * float(unit_price) + line_gst(unit_price, qty, gst_percent), 2)
+
+
+def gst_rows(lines) -> list[dict]:
+    """Per-slab breakdown for a bill: [{percent, taxable, gst, cgst, sgst}] from priced lines
+    that carry qty / unit_price / gst_percent (ex-GST). Sorted by slab."""
+    slabs = {}
+    for ln in lines:
+        g = float(ln.get("gst_percent") or 0)
+        qty, unit = float(ln.get("qty") or 1), float(ln.get("unit_price") or 0)
+        row = slabs.setdefault(g, {"percent": g, "taxable": 0.0, "gst": 0.0})
+        row["taxable"] = round(row["taxable"] + qty * unit, 2)
+        row["gst"] = round(row["gst"] + line_gst(unit, qty, g), 2)
+    out = []
+    for g in sorted(slabs):
+        r = slabs[g]
+        if g <= 0:
+            continue                      # nothing to show for a 0% slab
+        sgst = round(r["gst"] / 2, 2)
+        out.append({**r, "sgst": sgst, "cgst": round(r["gst"] - sgst, 2)})
+    return out
+
+
 # ---------------------------------------------------------------- menu snapshot
 
 def snapshot_items(db: Session, lines) -> tuple[list, float]:
@@ -74,7 +112,7 @@ def snapshot_items(db: Session, lines) -> tuple[list, float]:
             "gst_percent": float(m.gst_percent) if m.gst_percent is not None else None,
             "stock_item_id": m.stock_item_id,
         })
-        total += price * ln.qty
+        total += line_total(price, ln.qty, m.gst_percent)   # payable incl. the item's GST
     return items, round(total, 2)
 
 
@@ -116,7 +154,9 @@ def post_to_folio(db: Session, r: GuestRequest, user):
         charge = FolioCharge(
             folio_id=folio.id, type="food",
             description=f"Room service — {ln.get('name', 'item')}",
-            qty=qty, unit_price=unit, amount=round(qty * unit, 2),
+            # unit_price = ex-GST menu price (the invoice's Rate column); amount = GST-inclusive
+            # payable, which is what the folio and the GST summary work from.
+            qty=qty, unit_price=unit, amount=line_total(unit, qty, ln.get("gst_percent")),
             gst_percent=ln.get("gst_percent"), posted_by=_resolve_user_id(db, user),
             # v3 item 4 — the durable charge->dish link the product-wise sales report groups
             # on. This is the ONLY place it is ever set: both the tablet's "deliver" and the
@@ -183,19 +223,27 @@ def kot_payload(db: Session, r: GuestRequest) -> dict:
 
 
 def bill_payload(db: Session, r: GuestRequest) -> dict:
-    """What the guest bill prints: the priced order, GST-inclusive, with a note that it has
-    been charged to the room. It is NOT a tax invoice — the stay's GST invoice at checkout is,
-    and these lines are already part of it."""
+    """What the guest bill prints: the priced order with an ex-GST subtotal, the GST added per
+    slab, and the payable total, plus a note that it has been charged to the room. It is NOT a
+    tax invoice — the stay's GST invoice at checkout is, and these lines are already part of it."""
     room = db.query(Room).filter(Room.room_id == r.room_id).first() if r.room_id else None
     guest = db.query(Guest).filter(Guest.guest_id == r.guest_id).first() if r.guest_id else None
-    lines = []
-    total = 0.0
+    lines, raw = [], []
+    subtotal = 0.0
     for ln in _order_lines(r):
         qty = float(ln.get("qty") or 1)
         unit = float(ln.get("unit_price") or 0)
-        amount = round(qty * unit, 2)
-        total += amount
-        lines.append({"name": ln.get("name"), "qty": qty, "unit_price": unit, "amount": amount})
+        g = ln.get("gst_percent")
+        amount = round(qty * unit, 2)                 # ex-GST line amount (Rate x Qty)
+        subtotal += amount
+        raw.append({"qty": qty, "unit_price": unit, "gst_percent": g})
+        lines.append({"name": ln.get("name"), "qty": qty, "unit_price": unit, "amount": amount,
+                      "gst_percent": float(g) if g is not None else None,
+                      "gst_amount": line_gst(unit, qty, g),
+                      "line_total": line_total(unit, qty, g)})
+    rows = gst_rows(raw)
+    gst_total = round(sum(x["gst"] for x in rows), 2)
+    total = round(subtotal + gst_total, 2)
     return {
         "order_id": r.id,
         "kot_no": r.kot_no,
@@ -206,7 +254,10 @@ def bill_payload(db: Session, r: GuestRequest) -> dict:
         "delivered_at": (r.updated_at.isoformat() if r.updated_at else None),
         "note": _order_note(r),
         "items": lines,
-        "total": round(total, 2),
+        "subtotal": round(subtotal, 2),   # before GST
+        "gst_rows": rows,                 # [{percent, taxable, gst, cgst, sgst}]
+        "gst_total": gst_total,
+        "total": total,                   # payable, GST included
         "charged_to_room": True,
     }
 

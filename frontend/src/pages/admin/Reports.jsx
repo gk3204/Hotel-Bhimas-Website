@@ -73,7 +73,8 @@ const REPORTS = {
         rows.push({ kind: "section", label: m.label });
         (m.sections || []).forEach((sec) => {
           rows.push({ kind: "section", label: `  ${sec.label}` });
-          sec.rows.forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room, x.guest || "",
+          sec.rows.forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room,
+            [x.guest, x.booking_id ? `#${x.booking_id}` : ""].filter(Boolean).join(" · "),
             x.receipt ? fmt(x.receipt) : "", x.payment ? fmt(x.payment) : "", fmt(x.balance),
             x.cr_no, x.remarks || "", x.user || ""]));
         });

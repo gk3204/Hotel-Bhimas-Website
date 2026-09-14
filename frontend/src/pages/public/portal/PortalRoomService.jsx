@@ -57,7 +57,9 @@ export default function PortalRoomService() {
   // to empty the cart.
   const count = Object.values(cart).reduce((a, b) => a + b, 0);
   const orderableItems = items.filter((m) => m.orderable_now);
-  const total = orderableItems.reduce((s, m) => s + (cart[m.id] || 0) * m.price, 0);
+  // v5i: menu prices are ex-GST; show the payable total with each item's GST added.
+  const total = orderableItems.reduce(
+    (s, m) => s + (cart[m.id] || 0) * m.price * (1 + Number(m.gst_percent || 0) / 100), 0);
 
   const order = async () => {
     if (count === 0) return;
@@ -175,7 +177,7 @@ export default function PortalRoomService() {
               onChange={(e) => setNote(e.target.value)}
             />
             <Btn onClick={order} disabled={busy}>
-              {busy ? "Placing…" : `Order ${count} item${count === 1 ? "" : "s"} · ${money(total)}`}
+              {busy ? "Placing…" : `Order ${count} item${count === 1 ? "" : "s"} · ${money(total)} incl. GST`}
             </Btn>
             <p className="text-xs text-slate-400 text-center">Charged to your room bill on delivery.</p>
           </div>

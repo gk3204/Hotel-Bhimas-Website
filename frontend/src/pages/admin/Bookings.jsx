@@ -662,11 +662,11 @@ const Bookings = () => {
                       </span>
                     </div>
                     <div className="flex justify-between text-slate-400 text-xs mt-3">
-                      <span>Convenience Fee (2%)</span>
+                      <span>Convenience fee (gateway)</span>
                       <span>₹{selectedBooking.charges.convenience_fee}</span>
                     </div>
                     <div className="flex justify-between text-slate-400 text-xs">
-                      <span>Convenience GST (18%)</span>
+                      <span>GST on convenience fee (18%)</span>
                       <span>₹{selectedBooking.charges.convenience_gst}</span>
                     </div>
                     <div className="flex justify-between text-xl font-bold border-t-2 border-[#E5C07B] pt-4 mt-4 text-[#E5C07B]">
@@ -755,7 +755,7 @@ const Bookings = () => {
                         className="mr-3"
                       />
                       <span className="text-sm">
-                        Full - Convenience Fee (2%)
+                        Full - Convenience fee
                         {selectedBooking && (
                           <span className="ml-2 text-[#E5C07B]">
                             ₹{(selectedBooking.charges.payable_amount - 

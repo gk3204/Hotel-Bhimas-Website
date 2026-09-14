@@ -205,10 +205,17 @@ def create_booking(
                 "total_amount": item_total
             })
 
-        # Razorpay convenience fee (2% + 18% GST on total room amount)
-        convenience_base = round(total_room_amount * 0.02, 2)
-        convenience_gst = round(convenience_base * 0.18, 2)
-        convenience_fee_total = round(convenience_base + convenience_gst, 2)
+        # Razorpay convenience fee — GROSSED UP so the hotel nets the full room total.
+        # Razorpay deducts 2% MDR + 18% GST on that (= 2.36%) of the GROSS amount charged, i.e.
+        # of (room total + fee), not of the room total. Charging 2.36% of the room total therefore
+        # left the hotel short by 2.36% of the fee (booking 167: room 4,410 -> fee 104.08 -> gross
+        # 4,514.08 -> Razorpay took 106.55 -> net 4,407.53, i.e. Rs 2.47 short). The fix is the
+        # gross-up  fee = base * r / (1 - r):  4,410 -> fee 106.59 -> gross 4,516.59 -> Razorpay
+        # takes 2.36% x 4,516.59 = 106.59 -> net exactly 4,410.00.
+        _rzp_rate = 0.02 * 1.18
+        convenience_fee_total = round(total_room_amount * _rzp_rate / (1 - _rzp_rate), 2)
+        convenience_base = round(convenience_fee_total / 1.18, 2)          # the 2% MDR part
+        convenience_gst = round(convenience_fee_total - convenience_base, 2)  # 18% GST on it
 
         grand_total = round(total_room_amount + convenience_fee_total, 2)
 
