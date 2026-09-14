@@ -7,6 +7,11 @@ import logging
 from contextlib import asynccontextmanager
 from routers import room_types, admin, users, adminsecurity, payments
 from routers import backup   # v4b10: /admin/backup/* (pg_dump export for the admin PC)
+from routers import documents   # v5j: admin document index (invoices / receipts / slips / reports)
+
+# Bumped once per shipped batch so /health tells you which build is live (Railway also injects
+# the git sha). "Is it deployed yet?" used to be unanswerable from outside.
+APP_BUILD = "v5j"
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
@@ -413,10 +418,16 @@ app.include_router(roomservice.router)
 app.include_router(audit.router)
 app.include_router(opsettings.router)
 app.include_router(linen.router)
+app.include_router(documents.router)
 
 # -------------------------
 # Health Check
 # -------------------------
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {
+        "status": "ok",
+        "build": APP_BUILD,
+        "commit": (os.getenv("RAILWAY_GIT_COMMIT_SHA") or "")[:7],
+        "deployment": os.getenv("RAILWAY_DEPLOYMENT_ID") or "",
+    }

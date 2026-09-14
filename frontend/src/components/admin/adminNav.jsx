@@ -4,7 +4,7 @@ import {
   FaTachometerAlt, FaCalendarCheck, FaCalendarAlt, FaBed, FaDoorOpen, FaBroom, FaTools,
   FaUsers, FaEnvelopeOpenText, FaWhatsapp, FaStar, FaMobileAlt, FaBullhorn,
   FaTags, FaPercent, FaUserTie, FaHandshake, FaGlobe,
-  FaMoneyBillWave, FaCashRegister, FaChartBar,
+  FaMoneyBillWave, FaCashRegister, FaChartBar, FaFileInvoice,
   FaShieldAlt, FaClipboardCheck, FaExclamationTriangle, FaHistory,
   FaBuilding, FaTruck, FaBoxes, FaTshirt,
   FaUserShield, FaUserCog, FaUserCheck, FaKey, FaCog,
@@ -50,6 +50,7 @@ export const NAV_GROUPS = [
       { to: "/admin/payments", label: "Payments", icon: FaMoneyBillWave },
       { to: "/admin/cash-shift", label: "Cash / Shift", icon: FaCashRegister },
       { to: "/admin/reports", label: "Reports", icon: FaChartBar },
+      { to: "/admin/documents", label: "Documents", icon: FaFileInvoice },
     ],
   },
   {
