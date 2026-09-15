@@ -437,13 +437,30 @@ def _log_row(db, direction, to_number, template, params, body, *, status, provid
     return row
 
 
+def match_guest_by_number(db, num):
+    """The guest behind an inbound WhatsApp number, matched on DIGITS (v5l).
+
+    Meta sends `from` as bare E.164 digits ("919000012345"); the desk stores guest phones as
+    "+919000012345" (sometimes "9000012345"). crm.match_guest compares the stored string exactly,
+    so an exact/last-10 lookup never matched a "+91…" guest — every reply was an anonymous
+    thread and an EXTEND could not find the stay. Compare the stored phone stripped of
+    non-digits against the number and its last 10 digits. Newest guest wins on a tie."""
+    from sqlalchemy import func
+    from models import Guest
+    digits = "".join(ch for ch in str(num or "") if ch.isdigit())
+    if len(digits) < 10:
+        return None
+    stored = func.regexp_replace(Guest.phone, "[^0-9]", "", "g")
+    return (db.query(Guest)
+            .filter((stored == digits) | (stored == digits[-10:])
+                    | stored.like(f"%{digits[-10:]}"))
+            .order_by(Guest.guest_id.desc()).first())
+
+
 def _resolve_guest_id(db, num):
-    """Best-effort guest lookup by number (exact, then last-10), for inbox names. Never raises."""
+    """Best-effort guest lookup by number for inbox names. Never raises."""
     try:
-        from routers.crm import match_guest
-        g = match_guest(db, num)
-        if g is None and num and len(num) > 10:
-            g = match_guest(db, num[-10:])
+        g = match_guest_by_number(db, num)
         return g.guest_id if g else None
     except Exception:
         return None

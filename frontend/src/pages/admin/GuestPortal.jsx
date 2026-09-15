@@ -20,9 +20,10 @@ const TABS = [
 
 const TYPE_LABEL = {
   room_service: "Room service", wifi: "WiFi", wakeup: "Wake-up", cab: "Cab", checkout: "Checkout",
+  extend: "Extend stay",   // v5l: raised from a WhatsApp "Extend my stay" tap
 };
 const TYPE_TONE = {
-  room_service: "gold", wifi: "info", wakeup: "info", cab: "info", checkout: "warn",
+  room_service: "gold", wifi: "info", wakeup: "info", cab: "info", checkout: "warn", extend: "warn",
 };
 const STATUS_TONE = {
   requested: "warn", acknowledged: "info", completed: "ok", dismissed: "neutral",

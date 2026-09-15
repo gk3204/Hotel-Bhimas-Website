@@ -2,8 +2,10 @@
 import { useEffect, useRef, useState } from "react";
 import { FaPlus } from "react-icons/fa";
 import {
-  getConversations, getThread, markConversationRead, sendReply, getTemplates,
+  getConversations, getThread, markConversationRead, sendReply, getTemplates, getWebhookHealth,
 } from "../../api/whatsapp";
+
+const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 const inputCls =
   "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -19,6 +21,7 @@ export default function WhatsAppInbox({ showToast }) {
   const [compose, setCompose] = useState(false);
   const [composePhone, setComposePhone] = useState("");
   const [sending, setSending] = useState(false);
+  const [webhook, setWebhook] = useState(null);   // v5l: Meta webhook delivery health
   const activeRef = useRef(active);
   activeRef.current = active;
 
@@ -36,6 +39,7 @@ export default function WhatsAppInbox({ showToast }) {
   useEffect(() => {
     loadConvos();
     getTemplates().then((r) => setTemplates(r.templates || [])).catch(() => {});
+    getWebhookHealth().then(setWebhook).catch(() => {});
     const id = setInterval(async () => {
       await loadConvos();
       const p = activeRef.current;
@@ -93,6 +97,24 @@ export default function WhatsAppInbox({ showToast }) {
 
   return (
     <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+      {/* v5l: an empty inbox is usually the webhook, not silence — say so. */}
+      {webhook?.never_received && (
+        <div className="md:col-span-3 bg-red-900/30 border border-red-700 rounded-2xl p-4 text-sm">
+          <div className="font-bold text-red-300">WhatsApp webhook is not receiving — guest replies and delivery ticks will not appear.</div>
+          <div className="text-slate-300 mt-1">
+            In the Meta app: <b>WhatsApp → Configuration → Webhook</b> → Callback URL{" "}
+            <code className="bg-slate-900/60 px-1 rounded">{API_BASE}{webhook.callback_path}</code>, Verify token = the
+            backend&apos;s <code>WHATSAPP_VERIFY_TOKEN</code>{webhook.verify_token_set ? "" : " (NOT set on the backend yet)"},
+            then subscribe to the <b>messages</b> field. Send &ldquo;hi&rdquo; from a phone to confirm — this banner clears itself.
+          </div>
+        </div>
+      )}
+      {webhook && !webhook.never_received && (
+        <div className="md:col-span-3 text-xs text-slate-500 px-1">
+          Last guest message received: {webhook.last_inbound_at ? webhook.last_inbound_at.replace("T", " ").slice(0, 16) : "—"}
+          {" · "}inbound this week: {webhook.inbound_7d}
+        </div>
+      )}
       {/* conversation list */}
       <div className="bg-slate-800/40 border border-slate-700 rounded-2xl p-2 md:h-[70vh] overflow-y-auto">
         <div className="flex justify-between items-center px-2 py-2">

@@ -19,7 +19,7 @@ import json
 import logging
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import PlainTextResponse
@@ -27,7 +27,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import WhatsAppMessage, WhatsAppConversationRead, Booking, Guest
+from models import WhatsAppMessage, WhatsAppConversationRead, Booking, BookingItem, Guest, GuestRequest
 from schemas import WhatsAppConfigUpdate, OptOutCreate, WhatsAppTestSend, WhatsAppReplyRequest
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
@@ -127,8 +127,10 @@ def update_config_ep(data: WhatsAppConfigUpdate, db: Session = Depends(get_db),
 
 # --------------------------------------------------------------------- templates
 @router.get("/templates")
-def list_templates_ep(db: Session = Depends(get_db), user=Depends(require_admin)):
-    """The template catalog (name, category, sample body, opt-out policy)."""
+def list_templates_ep(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
+    """The template catalog (name, category, sample body, opt-out policy). v5l: reception too —
+    the desk's template picker (out-of-window replies, new chats) loaded empty for reception logins
+    because this was admin-only, while the reply endpoint already let reception send templates."""
     return {"templates": catalog(), "provider_status": wa.provider_status()}
 
 
@@ -293,6 +295,43 @@ def reply_conversation_ep(phone: str, data: WhatsAppReplyRequest, db: Session = 
     return _msg_dict(row)
 
 
+@router.get("/webhook/health")
+def webhook_health_ep(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
+    """v5l: is the Meta webhook actually delivering? Guest replies AND delivery ticks both arrive
+    through the `messages` webhook subscription, so if nothing has ever come in, the inbox stays
+    empty and every outbound row sits at 'sent' forever — and the desk just looks like nobody replied.
+    This makes that state visible (admin Inbox banner, desk Messages banner)."""
+    week = datetime.utcnow() - timedelta(days=7)
+    last_in = db.query(func.max(WhatsAppMessage.created_at)).filter(WhatsAppMessage.direction == "in").scalar()
+    last_status = (db.query(func.max(WhatsAppMessage.updated_at))
+                   .filter(WhatsAppMessage.direction == "out",
+                           WhatsAppMessage.status.in_(("delivered", "read"))).scalar())
+    inbound_7d = (db.query(func.count(WhatsAppMessage.id))
+                  .filter(WhatsAppMessage.direction == "in", WhatsAppMessage.created_at >= week).scalar()) or 0
+    ticks_7d = (db.query(func.count(WhatsAppMessage.id))
+                .filter(WhatsAppMessage.direction == "out", WhatsAppMessage.status.in_(("delivered", "read")),
+                        WhatsAppMessage.updated_at >= week).scalar()) or 0
+    never = last_in is None and last_status is None
+    hint = None
+    if never:
+        hint = ("No webhook event has ever been received. In the Meta app: WhatsApp -> Configuration -> "
+                "Webhook: callback URL <backend>/whatsapp/webhook, verify token = WHATSAPP_VERIFY_TOKEN, "
+                "and subscribe to the 'messages' field (docs/setup-whatsapp-and-ota-mailbox.md section 1.6).")
+    elif not os.getenv("WHATSAPP_VERIFY_TOKEN"):
+        hint = "WHATSAPP_VERIFY_TOKEN is not set — Meta's verification handshake will fail on re-subscribe."
+    return {
+        "provider_status": wa.provider_status(),
+        "verify_token_set": bool(os.getenv("WHATSAPP_VERIFY_TOKEN")),
+        "callback_path": "/whatsapp/webhook",
+        "last_inbound_at": last_in.isoformat() if last_in else None,
+        "last_status_update_at": last_status.isoformat() if last_status else None,
+        "inbound_7d": int(inbound_7d),
+        "status_updates_7d": int(ticks_7d),
+        "never_received": never,
+        "hint": hint,
+    }
+
+
 @router.get("/unread-count")
 def unread_count_ep(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
     """Total unread inbound messages across all conversations (for the nav badge)."""
@@ -410,29 +449,63 @@ def _resolve_guest_and_booking(db, from_number):
     """(normalised number, guest, booking_id) for an inbound sender: match the stored phone
     exactly, then on the last 10 digits, then take their latest booking. Shared by the complaint
     and extend paths."""
-    from routers.crm import match_guest
     norm = wa.normalize_number(from_number)
-    guest = match_guest(db, norm)
-    if guest is None and norm and len(norm) > 10:
-        guest = match_guest(db, norm[-10:])
-    booking = _latest_booking_for_guest(db, guest.guest_id) if guest else None
+    guest = wa.match_guest_by_number(db, norm)   # v5l: digit match ("+91…" stored vs bare "91…" inbound)
+    booking = None
+    if guest:
+        # v5l: prefer the stay that is actually in the building — an EXTEND from a returning
+        # guest must attach to the current stay, not to whichever booking has the highest id.
+        booking = (db.query(Booking).filter(Booking.guest_id == guest.guest_id,
+                                            Booking.status == "checked_in")
+                   .order_by(Booking.booking_id.desc()).first()
+                   or _latest_booking_for_guest(db, guest.guest_id))
     return norm, guest, (booking.booking_id if booking else None)
 
 
-def _handle_extend_request(db, from_number, guest, booking_id):
-    """The guest replied EXTEND to checkout_reminder, which promises "we'll arrange it".
+EXTEND_REQUEST_NOTE = "WhatsApp: guest tapped 'Extend my stay' — extend the stay and re-encode the key card"
+
+
+def _record_extend_request(db, guest, booking_id, provider_id=None):
+    """v5l: put the extend request on the desk's Guest requests board (the same board the QR-portal
+    requests use — Complete / Dismiss, room + guest, chime), instead of only a toast that named
+    nobody. One request per Meta message id (Meta retries webhooks), None when we can't tie the
+    number to a stay."""
+    if not booking_id:
+        return None
+    client_ref = f"wa_extend:{provider_id}" if provider_id else None
+    if client_ref:
+        dup = db.query(GuestRequest).filter(GuestRequest.client_ref == client_ref).first()
+        if dup is not None:
+            return dup
+    room_id = (db.query(BookingItem.room_id)
+               .filter(BookingItem.booking_id == booking_id, BookingItem.room_id.isnot(None))
+               .order_by(BookingItem.booking_item_id).limit(1).scalar())
+    r = GuestRequest(booking_id=booking_id, room_id=room_id,
+                     guest_id=guest.guest_id if guest else None,
+                     type="extend", status="requested", note=EXTEND_REQUEST_NOTE,
+                     source="whatsapp", client_ref=client_ref)
+    db.add(r)
+    db.commit()
+    return r
+
+
+def _handle_extend_request(db, from_number, guest, booking_id, provider_id=None):
+    """The guest tapped "Extend my stay" (or typed EXTEND) on checkout_reminder.
 
     Their own inbound message just opened the 24h customer-service window, so a free-text reply is
-    allowed here and no extra Meta template is needed. The request itself stays in the conversation
-    inbox, which already carries an unread badge (_conversation_numbers / unread_count_ep), for the
-    desk to price and confirm through the normal POST /reception/extend flow."""
+    allowed here and no extra Meta template is needed. v5l: the request is recorded on the desk's
+    Guest requests board, and the guest is asked to come to reception — an extension changes the
+    checkout moment, so the room key card has to be re-encoded at the desk (the extend overlay ends
+    on exactly that step)."""
+    req = _record_extend_request(db, guest, booking_id, provider_id)
     wa.send_text(
         db, from_number,
-        "Thanks - we've passed your request to extend your stay to the front desk. "
-        "They'll confirm the room and the rate with you shortly.",
+        "Thanks! To extend your stay, please visit the reception desk - they'll confirm the room "
+        "and the rate for the extra night(s) and re-encode your room key card.",
         guest_id=guest.guest_id if guest else None, booking_id=booking_id)
-    logger.info("WhatsApp EXTEND request from %s (guest=%s)",
-                from_number, guest.guest_id if guest else None)
+    logger.info("WhatsApp EXTEND request from %s (guest=%s, booking=%s, request=%s)",
+                from_number, guest.guest_id if guest else None, booking_id,
+                req.id if req is not None else None)
 
 
 def _handle_inbound_text(db, from_number, text, provider_id=None):
@@ -460,10 +533,11 @@ def _handle_inbound_text(db, from_number, text, provider_id=None):
         if inbound_row is not None:
             try:
                 inbound_row.template = "extend_request"
+                inbound_row.booking_id = booking_id      # v5l: tie the row to the stay
                 db.commit()
             except Exception:
                 db.rollback()
-        _handle_extend_request(db, from_number, guest, booking_id)
+        _handle_extend_request(db, from_number, guest, booking_id, provider_id)
         return
 
     # Complaint keywords -> raise a guest ticket + acknowledge.
@@ -493,14 +567,25 @@ async def receive_webhook(request: Request, db: Session = Depends(get_db)):
         for entry in payload.get("entry", []):
             for change in entry.get("changes", []):
                 value = change.get("value", {}) or {}
+                # v5l: each event in its own try so one bad status/message can't drop the rest
+                # of the batch, and an INFO line per arrival so the Railway log proves delivery.
                 for st in value.get("statuses", []) or []:
-                    wa.update_delivery_status(db, st.get("id"), st.get("status"))
+                    try:
+                        wa.update_delivery_status(db, st.get("id"), st.get("status"))
+                    except Exception as e:
+                        db.rollback()
+                        logger.error(f"whatsapp status event failed ({st.get('id')}): {e}")
                 for msg in value.get("messages", []) or []:
-                    body = _inbound_text_of(msg)
-                    if body is not None:
-                        _handle_inbound_text(db, msg.get("from"), body, msg.get("id"))
-                    else:
-                        wa.log_inbound(db, msg.get("from"), f"[{msg.get('type')}]", msg.get("id"))
+                    logger.info("whatsapp inbound %s from %s", msg.get("type"), msg.get("from"))
+                    try:
+                        body = _inbound_text_of(msg)
+                        if body is not None:
+                            _handle_inbound_text(db, msg.get("from"), body, msg.get("id"))
+                        else:
+                            wa.log_inbound(db, msg.get("from"), f"[{msg.get('type')}]", msg.get("id"))
+                    except Exception as e:
+                        db.rollback()
+                        logger.error(f"whatsapp inbound event failed ({msg.get('id')}): {e}")
     except Exception as e:
         logger.error(f"whatsapp webhook processing error: {e}")
     return {"received": True}

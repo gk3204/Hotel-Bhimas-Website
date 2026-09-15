@@ -37,6 +37,12 @@ export async function updateWhatsappConfig(data) {
   return handle(res);
 }
 
+// v5l: is the Meta webhook delivering? (replies + delivery ticks both ride it)
+export async function getWebhookHealth() {
+  const res = await fetch(`${BASE_URL}/whatsapp/webhook/health`, { headers: authHeaders() });
+  return handle(res);
+}
+
 export async function getTemplates() {
   const res = await fetch(`${BASE_URL}/whatsapp/templates`, { headers: authHeaders() });
   return handle(res);
