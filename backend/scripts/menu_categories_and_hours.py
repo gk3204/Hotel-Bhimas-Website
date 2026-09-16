@@ -101,6 +101,7 @@ ITEM_OVERRIDES = {
     "parota": ("tiffins", W(("16:00", "22:00"))),      # the Tiffins "Parota" only; Bread parotas keep bread hours
     "veg samosa": (SNACKS, HOURS[SNACKS]),
     "veg cutlet": (SNACKS, HOURS[SNACKS]),
+    "curd rice": ("lunch", HOURS["lunch"]),         # owner: lunch, not a rice-dish (2026-09-16)
 }
 
 
