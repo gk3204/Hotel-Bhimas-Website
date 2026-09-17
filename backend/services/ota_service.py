@@ -1005,13 +1005,25 @@ def auto_confirm_draft(db, d, user=None):
     return result["booking_id"]
 
 
-def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False) -> dict:
+def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
+                       future_only=False, drafts_only=False) -> dict:
     """Parse + upsert one email into a draft. Auto-flags/cancels a matching booking when the email is
-    a cancellation, and auto-confirms a *confident* new-booking draft. Best-effort; caller commits."""
+    a cancellation, and auto-confirms a *confident* new-booking draft. Best-effort; caller commits.
+
+    Backfill knobs (owner, 2026-09-17 — importing an older mailbox): `future_only` drops a
+    confirmation whose check-in is already past (a stay that happened before the PMS must not
+    appear as a never-arrived booking); `drafts_only` skips auto-confirm so every upcoming stay
+    waits in Admin -> OTA for the desk to pick the room type and confirm. Cancellations are still
+    matched to existing bookings either way."""
     fields = parse_email_bytes(raw, force_channel=force_channel)
     if fields is None:
         return {"parsed": False, "reason": "no OTA channel detected"}
     channel = fields["channel_code"]
+    if future_only and fields.get("kind") == "confirmation":
+        ci = fields.get("check_in")
+        if ci is not None and ci < date.today():
+            return {"parsed": True, "skipped": True, "reason": "past check-in", "channel": channel,
+                    "check_in": str(ci), "ota_booking_id": fields.get("ota_booking_id")}
     # honour the per-channel mailbox toggle (a channel can be tracked but not auto-parsed)
     ch = get_channel(db, channel)
     if ch is not None and not ch.mailbox_parsing_enabled and force_channel is None:
@@ -1048,7 +1060,7 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False) -> dict
     # A confident NEW-booking draft is auto-created into a real booking (owner: auto-confirm OTA
     # bookings). Unresolvable drafts stay pending for the desk. auto_confirm_draft never raises.
     auto_booking_id = None
-    if fields.get("kind") == "confirmation":
+    if fields.get("kind") == "confirmation" and not drafts_only:
         auto_booking_id = auto_confirm_draft(db, d, user=None)
 
     db.flush()
@@ -1060,8 +1072,12 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False) -> dict
             "auto_confirmed_booking_id": auto_booking_id}
 
 
-def poll_mailbox(db, limit=50, since=None) -> dict:
+def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -> dict:
     """Connect to the configured IMAP mailbox, ingest OTA emails into drafts.
+
+    Backfill (since given) defaults to future_only=True + drafts_only=True: stays already past are
+    skipped, upcoming ones become drafts for the desk to confirm with a room type (owner's rule
+    for importing an older mailbox). The live poll keeps both off (auto-confirm as configured).
 
     Normal poll (since=None): searches UNSEEN and marks each processed message \\Seen — the live
     cadence. Backfill (since=<date>): searches `SINCE dd-Mon-yyyy` (all mail on/after that date,
@@ -1072,6 +1088,10 @@ def poll_mailbox(db, limit=50, since=None) -> dict:
     cfg = imap_config()
     if cfg is None:
         return {"configured": False, "processed": 0, "created": 0, "drafts": []}
+    if future_only is None:
+        future_only = since is not None
+    if drafts_only is None:
+        drafts_only = since is not None
 
     # Single-flight across workers + desk polls: auto-confirm makes a double-poll unsafe (two real
     # bookings from one email), so hold an advisory lock for the whole poll and skip if it's taken.
@@ -1086,7 +1106,7 @@ def poll_mailbox(db, limit=50, since=None) -> dict:
         return {"configured": True, "processed": 0, "created": 0, "skipped": "locked", "drafts": []}
 
     ensure_channels(db)
-    processed = created = errors = 0
+    processed = created = errors = skipped_past = 0
     drafts = []
     conn = None
     try:
@@ -1110,8 +1130,11 @@ def poll_mailbox(db, limit=50, since=None) -> dict:
                 if typ != "OK" or not msg_data or not msg_data[0]:
                     continue
                 raw = msg_data[0][1]
-                res = ingest_email_bytes(db, raw, commit=False)
+                res = ingest_email_bytes(db, raw, commit=False,
+                                         future_only=future_only, drafts_only=drafts_only)
                 processed += 1
+                if res.get("skipped") and res.get("reason") == "past check-in":
+                    skipped_past += 1
                 if res.get("created"):
                     created += 1
                 if res.get("draft_id"):
@@ -1144,7 +1167,7 @@ def poll_mailbox(db, limit=50, since=None) -> dict:
         except Exception as e:
             logger.warning(f"OTA IMAP poll: advisory-unlock failed: {e}")
     return {"configured": True, "processed": processed, "created": created,
-            "errors": errors, "drafts": drafts}
+            "errors": errors, "skipped_past": skipped_past, "drafts": drafts}
 
 
 def serialize_draft(d: OtaDraftBooking, db=None) -> dict:

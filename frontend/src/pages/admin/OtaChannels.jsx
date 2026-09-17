@@ -555,7 +555,7 @@ const DraftsTab = ({ showToast }) => {
     try {
       const res = await importSince(importDate);
       if (!res.configured) showToast("Mailbox poller is off (set OTA_IMAP_* env)", "error");
-      else showToast(`Imported since ${importDate}: ${res.processed || 0} email(s), ${res.created || 0} new draft(s)`);
+      else showToast(`Imported since ${importDate}: ${res.processed || 0} email(s), ${res.created || 0} new draft(s), ${res.skipped_past || 0} past stay(s) skipped — confirm the drafts below with a room type`);
       await load();
     } catch (e) { showToast(e.message, "error"); }
     setImporting(false);

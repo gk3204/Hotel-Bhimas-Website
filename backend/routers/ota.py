@@ -281,14 +281,18 @@ def poll_now(db: Session = Depends(get_db), user=Depends(require_reception_or_ad
 @router.post("/import")
 def import_since(since: str = Query(..., description="YYYY-MM-DD — import OTA mail on/after this date"),
                  limit: int = Query(500, ge=1, le=2000),
+                 future_only: bool = Query(True, description="skip stays whose check-in is already past"),
+                 drafts_only: bool = Query(True, description="never auto-confirm; leave drafts for the desk"),
                  db: Session = Depends(get_db), user=Depends(require_admin)):
-    """One-time GO-LIVE backfill: import OTA confirmation emails on/after `since` (read or unread),
-    WITHOUT marking them seen, so pre-go-live bookings arriving after go-live get drafted/auto-linked.
+    """One-time backfill: import OTA emails on/after `since` (read or unread) WITHOUT marking them
+    seen. By default only UPCOMING stays are kept and they stay as drafts so the desk picks the room
+    type and confirms; pass future_only=false / drafts_only=false for the old go-live behaviour.
     Idempotent — safe to re-run. No-ops when the mailbox isn't configured."""
     d = _parse_date(since, "since")
-    res = ota_service.poll_mailbox(db, limit=limit, since=d)
+    res = ota_service.poll_mailbox(db, limit=limit, since=d, future_only=future_only, drafts_only=drafts_only)
     write_audit(db, user, "ota.import_since", "ota", None,
-                after={"since": since, "limit": limit,
-                       "processed": res.get("processed"), "created": res.get("created")},
+                after={"since": since, "limit": limit, "future_only": future_only, "drafts_only": drafts_only,
+                       "processed": res.get("processed"), "created": res.get("created"),
+                       "skipped_past": res.get("skipped_past")},
                 commit=True)
     return res
