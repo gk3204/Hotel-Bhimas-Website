@@ -1161,11 +1161,26 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
                 pass
         # Release the advisory lock on THIS session — a pooled request session would otherwise carry
         # the lock back to the pool and starve every later poll.
+        # 2026-09-18: roll back FIRST. If the poll left the session in an aborted transaction, the
+        # unlock statement itself fails ("current transaction is aborted"), the warning below is the
+        # only trace, and the pooled connection holds the lock for the life of the process — every
+        # later poll (and the admin import) then reports "another instance holds the lock". Seen on
+        # production: one idle connection sat on the lock for 14 hours.
+        try:
+            db.rollback()
+        except Exception:
+            pass
         try:
             db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _POLL_LOCK_KEY})
             db.commit()
         except Exception as e:
             logger.warning(f"OTA IMAP poll: advisory-unlock failed: {e}")
+            try:
+                db.rollback()
+                db.execute(text("SELECT pg_advisory_unlock_all()"))
+                db.commit()
+            except Exception as e2:
+                logger.error(f"OTA IMAP poll: advisory-unlock_all failed too: {e2}")
     return {"configured": True, "processed": processed, "created": created,
             "errors": errors, "skipped_past": skipped_past, "drafts": drafts}
 
