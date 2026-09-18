@@ -496,8 +496,13 @@ def _strip_html(html: str) -> str:
         return ""
     text = re.sub(r"(?is)<(script|style).*?</\1>", " ", html)
     text = re.sub(r"(?s)<[^>]+>", " ", text)
-    text = re.sub(r"&nbsp;", " ", text)
-    text = re.sub(r"&amp;", "&", text)
+    # 2026-09-18: decode EVERY entity, not just &nbsp;/&amp; — Go-MMT writes "21 Nov &#39;26", and
+    # with the apostrophe left as an entity no check-in/out date ever matched (every draft from the
+    # owner's mailbox came in date-less). Also turns &#8377; into the rupee sign the money regexes
+    # accept. `import html as _html` at module level would shadow local names, so import here.
+    import html as _html
+    text = _html.unescape(text)
+    text = text.replace("\xa0", " ")
     return re.sub(r"[ \t]+", " ", text)
 
 
@@ -526,6 +531,20 @@ def detect_channel(from_addr: str, subject: str, body: str = "") -> str | None:
             if dom in hay:
                 return code
     return None
+
+
+# Mail from an OTA sender that is NOT a booking voucher or cancellation and must never become a
+# draft (2026-09-18, seen in the owner's mailbox): daily arrival digests, payout notices, account
+# sign-ins, partner-programme mail, guest-name edits. Matched on the subject.
+_IGNORE_SUBJECT_RE = re.compile(
+    r"check[\-\s]?ins?\s+list|payment\s*\(wire\)|payment\s+(?:confirmation|advice|release)|new\s+sign-?in|"
+    r"vdi\s+program|guest\s+name\s+changed|invoice\s+for\s+|statement|newsletter|webinar|"
+    r"rate\s+(?:update|parity)|review\s+(?:received|posted)|survey",
+    re.IGNORECASE)
+
+
+def is_ignorable_subject(subject: str) -> bool:
+    return bool(_IGNORE_SUBJECT_RE.search(subject or ""))
 
 
 def detect_kind(subject: str, body: str) -> str:
@@ -628,7 +647,7 @@ def _parse_common(text: str) -> dict:
 
 # Per-OTA parsers. They currently all delegate to the common label extractor; kept as distinct
 # seams so a channel whose emails need special handling can override without touching the others.
-_GO_MMT_DATE = r"(\d{1,2}\s+[A-Za-z]{3,9}\s+'?\d{2,4})"
+_GO_MMT_DATE = r"(\d{1,2}[ \t]+[A-Za-z]{3,9}[ \t]+'?\d{2,4})"   # same line only (see _strip_html note)
 
 
 def _num(s):
@@ -716,8 +735,10 @@ def _parse_go_mmt(text: str) -> dict:
             out["check_in"] = out.get("check_in") or _parse_date_loose(toks[0])
             out["check_out"] = out.get("check_out") or _parse_date_loose(toks[1])
 
-    room = _first([r"\d+\s*[xX]\s*([A-Za-z0-9][A-Za-z0-9 /()&\-]*?room)\b"], text)
-    if room:
+    room = _first([r"\d+\s*[xX]\s*([A-Za-z0-9][A-Za-z0-9 /()&\-]*?room)\b",
+                   # "1 x Four Bed Non-Ac" / "2 x Double Deluxe Ac" — the room type is the rest of that line
+                   r"\d+[ \t]*[xX][ \t]+([A-Za-z][A-Za-z0-9 /()&\-]{2,60}?)[ \t]*(?:\r|\n|$)"], text)
+    if room and room.strip().lower() not in ("only", "room only"):
         out["room_type_hint"] = re.sub(r"\s+", " ", room).strip()
 
     # Amount = "Property Gross Charges" (what the hotel invoices the guest), else the room grand
@@ -1019,6 +1040,9 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
     if fields is None:
         return {"parsed": False, "reason": "no OTA channel detected"}
     channel = fields["channel_code"]
+    if is_ignorable_subject(fields.get("subject")):
+        return {"parsed": True, "skipped": True, "reason": "not a booking email", "channel": channel,
+                "subject": fields.get("subject")}
     if future_only and fields.get("kind") == "confirmation":
         ci = fields.get("check_in")
         if ci is not None and ci < date.today():
@@ -1028,9 +1052,34 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
     ch = get_channel(db, channel)
     if ch is not None and not ch.mailbox_parsing_enabled and force_channel is None:
         return {"parsed": True, "skipped": True, "reason": f"mailbox parsing disabled for {channel}"}
-    d, created = _upsert_draft(db, fields)
     flagged_booking_id = None
     cancelled_booking_id = None
+    if fields.get("kind") == "cancellation" and fields.get("ota_booking_id"):
+        # 2026-09-18: a pending confirmation draft for the same OTA id is retired here — the
+        # voucher it came from is void, so it must not stay on the board as confirmable.
+        pend = (db.query(OtaDraftBooking)
+                .filter(OtaDraftBooking.channel_code == channel,
+                        OtaDraftBooking.ota_booking_id == fields["ota_booking_id"],
+                        OtaDraftBooking.kind == "confirmation",
+                        OtaDraftBooking.status.in_(("pending", "flagged")))
+                .all())
+        for pd in pend:
+            pd.status = "dismissed"      # the OTA cancelled it; the desk must not confirm this draft
+        b = (db.query(Booking)
+             .filter(Booking.ota_booking_id == fields["ota_booking_id"],
+                     Booking.status.in_(_LIVE_STATUSES))
+             .first())
+        if b is None and pend:
+            # the stay only ever existed as a draft: retiring it is the whole job — no separate
+            # cancellation row for the desk to wade through.
+            db.flush()
+            if commit:
+                db.commit()
+            return {"parsed": True, "created": False, "draft_id": pend[0].id, "channel": channel,
+                    "kind": "cancellation", "retired_draft_ids": [x.id for x in pend],
+                    "flagged_booking_id": None, "cancelled_booking_id": None,
+                    "auto_confirmed_booking_id": None}
+    d, created = _upsert_draft(db, fields)
     if fields.get("kind") == "cancellation" and fields.get("ota_booking_id"):
         b = (db.query(Booking)
              .filter(Booking.ota_booking_id == fields["ota_booking_id"],
@@ -1095,13 +1144,28 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
 
     # Single-flight across workers + desk polls: auto-confirm makes a double-poll unsafe (two real
     # bookings from one email), so hold an advisory lock for the whole poll and skip if it's taken.
+    #
+    # 2026-09-18: the lock lives on its OWN connection, not the ORM session. A session-level
+    # advisory lock belongs to the physical connection that took it; the poll commits mid-way
+    # (auto-confirm / write_audit), which returns that connection to the pool, so the unlock in
+    # `finally` ran on whichever connection the pool handed out next and silently did nothing.
+    # The original connection then sat idle in the pool holding the lock for the life of the
+    # process — every later poll and the admin import reported "another instance holds the lock"
+    # (seen twice on production). Closing a dedicated connection always releases its locks.
+    lock_conn = None
     locked = False
     try:
-        locked = bool(db.execute(text("SELECT pg_try_advisory_lock(:k)"),
-                                 {"k": _POLL_LOCK_KEY}).scalar())
+        lock_conn = db.get_bind().connect()
+        locked = bool(lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"),
+                                        {"k": _POLL_LOCK_KEY}).scalar())
     except Exception as e:
         logger.warning(f"OTA IMAP poll: advisory-lock check failed ({e}); proceeding without it")
     if not locked:
+        if lock_conn is not None:
+            try:
+                lock_conn.close()
+            except Exception:
+                pass
         logger.info("OTA IMAP poll: another instance holds the lock, skipping")
         return {"configured": True, "processed": 0, "created": 0, "skipped": "locked", "drafts": []}
 
@@ -1159,28 +1223,17 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
                 conn.logout()
             except Exception:
                 pass
-        # Release the advisory lock on THIS session — a pooled request session would otherwise carry
-        # the lock back to the pool and starve every later poll.
-        # 2026-09-18: roll back FIRST. If the poll left the session in an aborted transaction, the
-        # unlock statement itself fails ("current transaction is aborted"), the warning below is the
-        # only trace, and the pooled connection holds the lock for the life of the process — every
-        # later poll (and the admin import) then reports "another instance holds the lock". Seen on
-        # production: one idle connection sat on the lock for 14 hours.
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        try:
-            db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _POLL_LOCK_KEY})
-            db.commit()
-        except Exception as e:
-            logger.warning(f"OTA IMAP poll: advisory-unlock failed: {e}")
+        # Release the advisory lock on the dedicated connection that took it (see the note above);
+        # closing the connection releases it even if the unlock statement itself failed.
+        if lock_conn is not None:
             try:
-                db.rollback()
-                db.execute(text("SELECT pg_advisory_unlock_all()"))
-                db.commit()
-            except Exception as e2:
-                logger.error(f"OTA IMAP poll: advisory-unlock_all failed too: {e2}")
+                lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _POLL_LOCK_KEY})
+            except Exception as e:
+                logger.warning(f"OTA IMAP poll: advisory-unlock failed: {e}")
+            try:
+                lock_conn.close()
+            except Exception:
+                pass
     return {"configured": True, "processed": processed, "created": created,
             "errors": errors, "skipped_past": skipped_past, "drafts": drafts}
 
