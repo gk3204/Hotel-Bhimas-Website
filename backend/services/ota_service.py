@@ -616,9 +616,11 @@ def _parse_common(text: str) -> dict:
     ], text)
     email_addr = _first([r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})"], text)
     checkin = _first([
+        r"check\s*in\s*from\s*[:\-]\s*([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4})",   # Yatra "Amended" mails
         r"(?:check[\-\s]?in|arrival|from\s*date|check in date)\s*[:\-]?\s*([0-9A-Za-z ,\/\-]{6,20})",
     ], text)
     checkout = _first([
+        r"check\s*in\s*to\s*[:\-]\s*([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4})",
         r"(?:check[\-\s]?out|departure|to\s*date|check out date)\s*[:\-]?\s*([0-9A-Za-z ,\/\-]{6,20})",
     ], text)
     room = _first([
@@ -1048,6 +1050,9 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
         if ci is not None and ci < date.today():
             return {"parsed": True, "skipped": True, "reason": "past check-in", "channel": channel,
                     "check_in": str(ci), "ota_booking_id": fields.get("ota_booking_id")}
+        if ci is None:
+            return {"parsed": True, "skipped": True, "reason": "no check-in date", "channel": channel,
+                    "subject": fields.get("subject"), "ota_booking_id": fields.get("ota_booking_id")}
     # honour the per-channel mailbox toggle (a channel can be tracked but not auto-parsed)
     ch = get_channel(db, channel)
     if ch is not None and not ch.mailbox_parsing_enabled and force_channel is None:
@@ -1079,6 +1084,10 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
                     "kind": "cancellation", "retired_draft_ids": [x.id for x in pend],
                     "flagged_booking_id": None, "cancelled_booking_id": None,
                     "auto_confirmed_booking_id": None}
+        if b is None and not pend and future_only:
+            # backfill: a cancellation for a stay the PMS never had — nothing to act on.
+            return {"parsed": True, "skipped": True, "reason": "cancellation for unknown booking",
+                    "channel": channel, "ota_booking_id": fields.get("ota_booking_id")}
     d, created = _upsert_draft(db, fields)
     if fields.get("kind") == "cancellation" and fields.get("ota_booking_id"):
         b = (db.query(Booking)
