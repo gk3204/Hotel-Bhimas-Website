@@ -125,6 +125,19 @@ def generate_day_report_pdf(report):
              ["Item", "Qty", "Amount"],
              [[i.get("name"), i.get("qty"), f"Rs {float(i.get('amount') or 0):,.2f}"] for i in rs.get("top_items", [])])
 
+    ae = report.get("arrival_exceptions") or {}
+    if ae:
+        _section(elements, styles,
+                 f"Arrival exceptions — early check-ins {ae.get('early_checkins', 0)} "
+                 f"(Rs {float(ae.get('early_charged') or 0):,.0f}), late arrivals {ae.get('late_arrivals', 0)}, "
+                 f"hourly extensions {ae.get('hourly_extensions', 0)} (Rs {float(ae.get('extension_charged') or 0):,.0f}), "
+                 f"no-shows {ae.get('no_shows', 0)}",
+                 ["Guest", "Room", "Kind", "Deviation / hours", "Charge", "Basis"],
+                 [[r.get("guest"), r.get("room"), r.get("kind"),
+                   (f"{r['hours']} h" if r.get("hours") else
+                    (f"{abs(int(r.get('deviation_minutes') or 0)) // 60}h {abs(int(r.get('deviation_minutes') or 0)) % 60:02d}m")),
+                   f"Rs {float(r.get('charge') or 0):,.2f}", r.get("basis")] for r in ae.get("rows", [])])
+
     ex = report.get("extras", {})
     _section(elements, styles, "Other", ["Metric", "Count"], [
         ["New bookings made", ex.get("new_bookings", 0)],

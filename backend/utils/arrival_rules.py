@@ -251,6 +251,65 @@ def rule_snapshot(rule: dict) -> str:
     return json.dumps(rule, default=str)
 
 
+# ------------------------------------------------------------------ reporting (v5m §H)
+
+KIND_LABELS = {"early_checkin": "Early check-in", "late_arrival": "Late arrival",
+               "hourly_extension": "Hourly extension"}
+BASIS_LABELS = {"free": "Free", "fixed": "Fixed fee", "percent": "% of night", "full_night": "Full night",
+                "exempt_comp": "Comp (exempt)", "override": "Desk override", "voided": "Voided",
+                "on_time": "On time", "late": "Late"}
+
+
+def stay_events_report(db, date_from, date_to, kind: str | None = None) -> dict:
+    """Rows + totals for the arrival-exceptions report, from stay_events over [date_from, date_to]
+    (by created_at). Also feeds the owner's daily report section and the night-audit summary."""
+    from sqlalchemy import func
+    from models import StayEvent, Booking, Guest, BookingItem, Room, User
+    q = (db.query(StayEvent, Booking, Guest)
+           .join(Booking, Booking.booking_id == StayEvent.booking_id)
+           .outerjoin(Guest, Guest.guest_id == Booking.guest_id)
+           .filter(func.date(StayEvent.created_at) >= date_from,
+                   func.date(StayEvent.created_at) <= date_to))
+    if kind:
+        q = q.filter(StayEvent.kind == kind)
+    rows, totals = [], {"early_checkin": {"count": 0, "charged": 0.0},
+                        "late_arrival": {"count": 0, "charged": 0.0},
+                        "hourly_extension": {"count": 0, "charged": 0.0}}
+    users = {}
+    for ev, b, g in q.order_by(StayEvent.created_at).all():
+        rooms = [r.room_number for r, in db.query(Room).join(BookingItem, BookingItem.room_id == Room.room_id)
+                 .filter(BookingItem.booking_id == b.booking_id).with_entities(Room).all()]
+        approver = None
+        if ev.approved_by:
+            if ev.approved_by not in users:
+                u = db.query(User).filter(User.user_id == ev.approved_by).first()
+                users[ev.approved_by] = u.username if u else str(ev.approved_by)
+            approver = users[ev.approved_by]
+        try:
+            rule = json.loads(ev.rule_json) if ev.rule_json else {}
+        except (ValueError, TypeError):
+            rule = {}
+        amt = float(ev.charge_amount or 0)
+        t = totals.setdefault(ev.kind, {"count": 0, "charged": 0.0})
+        t["count"] += 1
+        t["charged"] = round(t["charged"] + amt, 2)
+        rows.append({
+            "id": ev.id, "date": ev.created_at.strftime("%Y-%m-%d %H:%M") if ev.created_at else None,
+            "booking_id": b.booking_id, "guest": g.name if g else None,
+            "rooms": ", ".join(rooms) or "-", "source": b.booking_source,
+            "kind": ev.kind, "kind_label": KIND_LABELS.get(ev.kind, ev.kind),
+            "expected_at": ev.expected_at.strftime("%d-%m %H:%M") if ev.expected_at else None,
+            "actual_at": ev.actual_at.strftime("%d-%m %H:%M") if ev.actual_at else None,
+            "deviation_minutes": ev.deviation_minutes, "hours": ev.hours,
+            "charge": amt, "quoted": rule.get("quoted"),
+            "basis": ev.charge_basis, "basis_label": BASIS_LABELS.get(ev.charge_basis, ev.charge_basis),
+            "approval": ev.approval, "approved_by": approver, "reason": rule.get("reason"),
+            "voided": ev.charge_basis == "voided",
+        })
+    return {"from": str(date_from), "to": str(date_to), "kind": kind, "rows": rows, "totals": totals,
+            "charged_total": round(sum(t["charged"] for t in totals.values()), 2)}
+
+
 def _num(v, default):
     try:
         return float(v)

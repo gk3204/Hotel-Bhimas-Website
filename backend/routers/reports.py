@@ -1375,6 +1375,38 @@ def _meta(dfrom=None, dto=None):
 # report endpoints
 # ============================================================
 
+@router.get("/arrival-exceptions", dependencies=[Depends(require_admin)])
+def arrival_exceptions_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                              kind: str | None = Query(None), format: str = Query("json"),
+                              db: Session = Depends(get_db)):
+    """v5m — early check-ins, late arrivals and hourly extensions (from stay_events), with what
+    was charged, on what basis and who approved a change."""
+    from utils.arrival_rules import stay_events_report
+    dfrom, dto = _range(from_, to)
+    kind = kind if kind in ("early_checkin", "late_arrival", "hourly_extension") else None
+    data = stay_events_report(db, dfrom, dto, kind)
+    no_shows = db.query(func.count(Booking.booking_id)).filter(
+        Booking.status == "no_show", func.date(Booking.no_show_at) >= dfrom,
+        func.date(Booking.no_show_at) <= dto).scalar() or 0
+    data["no_shows"] = int(no_shows)
+    cols = ["Date", "Booking", "Guest", "Room", "Source", "Kind", "Expected", "Actual", "Deviation",
+            "Hours", "Charge", "Basis", "Approved by"]
+    def _dev(m):
+        if m is None:
+            return ""
+        h, mm = divmod(abs(int(m)), 60)
+        return f"{h}h {mm:02d}m"
+    rows = [[r["date"], r["booking_id"], r["guest"], r["rooms"], r["source"], r["kind_label"],
+             r["expected_at"] or "", r["actual_at"] or "", _dev(r["deviation_minutes"]),
+             r["hours"] or "", r["charge"], r["basis_label"], r["approved_by"] or ""] for r in data["rows"]]
+    t = data["totals"]
+    totals = ["Total", "", "", "", "", f"E {t['early_checkin']['count']} / L {t['late_arrival']['count']} / "
+              f"H {t['hourly_extension']['count']} / no-shows {no_shows}", "", "", "", "",
+              data["charged_total"], "", ""]
+    return _export_or_json(format, data, title="Arrival Exceptions", columns=cols, rows=rows,
+                           totals_row=totals, meta=_meta(dfrom, dto), filename="arrival-exceptions")
+
+
 @router.get("/occupancy", dependencies=[Depends(require_admin)])
 def occupancy_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                      group_by: str = Query("day"), format: str = Query("json"),

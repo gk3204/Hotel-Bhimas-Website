@@ -197,5 +197,11 @@ def run_night_audit(db, business_date=None, user=None, generated_by="scheduler")
     logger.info(f"✅ Day-close {target}: sales ₹{snapshot['total_sales']} "
                 f"occ {snapshot['occupancy_pct']}% cash ₹{snapshot['cash_collected']} "
                 f"(folios opened: {folios_posted})")
+    try:
+        from utils.arrival_rules import stay_events_report
+        arrival_totals = stay_events_report(db, target, target)["totals"]
+    except Exception as e:
+        logger.warning(f"night-audit: arrival-exceptions summary failed: {e}")
+        arrival_totals = {}
     return {"business_date": str(target), "folios_posted": folios_posted, "snapshot": snapshot,
-            "no_shows": no_shows}
+            "no_shows": no_shows, "arrival_exceptions": arrival_totals}

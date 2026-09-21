@@ -265,6 +265,25 @@ const REPORTS = {
         r.nights, r.balance == null ? "—" : fmt(r.balance)]),
     }),
   },
+  "arrival-exceptions": {
+    label: "Arrival Exceptions",
+    path: "arrival-exceptions",
+    range: true,
+    fetch: (p) => api.getArrivalExceptions(p),
+    note: "Early check-ins, late arrivals and hourly (late-checkout) extensions as the arrival rules recorded them, with the fee charged and who approved a change. Voided fees show as Voided. Rules live in Settings → Arrival & departure.",
+    project: (d) => {
+      const dev = (m) => (m == null ? "" : `${Math.floor(Math.abs(m) / 60)}h ${String(Math.abs(m) % 60).padStart(2, "0")}m`);
+      const t = d.totals || {};
+      return {
+        columns: ["Date", "Booking", "Guest", "Room", "Source", "Kind", "Expected", "Actual", "Deviation", "Hours", "Charge", "Basis", "Approved by"],
+        rows: d.rows.map((r) => [r.date, r.booking_id, r.guest, r.rooms, r.source, r.kind_label, r.expected_at || "", r.actual_at || "",
+          dev(r.deviation_minutes), r.hours || "", fmt(r.charge), r.basis_label, r.approved_by || ""]),
+        totals: ["TOTAL", "", "", "", "",
+          `Early ${t.early_checkin?.count ?? 0} · Late ${t.late_arrival?.count ?? 0} · Hours ${t.hourly_extension?.count ?? 0} · No-shows ${d.no_shows ?? 0}`,
+          "", "", "", "", fmt(d.charged_total), "", ""],
+      };
+    },
+  },
   "travel-agents": {
     label: "Travel Agents",
     path: "travel-agents",

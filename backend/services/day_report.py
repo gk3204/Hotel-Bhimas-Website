@@ -183,9 +183,27 @@ def compute_day_report(db, day=None) -> dict:
         return {"new_bookings": new_bookings, "cancellations": cancellations, "overstays": overstays,
                 "open_alerts": open_alerts, "open_complaints": open_complaints}
 
+    # ---- v5m: arrival exceptions (early check-ins / late arrivals / hourly extensions / no-shows)
+    def _arrival_exceptions():
+        from utils.arrival_rules import stay_events_report
+        rep = stay_events_report(db, day, day)
+        t = rep["totals"]
+        no_shows = int(db.query(func.count(Booking.booking_id))
+                       .filter(Booking.status == "no_show", func.date(Booking.no_show_at) == day).scalar() or 0)
+        return {"early_checkins": t["early_checkin"]["count"], "early_charged": t["early_checkin"]["charged"],
+                "late_arrivals": t["late_arrival"]["count"],
+                "hourly_extensions": t["hourly_extension"]["count"], "extension_charged": t["hourly_extension"]["charged"],
+                "no_shows": no_shows,
+                "rows": [{"guest": r["guest"], "room": r["rooms"], "kind": r["kind_label"],
+                          "deviation_minutes": r["deviation_minutes"], "hours": r["hours"],
+                          "charge": r["charge"], "basis": r["basis_label"]} for r in rep["rows"]]}
+
     return {
         "day": str(day),
         "headline": _safe(_headline, {}),
+        "arrival_exceptions": _safe(_arrival_exceptions, {"early_checkins": 0, "early_charged": 0.0, "late_arrivals": 0,
+                                                          "hourly_extensions": 0, "extension_charged": 0.0,
+                                                          "no_shows": 0, "rows": []}),
         "by_source": _safe(_by_source, []),
         "arrivals": _safe(_arrivals, []),
         "departures": _safe(_departures, []),
@@ -231,7 +249,12 @@ def summary_text(report: dict) -> str:
             f"Tickets +{report.get('maintenance', {}).get('opened_count', 0)}/"
             f"-{report.get('maintenance', {}).get('closed_count', 0)} · "
             f"Alerts {report.get('extras', {}).get('open_alerts', 0)}\n"
-            f"Full report attached (PDF).")
+            + (f"Early check-ins {ae.get('early_checkins', 0)} (₹{ae.get('early_charged', 0):,.0f}) · "
+               f"Late arrivals {ae.get('late_arrivals', 0)} · Extensions {ae.get('hourly_extensions', 0)} "
+               f"(₹{ae.get('extension_charged', 0):,.0f}) · No-shows {ae.get('no_shows', 0)}\n"
+               if (ae := report.get("arrival_exceptions")) and any(
+                   ae.get(k) for k in ("early_checkins", "late_arrivals", "hourly_extensions", "no_shows")) else "")
+            + "Full report attached (PDF).")
 
 
 def render_day_report_pdf(report: dict) -> str:

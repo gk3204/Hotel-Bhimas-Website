@@ -56,6 +56,8 @@ export const getPaymentsDaily = (p) => getReport("payments-daily", p);
 export const getArrivalsDepartures = (p) => getReport("arrivals-departures", p);
 export const getInHouse = (p) => getReport("in-house", p);
 export const getTravelAgents = (p) => getReport("travel-agents", p);
+// v5m: early check-ins / late arrivals / hourly extensions (+ no-show count)
+export const getArrivalExceptions = (p) => getReport("arrival-exceptions", p);
 export const getOta = (p) => getReport("ota", p);
 export const getGst = (p) => getReport("gst", p);
 export const getCashShift = (p) => getReport("cash-shift", p);
