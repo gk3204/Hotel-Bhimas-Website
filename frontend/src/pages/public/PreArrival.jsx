@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { apiRequest } from "../../api/api";
 
+const GSTIN_RE = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
+
 const BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 const ID_TYPES = [
@@ -23,8 +25,11 @@ export default function PreArrival() {
 
   const [form, setForm] = useState({
     name: "", phone: "", email: "", id_type: "aadhaar", id_number: "",
-    id_photo_url: "", address: "", dob: "", gstin: "", marketing_optin: false,
+    id_photo_url: "", address: "", dob: "", gstin: "", gst_legal_name: "", gst_state_code: "",
+    marketing_optin: false,
   });
+  // v5m: "Need a GST invoice?" — B2B details that print in the invoice's Bill-to block.
+  const [wantGst, setWantGst] = useState(false);
 
   const set = (k, v) => setForm((f) => ({ ...f, [k]: v }));
 
@@ -80,12 +85,20 @@ export default function PreArrival() {
       setError("Please enter your name and phone number.");
       return;
     }
+    const gstin = (form.gstin || "").trim().toUpperCase().replace(/\s+/g, "");
+    if (wantGst && gstin && !GSTIN_RE.test(gstin)) {
+      setError("That GSTIN does not look right — it is 15 characters, e.g. 37AAACK9397F1Z3.");
+      return;
+    }
     setSubmitting(true);
     setError("");
     try {
+      const payload = { ...form, gstin: wantGst ? gstin : "" };
+      if (!wantGst) { payload.gst_legal_name = ""; payload.gst_state_code = ""; }
+      else if (gstin && !payload.gst_state_code) payload.gst_state_code = gstin.slice(0, 2);
       await apiRequest(`/crm/pre-arrival/${token}`, {
         method: "POST",
-        body: JSON.stringify(form),
+        body: JSON.stringify(payload),
       });
       setDone(true);
     } catch (e) {
@@ -180,14 +193,27 @@ export default function PreArrival() {
                 <L label="Address">
                   <In value={form.address} onChange={(v) => set("address", v)} placeholder="Street, city, state" />
                 </L>
-                <div className="grid grid-cols-2 gap-4">
-                  <L label="Date of birth">
-                    <In type="date" value={form.dob} onChange={(v) => set("dob", v)} />
-                  </L>
-                  <L label="GSTIN (optional)">
-                    <In value={form.gstin} onChange={(v) => set("gstin", v)} placeholder="For a GST invoice" />
-                  </L>
-                </div>
+                <L label="Date of birth">
+                  <In type="date" value={form.dob} onChange={(v) => set("dob", v)} />
+                </L>
+
+                <label className="flex items-center gap-2 text-sm text-slate-600">
+                  <input type="checkbox" checked={wantGst} onChange={(e) => setWantGst(e.target.checked)} />
+                  I need a GST invoice (business / company travel)
+                </label>
+                {wantGst && (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-3">
+                    <L label="GSTIN">
+                      <In value={form.gstin} onChange={(v) => set("gstin", v.toUpperCase())} placeholder="15 characters, e.g. 37AAACK9397F1Z3" />
+                    </L>
+                    <L label="Registered business name (as on the GST certificate)">
+                      <In value={form.gst_legal_name} onChange={(v) => set("gst_legal_name", v)} placeholder="Legal name" />
+                    </L>
+                    <p className="text-xs text-slate-500">
+                      The address above is printed as the billing address. Place of supply is taken from the GSTIN.
+                    </p>
+                  </div>
+                )}
 
                 <label className="flex items-center gap-2 text-sm text-slate-600">
                   <input

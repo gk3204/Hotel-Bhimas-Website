@@ -70,6 +70,8 @@ const GuestDirectory = () => {
     address: g.profile?.address || "",
     dob: g.profile?.dob || "",
     gstin: g.profile?.gstin || "",
+    gst_legal_name: g.profile?.gst_legal_name || "",
+    gst_state_code: g.profile?.gst_state_code || "",
     notes: g.profile?.notes || "",
     marketing_optin: !!g.profile?.marketing_optin,
   });
@@ -290,7 +292,10 @@ const GuestDirectory = () => {
                   <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-500 mb-3">Identity &amp; billing</h3>
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <Field label="Date of birth" type="date" value={selected.form.dob} onChange={(v) => setForm(setSelected, "dob", v)} />
-                    <Field label="GSTIN" value={selected.form.gstin} onChange={(v) => setForm(setSelected, "gstin", v)} />
+                    <Field label="GSTIN" value={selected.form.gstin} onChange={(v) => setForm(setSelected, "gstin", v.toUpperCase())} />
+                    {/* v5m B2B invoice identity: printed in the invoice's Bill-to block. */}
+                    <Field label="GST legal name" value={selected.form.gst_legal_name} onChange={(v) => setForm(setSelected, "gst_legal_name", v)} />
+                    <Field label="Place of supply (state code, from GSTIN if blank)" value={selected.form.gst_state_code} onChange={(v) => setForm(setSelected, "gst_state_code", v)} />
                   </div>
                 </section>
                 <section>

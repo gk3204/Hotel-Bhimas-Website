@@ -73,6 +73,10 @@ def build_payload(invoice_data: dict) -> dict:
         "BuyerDtls": {
             "Gstin": (buyer.get("gstin") or "URP"),
             "LglNm": buyer.get("name") or invoice_data.get("guest_name") or "",
+            # v5m: place of supply + state code + address for a B2B buyer (IRP schema fields).
+            **({"Pos": buyer.get("state_code"), "Stcd": buyer.get("state_code")}
+               if buyer.get("state_code") else {}),
+            **({"Addr1": (buyer.get("address") or "")[:100]} if buyer.get("address") else {}),
         },
         "ItemList": items,
         "ValDtls": {

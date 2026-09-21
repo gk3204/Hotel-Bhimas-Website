@@ -392,6 +392,17 @@ class ExtendHoursRequest(BaseModel):
     client_ref: Optional[str] = Field(None, max_length=64)
 
 
+class InvoiceBuyerRequest(BaseModel):
+    """v5m B2B details for a GST invoice (explicit; overrides the guest profile's GST identity).
+    Send an empty GSTIN to make the invoice B2C again."""
+    buyer_gstin: Optional[str] = Field(None, max_length=20)
+    buyer_name: Optional[str] = Field(None, max_length=160)
+    buyer_address: Optional[str] = Field(None, max_length=300)
+    buyer_state_code: Optional[str] = Field(None, max_length=4)
+    save_to_profile: bool = True
+    client_ref: Optional[str] = Field(None, max_length=64)
+
+
 class CheckinQuoteRequest(BaseModel):
     """v5m dry-run of the arrival rules for the check-in wizard (no writes)."""
     booking_id: int = Field(..., gt=0)
@@ -887,6 +898,10 @@ class GuestProfileUpdate(BaseModel):
     address: Optional[str] = Field(None, max_length=300)
     dob: Optional[date] = None
     gstin: Optional[str] = Field(None, max_length=20)
+    # v5m B2B GST invoice: the registered legal name + place-of-supply state code that print in
+    # the invoice's "Bill to" block. The state code is derived from the GSTIN when omitted.
+    gst_legal_name: Optional[str] = Field(None, max_length=160)
+    gst_state_code: Optional[str] = Field(None, max_length=4)
     marketing_optin: Optional[bool] = None
     notes: Optional[str] = Field(None, max_length=2000)
     # --- Form C / FRRO fields (prompt 18; passport/visa numbers masked server-side) ---
@@ -943,6 +958,10 @@ class PreArrivalSubmit(BaseModel):
     address: Optional[str] = Field(None, max_length=300)
     dob: Optional[date] = None
     gstin: Optional[str] = Field(None, max_length=20)
+    # v5m B2B GST invoice: the registered legal name + place-of-supply state code that print in
+    # the invoice's "Bill to" block. The state code is derived from the GSTIN when omitted.
+    gst_legal_name: Optional[str] = Field(None, max_length=160)
+    gst_state_code: Optional[str] = Field(None, max_length=4)
     marketing_optin: Optional[bool] = None
 
 

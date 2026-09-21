@@ -16,6 +16,7 @@ truth for those flows.
 """
 import json
 import logging
+import re
 import secrets
 from datetime import datetime, timedelta
 
@@ -60,6 +61,32 @@ def _mask_id(number: str | None) -> str | None:
     return ("****" + digits[-4:]) if len(digits) >= 4 else "****"
 
 
+GSTIN_RE = re.compile(r"^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$")
+
+
+def normalise_gstin(v):
+    """Upper-cased, whitespace-stripped GSTIN, or None. Raises 400 on a malformed one."""
+    v = (v or "").strip().upper().replace(" ", "")
+    if not v:
+        return None
+    if not GSTIN_RE.match(v):
+        raise HTTPException(status_code=400, detail=f"'{v}' is not a valid GSTIN (15 characters, e.g. 37AAACK9397F1Z3)")
+    return v
+
+
+def _apply_gst_identity(p: GuestProfile, data):
+    """v5m: GSTIN (validated), legal name and the place-of-supply state code (derived from the
+    GSTIN's first two digits when not given)."""
+    if data.gstin is not None:
+        p.gstin = normalise_gstin(data.gstin)
+    if getattr(data, "gst_legal_name", None) is not None:
+        p.gst_legal_name = (data.gst_legal_name or "").strip() or None
+    if getattr(data, "gst_state_code", None) is not None:
+        p.gst_state_code = (data.gst_state_code or "").strip() or None
+    if p.gstin and not p.gst_state_code:
+        p.gst_state_code = p.gstin[:2]
+
+
 def _get_profile(db: Session, guest_id: int) -> GuestProfile | None:
     return db.query(GuestProfile).filter(GuestProfile.guest_id == guest_id).first()
 
@@ -70,6 +97,7 @@ def _profile_dict(p: GuestProfile | None) -> dict:
                 "loyalty_points": 0, "marketing_optin": False, "id_type": None,
                 "id_number_masked": None, "id_photo_url": None, "guest_photo_url": None,
                 "address": None, "dob": None, "gstin": None, "notes": None,
+                "gst_legal_name": None, "gst_state_code": None,
                 "nationality": None, "is_foreign_national": False,
                 "passport_number_masked": None, "passport_place_of_issue": None,
                 "passport_expiry": None, "visa_number_masked": None, "visa_type": None,
@@ -81,6 +109,7 @@ def _profile_dict(p: GuestProfile | None) -> dict:
         "id_number_masked": p.id_number_masked, "id_photo_url": p.id_photo_url,
         "guest_photo_url": p.guest_photo_url, "address": p.address,
         "dob": p.dob.isoformat() if p.dob else None, "gstin": p.gstin, "notes": p.notes,
+        "gst_legal_name": p.gst_legal_name, "gst_state_code": p.gst_state_code,
         "nationality": p.nationality, "is_foreign_national": bool(p.is_foreign_national),
         "passport_number_masked": p.passport_number_masked,
         "passport_place_of_issue": p.passport_place_of_issue,
@@ -346,6 +375,7 @@ def update_guest(guest_id: int, data: GuestProfileUpdate, db: Session = Depends(
             p.dob = data.dob
         if data.gstin is not None:
             p.gstin = data.gstin
+        _apply_gst_identity(p, data)
         if data.marketing_optin is not None:
             p.marketing_optin = data.marketing_optin
         if data.notes is not None:
@@ -712,6 +742,7 @@ def submit_prearrival(token: str, data: PreArrivalSubmit, db: Session = Depends(
         p.dob = data.dob
     if data.gstin is not None:
         p.gstin = data.gstin
+    _apply_gst_identity(p, data)
     if data.marketing_optin is not None:
         p.marketing_optin = data.marketing_optin
     p.updated_at = datetime.utcnow()

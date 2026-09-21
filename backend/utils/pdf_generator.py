@@ -379,6 +379,19 @@ def _amount_in_words(amount):
     return out + " Only"
 
 
+# GST state codes (place of supply on a B2B invoice).
+_STATE_NAMES = {
+    "01": "Jammu & Kashmir", "02": "Himachal Pradesh", "03": "Punjab", "04": "Chandigarh",
+    "05": "Uttarakhand", "06": "Haryana", "07": "Delhi", "08": "Rajasthan", "09": "Uttar Pradesh",
+    "10": "Bihar", "11": "Sikkim", "12": "Arunachal Pradesh", "13": "Nagaland", "14": "Manipur",
+    "15": "Mizoram", "16": "Tripura", "17": "Meghalaya", "18": "Assam", "19": "West Bengal",
+    "20": "Jharkhand", "21": "Odisha", "22": "Chhattisgarh", "23": "Madhya Pradesh", "24": "Gujarat",
+    "26": "Dadra & Nagar Haveli and Daman & Diu", "27": "Maharashtra", "29": "Karnataka", "30": "Goa",
+    "31": "Lakshadweep", "32": "Kerala", "33": "Tamil Nadu", "34": "Puducherry",
+    "35": "Andaman & Nicobar", "36": "Telangana", "37": "Andhra Pradesh", "38": "Ladakh",
+}
+
+
 def generate_folio_invoice_pdf(invoice_data):
     """
     Generate a GST tax invoice PDF for a folio (prompt 07).
@@ -440,6 +453,13 @@ def generate_folio_invoice_pdf(invoice_data):
         ["Check-in", booking["check_in"].strftime("%d-%m-%Y") if booking["check_in"] else "N/A",
          "Check-out", booking["check_out"].strftime("%d-%m-%Y") if booking["check_out"] else "N/A"],
     ]
+    # v5m B2B: the registered buyer, printed only when the invoice carries a GSTIN.
+    buyer = invoice_data.get("buyer")
+    if buyer and buyer.get("gstin"):
+        meta_data.append(["Bill to", buyer.get("name") or guest["name"], "GSTIN", buyer["gstin"]])
+        pos = buyer.get("state_code") or buyer["gstin"][:2]
+        meta_data.append(["Address", (buyer.get("address") or "-")[:60],
+                          "Place of supply", f"{_STATE_NAMES.get(pos, 'State')} ({pos})"])
     meta_table = Table(meta_data, colWidths=[80, 190, 80, 130])
     meta_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),

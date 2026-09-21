@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session, joinedload
 from database import SessionLocal
 from models import Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, Invoice, Payment, RoomType
 from schemas import (FolioBillToRequest, FolioChargeCreate, FolioDiscountRequest, FolioOpenRequest,
-                     FolioVoidRequest)
+                     FolioVoidRequest, InvoiceBuyerRequest)
 from services import company_service, room_posting
 from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
@@ -581,7 +581,9 @@ def void_charge(folio_id: int, charge_id: int, data: FolioVoidRequest,
         # night is not a bookkeeping-only act — it must also move booking.check_out back and
         # decrement grand_total, or the folio silently decouples from the booking and the
         # contiguous-nights invariant breaks. That belongs to the dedicated reversal route.
-        if charge.type == "room":
+        # v5m: early-check-in / hourly-extension FEES are type='room' (room GST slab) but not
+        # nights — no booking_item_id, no check-out to move — so they void like any other line.
+        if charge.type == "room" and charge.booking_item_id is not None:
             raise HTTPException(
                 status_code=400,
                 detail=("Room nights cannot be voided here — reversing a night also moves the "
@@ -597,6 +599,11 @@ def void_charge(folio_id: int, charge_id: int, data: FolioVoidRequest,
                   "description": charge.description, "amount": float(charge.amount)}
 
         reversal = _void_charge_row(db, charge, data.reason, user)
+        # v5m: a voided arrival / extension fee is reflected in the arrival-exceptions report.
+        from models import StayEvent
+        for ev in db.query(StayEvent).filter(StayEvent.folio_charge_id == charge.id).all():
+            ev.charge_basis = "voided"
+            ev.charge_amount = 0
         _recompute(db, folio)
         db.commit()
 
@@ -761,10 +768,58 @@ def transfer_to_company(folio_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=500, detail="Failed to transfer to the company account")
 
 
-def ensure_invoice(db: Session, folio: Folio, user, client: str = "desktop"):
+def _profile_buyer(db: Session, folio: Folio) -> dict:
+    """v5m: the guest profile's GST identity as an invoice buyer block ({} when B2C)."""
+    from models import GuestProfile
+    booking = db.query(Booking).options(joinedload(Booking.guest)).filter(
+        Booking.booking_id == folio.booking_id).first()
+    guest = booking.guest if booking else None
+    if not guest:
+        return {}
+    p = db.query(GuestProfile).filter(GuestProfile.guest_id == guest.guest_id).first()
+    if not p or not p.gstin:
+        return {}
+    return {"buyer_gstin": p.gstin, "buyer_name": p.gst_legal_name or guest.name,
+            "buyer_address": p.address, "buyer_state_code": p.gst_state_code or p.gstin[:2]}
+
+
+def apply_buyer(invoice: Invoice, buyer: dict | None):
+    """Stamp (or clear) the B2B buyer snapshot on an invoice. Amounts never change."""
+    buyer = buyer or {}
+    gstin = (buyer.get("buyer_gstin") or "").strip().upper() or None
+    invoice.buyer_gstin = gstin
+    invoice.buyer_name = ((buyer.get("buyer_name") or "").strip() or None) if gstin else None
+    invoice.buyer_address = ((buyer.get("buyer_address") or "").strip() or None) if gstin else None
+    invoice.buyer_state_code = ((buyer.get("buyer_state_code") or "").strip() or (gstin[:2] if gstin else None)) if gstin else None
+
+
+def invoice_allowed(db: Session, folio: Folio, user, *, at_checkout: bool = False) -> None:
+    """v5m §I — an invoice is a settlement document: raised at check-out once the folio is
+    settled. Raises 409 otherwise. The checkout transaction passes at_checkout=True (its own
+    zero-balance / override guard already ran); an admin may raise one early only when the
+    balance is zero (a prepaid stay leaving without extras)."""
+    if at_checkout:
+        return
+    balance = round(float(folio.balance or 0), 2)
+    booking = db.query(Booking).filter(Booking.booking_id == folio.booking_id).first()
+    status = booking.status if booking else None
+    is_admin = (user or {}).get("role") == "admin"
+    if balance != 0:
+        raise HTTPException(status_code=409,
+                            detail=f"Settle the folio first — balance ₹{balance:,.2f}. "
+                                   f"The invoice is issued at check-out.")
+    if status != "checked_out" and not is_admin:
+        raise HTTPException(status_code=409,
+                            detail="The invoice is issued at check-out. An admin can raise it early "
+                                   "for a fully settled folio.")
+
+
+def ensure_invoice(db: Session, folio: Folio, user, client: str = "desktop", buyer: dict | None = None):
     """Idempotently allocate a sequential GST invoice for a folio and snapshot its totals.
     Returns (invoice, created). Returns (None, False) when the folio has nothing billable.
-    Commits its own work. Shared by the desk endpoint AND the auto-invoice at checkout (ALT-3)."""
+    Commits its own work. Shared by the desk endpoint AND the auto-invoice at checkout (ALT-3).
+    v5m: `buyer` (explicit B2B block) else the guest profile's GST identity, snapshotted on the
+    invoice so a later profile edit never rewrites an issued document."""
     existing = _get_invoice(db, folio.id)
     if existing:
         return existing, False
@@ -793,6 +848,7 @@ def ensure_invoice(db: Session, folio: Folio, user, client: str = "desktop"):
         company_id=folio.company_id,   # picked up by the consolidated company bill (slice 7)
         created_by=_resolve_user_id(db, user),
     )
+    apply_buyer(invoice, buyer if buyer is not None else _profile_buyer(db, folio))
     db.add(invoice)
     db.commit()
     db.refresh(invoice)
@@ -800,19 +856,31 @@ def ensure_invoice(db: Session, folio: Folio, user, client: str = "desktop"):
     write_audit(db, user, "folio.invoice_create", "folio", folio.id,
                 after={"invoice_no": invoice.invoice_no,
                        "grand_total": totals["grand_total"],
-                       "balance_due": totals["balance_due"]},
+                       "balance_due": totals["balance_due"],
+                       "buyer_gstin": invoice.buyer_gstin},
                 client=client, commit=True)
     return invoice, True
 
 
 @router.post("/{folio_id}/invoice")
-def create_invoice(folio_id: int, db: Session = Depends(get_db),
-                   user=Depends(require_reception_or_admin)):
+def create_invoice(folio_id: int, data: InvoiceBuyerRequest | None = None,
+                   db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
     """Allocate a sequential GST invoice number and snapshot the totals (idempotent).
-    Does NOT settle the folio, but freezes further charges/voids/discounts."""
+    Does NOT settle the folio, but freezes further charges/voids/discounts.
+    v5m: only once the folio is settled (see invoice_allowed); optional B2B buyer body."""
     try:
         folio = _get_folio(db, folio_id)
-        invoice, _created = ensure_invoice(db, folio, user)
+        if not _get_invoice(db, folio.id):
+            invoice_allowed(db, folio, user)
+        buyer = None
+        if data is not None and data.buyer_gstin is not None:
+            from routers.crm import normalise_gstin
+            gstin = normalise_gstin(data.buyer_gstin)
+            buyer = {"buyer_gstin": gstin, "buyer_name": data.buyer_name,
+                     "buyer_address": data.buyer_address, "buyer_state_code": data.buyer_state_code}
+            if gstin and data.save_to_profile:
+                _save_gst_to_profile(db, folio, buyer)
+        invoice, _created = ensure_invoice(db, folio, user, buyer=buyer)
         if invoice is None:
             raise HTTPException(status_code=400, detail="Folio has no charges to invoice")
         return _invoice_summary(invoice)
@@ -824,12 +892,85 @@ def create_invoice(folio_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=500, detail="Failed to create invoice")
 
 
+def _save_gst_to_profile(db: Session, folio: Folio, buyer: dict):
+    """Remember the guest's GST identity for next time (the desk asked at checkout)."""
+    from models import GuestProfile
+    booking = db.query(Booking).filter(Booking.booking_id == folio.booking_id).first()
+    if not booking:
+        return
+    p = db.query(GuestProfile).filter(GuestProfile.guest_id == booking.guest_id).first()
+    if p is None:
+        p = GuestProfile(guest_id=booking.guest_id)
+        db.add(p)
+    p.gstin = buyer.get("buyer_gstin")
+    if buyer.get("buyer_name"):
+        p.gst_legal_name = buyer["buyer_name"]
+    if buyer.get("buyer_address"):
+        p.address = buyer["buyer_address"]
+    p.gst_state_code = buyer.get("buyer_state_code") or (p.gstin[:2] if p.gstin else None)
+    db.flush()
+
+
+@router.patch("/{folio_id}/invoice/buyer")
+def set_invoice_buyer(folio_id: int, data: InvoiceBuyerRequest, db: Session = Depends(get_db),
+                      user=Depends(require_reception_or_admin)):
+    """v5m: add / change / clear the B2B buyer block on an issued invoice. Amounts and the
+    invoice number never change (the GST return needs the buyer, not a new document). Audited."""
+    try:
+        folio = _get_folio(db, folio_id)
+        invoice = _get_invoice(db, folio.id)
+        if not invoice:
+            raise HTTPException(status_code=400, detail="Create the invoice first")
+        from routers.crm import normalise_gstin
+        gstin = normalise_gstin(data.buyer_gstin)
+        before = {"buyer_gstin": invoice.buyer_gstin, "buyer_name": invoice.buyer_name,
+                  "buyer_address": invoice.buyer_address, "buyer_state_code": invoice.buyer_state_code}
+        buyer = {"buyer_gstin": gstin, "buyer_name": data.buyer_name,
+                 "buyer_address": data.buyer_address, "buyer_state_code": data.buyer_state_code}
+        apply_buyer(invoice, buyer)
+        if gstin and data.save_to_profile:
+            _save_gst_to_profile(db, folio, buyer)
+        db.commit()
+        write_audit(db, user, "folio.invoice_buyer_update", "folio", folio.id,
+                    before=before,
+                    after={"invoice_no": invoice.invoice_no, "buyer_gstin": invoice.buyer_gstin,
+                           "buyer_name": invoice.buyer_name, "buyer_address": invoice.buyer_address,
+                           "buyer_state_code": invoice.buyer_state_code, "client_ref": data.client_ref},
+                    client="desktop", commit=True)
+        return _invoice_summary(invoice)
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        logger.error(f"set_invoice_buyer failed: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to update the invoice buyer")
+
+
+@router.get("/{folio_id}/invoice/buyer-defaults")
+def invoice_buyer_defaults(folio_id: int, db: Session = Depends(get_db),
+                           user=Depends(require_reception_or_admin)):
+    """v5m: what the GST-details prompt pre-fills — the issued invoice's buyer, else the profile."""
+    folio = _get_folio(db, folio_id)
+    invoice = _get_invoice(db, folio.id)
+    if invoice and invoice.buyer_gstin:
+        return {"source": "invoice", "buyer_gstin": invoice.buyer_gstin, "buyer_name": invoice.buyer_name,
+                "buyer_address": invoice.buyer_address, "buyer_state_code": invoice.buyer_state_code}
+    prof = _profile_buyer(db, folio)
+    return {"source": "profile" if prof else "none", **{k: prof.get(k) for k in
+            ("buyer_gstin", "buyer_name", "buyer_address", "buyer_state_code")}}
+
+
 def _invoice_summary(invoice: Invoice):
     return {
         "invoice_no": invoice.invoice_no,
         "invoice_date": str(invoice.invoice_date),
         "folio_id": invoice.folio_id,
         "booking_id": invoice.booking_id,
+        "buyer_gstin": invoice.buyer_gstin,
+        "buyer_name": invoice.buyer_name,
+        "buyer_address": invoice.buyer_address,
+        "buyer_state_code": invoice.buyer_state_code,
         "taxable_total": float(invoice.taxable_total or 0),
         "cgst_total": float(invoice.cgst_total or 0),
         "sgst_total": float(invoice.sgst_total or 0),
@@ -896,6 +1037,10 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
             "phone": guest.phone if guest else "N/A",
             "email": guest.email if guest else None,
         },
+        # v5m B2B: printed as a "Bill to" block when a GSTIN is on the invoice.
+        "buyer": ({"gstin": invoice.buyer_gstin, "name": invoice.buyer_name,
+                   "address": invoice.buyer_address, "state_code": invoice.buyer_state_code}
+                  if invoice.buyer_gstin else None),
         "booking": {
             "booking_id": folio.booking_id,
             "check_in": booking.check_in if booking else None,
@@ -972,8 +1117,14 @@ def _einvoice_input(db: Session, folio: Folio, invoice: Invoice) -> dict:
         "gst_breakup": gst_breakup,
         "guest_name": guest.name if guest else "",
         "seller_gstin": os.getenv("GST_EINVOICE_GSTIN", "37AAACK9397F1Z3"),
-        "buyer": {"gstin": (profile.gstin if profile and profile.gstin else "URP"),
-                  "name": guest.name if guest else ""},
+        # v5m: the invoice's own buyer snapshot wins over the (possibly later-edited) profile.
+        "buyer": ({"gstin": invoice.buyer_gstin, "name": invoice.buyer_name or (guest.name if guest else ""),
+                   "address": invoice.buyer_address, "state_code": invoice.buyer_state_code}
+                  if invoice.buyer_gstin else
+                  {"gstin": (profile.gstin if profile and profile.gstin else "URP"),
+                   "name": guest.name if guest else "",
+                   "address": profile.address if profile else None,
+                   "state_code": (profile.gst_state_code or profile.gstin[:2]) if profile and profile.gstin else None}),
     }
 
 
