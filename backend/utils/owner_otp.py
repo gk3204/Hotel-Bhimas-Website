@@ -53,6 +53,8 @@ OTP_ACTIONS = frozenset({
     "room_service_cancel",     # cancel a room-service order (v4b5)
     "checkout_no_card",        # check out without the key card on the encoder (v4b4)
     "ota_unverified",          # v5: accept an OTA booking whose id has no confirming OTA email yet
+    "arrival_fee",             # v5m: early check-in fee changed from the rule's quote (or rule says always)
+    "extend_hours",            # v5m: hourly extension fee changed from the rule's quote (or rule says always)
 })
 
 
@@ -260,6 +262,19 @@ def _sum_ota_unverified(ctx):
             f"booking id {oid}, {_guest_label(ctx)}. Approve only if you can confirm it is genuine.")
 
 
+def _sum_arrival_fee(ctx):
+    return (f"Early check-in for {_guest_label(ctx)}: charge {_inr(abs(ctx.get('applied') or 0))} "
+            f"instead of the rule's {_inr(abs(ctx.get('quoted') or 0))} — "
+            f"{ctx.get('reason') or 'no reason given'} ({_booking_label(ctx)})")
+
+
+def _sum_extend_hours(ctx):
+    return (f"Extend {_guest_label(ctx)} by {ctx.get('hours') or '?'} h until {ctx.get('until') or '?'}: "
+            f"charge {_inr(abs(ctx.get('applied') or 0))} instead of the rule's "
+            f"{_inr(abs(ctx.get('quoted') or 0))} — {ctx.get('reason') or 'no reason given'} "
+            f"({_booking_label(ctx)})")
+
+
 _SUMMARY_BUILDERS = {
     "refund": _sum_refund,
     "discount_below_floor": _sum_discount,
@@ -274,6 +289,8 @@ _SUMMARY_BUILDERS = {
     "room_service_cancel": _sum_rs_cancel,
     "checkout_no_card": _sum_checkout_no_card,
     "ota_unverified": _sum_ota_unverified,
+    "arrival_fee": _sum_arrival_fee,
+    "extend_hours": _sum_extend_hours,
 }
 
 

@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, func, or_
-from datetime import date, datetime
+from datetime import date, datetime, time
 import logging
 
 from database import SessionLocal
@@ -235,7 +235,9 @@ def create_booking(
             total_amount=total_room_amount,
             convenience_fee=convenience_base,
             convenience_gst=convenience_gst,
-            grand_total=grand_total
+            grand_total=grand_total,
+            # v5m: arrival-rules reference (website: the guest's stated time).
+            expected_arrival_at=datetime.combine(data.check_in, data.check_in_time or time(hour=12)),
         )
         
         db.add(booking)

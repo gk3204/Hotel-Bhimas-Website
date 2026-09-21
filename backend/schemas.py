@@ -367,7 +367,20 @@ class CheckinRequest(BaseModel):
     # for a three-room family is unusable and staff would route around it.
     owner_otp_id: Optional[int] = Field(None, gt=0)
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+    # v5m: early check-in fee. None = charge exactly what the arrival rule quotes; a different
+    # amount (incl. 0 = waive) needs a reason and — per the rule's `approval` — an admin login
+    # or an owner code for action `arrival_fee` (its own code, separate from the alt-room one).
+    arrival_fee_applied: Optional[float] = Field(None, ge=0)
+    arrival_fee_reason: Optional[str] = Field(None, max_length=200)
+    arrival_otp_id: Optional[int] = Field(None, gt=0)
+    arrival_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     client_ref: Optional[str] = Field(None, max_length=64)
+
+
+class CheckinQuoteRequest(BaseModel):
+    """v5m dry-run of the arrival rules for the check-in wizard (no writes)."""
+    booking_id: int = Field(..., gt=0)
+    arrival_fee_applied: Optional[float] = Field(None, ge=0)
 
 
 class CardIssueRequest(BaseModel):

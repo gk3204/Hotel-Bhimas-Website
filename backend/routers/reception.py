@@ -21,13 +21,15 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
 from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, BookingItem, \
-    Folio, FolioCharge, CardIssuance, TravelAgent, Company, BookingGuest
+    Folio, FolioCharge, CardIssuance, TravelAgent, Company, BookingGuest, StayEvent
+from utils import arrival_rules
 from utils import secure_id_store
 from utils import availability
 from utils import settings as app_settings
 from utils.settings import validate_category
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, ComplimentaryRequest, \
-    ExtendStayRequest, FolioOpenRequest, ReverseOverstayRequest, RoomShiftRequest, EarlyCheckoutRequest
+    ExtendStayRequest, FolioOpenRequest, ReverseOverstayRequest, RoomShiftRequest, EarlyCheckoutRequest, \
+    CheckinQuoteRequest
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
@@ -268,6 +270,12 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             commission_amount=commission_amount,
             company_id=company.id if company else None,
             bill_to=(data.bill_to or "guest") if company else "guest",
+            # v5m: the moment the arrival rules measure early/late against. OTA stays are
+            # contracted 12:00 whatever the channel mail said.
+            expected_arrival_at=datetime.combine(
+                data.check_in,
+                time(hour=12) if ota_service.is_ota_source(booking_source, db)
+                else (data.check_in_time or time(hour=12))),
         )
         db.add(booking)
         db.flush()
@@ -433,9 +441,17 @@ def booking_checkout_moment(booking: Booking, ref=None) -> datetime:
     # become fixed 12→12 for an OTA booking together.
     if ota_service.is_ota_source(booking.booking_source):
         return datetime.combine(booking.check_out, time(hour=12))
+    # v5m: an hourly extension (checkout_extended_until) is an explicit checkout moment that beats
+    # every derived one — card window, overstay sweep and reminders all follow it.
+    if getattr(booking, "checkout_extended_until", None):
+        return booking.checkout_extended_until
     if _checkout_mode() == "fixed":
         return datetime.combine(booking.check_out, time(hour=_checkout_hour()))
-    return (booking.checked_in_at or ref) + timedelta(days=nights)
+    # v5m: the 24h clock runs from stay_started_at (set at check-in by the arrival rules — the
+    # expected time for an early or badly-late guest, the actual moment otherwise), falling back
+    # to checked_in_at for stays that started before the rules existed.
+    anchor = getattr(booking, "stay_started_at", None) or booking.checked_in_at or ref
+    return anchor + timedelta(days=nights)
 
 
 def _card_window(booking: Booking):
@@ -500,6 +516,199 @@ def _encode_payload(db: Session, item: BookingItem, room: Room, valid_from, vali
     }
 
 
+# ---------------------------------------------------------------------------------------------
+# v5m — arrival rules at check-in
+# ---------------------------------------------------------------------------------------------
+
+def expected_arrival(booking: Booking, db=None) -> datetime:
+    """The moment the guest was expected: booked date + expected time; OTA stays are contracted
+    12:00. Stored on the booking at creation (expected_arrival_at); derived for older rows."""
+    stored = getattr(booking, "expected_arrival_at", None)
+    if stored:
+        return stored
+    if ota_service.is_ota_source(booking.booking_source, db):
+        return datetime.combine(booking.check_in, time(hour=12))
+    return datetime.combine(booking.check_in, booking.check_in_time or time(hour=12))
+
+
+def _night_rate(db, booking: Booking) -> float:
+    """One night of this stay (all rooms) through the rate engine, GST-inclusive — the base a
+    percent-mode fee is taken from. Falls back to the booked per-night average when the engine
+    has no rate (e.g. a room type with no rate plan)."""
+    items = list(booking.booking_items)
+    try:
+        quotes = room_posting._quote_nights(db, booking, items, [booking.check_in])
+        rate = round(sum(n["rate"] for pn in quotes.values() for n in pn), 2)
+        if rate > 0:
+            return rate
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning(f"night rate quote failed for booking {booking.booking_id}: {e}")
+    nights = max(1, (booking.check_out - booking.check_in).days)
+    return round(float(booking.total_amount or 0) / nights, 2)
+
+
+def _room_gst_percent(db, booking: Booking) -> float | None:
+    item = next(iter(booking.booking_items), None)
+    rt = db.query(RoomType).filter(RoomType.room_type_id == item.room_type_id).first() if item else None
+    return float(rt.gst_percent) if rt and rt.gst_percent is not None else None
+
+
+def _fmt_dev(minutes: int) -> str:
+    h, m = divmod(abs(int(minutes)), 60)
+    return f"{h} h {m:02d} m" if h else f"{m} min"
+
+
+def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
+                       applied: float | None = None, rules: dict | None = None) -> dict:
+    """Evaluate the arrival rules for a check-in happening `now` (pure; no writes).
+
+    Returns everything the wizard shows and check_in acts on: kind (early / late / on_time),
+    deviation, quoted fee + basis, whether a whole extra night is needed (day-early arrivals are
+    always a full night — the room is slept in tonight), the stay-clock anchor, the checkout
+    moment that follows, and whether `applied` needs an approval."""
+    now = now or datetime.now()
+    rules = rules or arrival_rules.load_rules(db)
+    is_ota = ota_service.is_ota_source(booking.booking_source, db)
+    expected = expected_arrival(booking, db)
+    comp = room_posting._is_comped(booking)
+    src = booking.booking_source or "direct"
+    today = now.date()
+    day_early = today < booking.check_in
+    days_early = (booking.check_in - today).days if day_early else 0
+    nights = max(1, (booking.check_out - booking.check_in).days)
+
+    out = {"kind": "on_time", "expected_at": expected, "now": now, "is_ota": is_ota,
+           "deviation_minutes": 0, "quoted": 0.0, "applied": 0.0, "basis": "on_time",
+           "full_night": False, "days_early": days_early, "rule": None, "approval": "never",
+           "needs_approval": False, "stay_start": now, "night_rate": 0.0, "comp": comp,
+           "text": "", "lapsed": None, "extra_nights": 0}
+
+    # Lapsed window: OTA after noon on the check-out date; others once the check-out date is over.
+    if is_ota and now >= datetime.combine(booking.check_out, time(hour=12)):
+        out["lapsed"] = f"OTA stay window closed at 12:00 on {booking.check_out:%d-%m-%Y}"
+    elif not is_ota and today > booking.check_out:
+        out["lapsed"] = f"Stay window lapsed on {booking.check_out:%d-%m-%Y}"
+
+    if now < expected:
+        rate = _night_rate(db, booking)
+        ev = arrival_rules.evaluate_early(rules, src, expected, now, rate, comp)
+        out.update(kind="early", deviation_minutes=ev["deviation_minutes"], rule=ev["rule"],
+                   quoted=ev["charge"], basis=ev["basis"], full_night=ev["full_night"],
+                   approval=ev["approval"], night_rate=rate)
+        if day_early and not ev["exempt"]:
+            # The room is occupied tonight, so a day-early arrival is always a night (per day),
+            # whatever the fee band says.
+            out.update(full_night=True, quoted=round(rate * days_early, 2), basis="full_night")
+        if ev["exempt"]:
+            out.update(full_night=False, quoted=0.0)
+        # Nights the booking grows by: every day early is one, and a same-day arrival beyond
+        # the full-night bound is one too. The paid stay still runs from the expected time; with
+        # extra nights the clock starts that many days earlier so the checkout moment is unchanged.
+        out["extra_nights"] = max(days_early, 1 if out["full_night"] else 0)
+        out["stay_start"] = expected - timedelta(days=out["extra_nights"])
+    elif now > expected:
+        ev = arrival_rules.evaluate_late_arrival(rules, src, expected, now)
+        out.update(kind="late", deviation_minutes=ev["deviation_minutes"], rule=ev["rule"],
+                   basis="late", stay_start=ev["stay_start"])
+        if ev["deviation_minutes"] == 0:
+            out.update(kind="on_time", basis="on_time", stay_start=now)
+
+    # Applied amount + approval (only a charged early arrival can be edited).
+    quoted = float(out["quoted"])
+    if out["kind"] == "early" and out["basis"] not in ("exempt_comp", "free", "on_time"):
+        applied_amt = quoted if applied is None else round(float(applied), 2)
+        out["applied"] = applied_amt
+        out["needs_approval"] = arrival_rules.needs_approval(out["rule"], quoted, applied)
+    else:
+        out["applied"] = 0.0
+
+    # Checkout moment that follows from this arrival.
+    if is_ota:
+        out["checkout_at"] = datetime.combine(booking.check_out, time(hour=12))
+    elif _checkout_mode() == "fixed":
+        out["checkout_at"] = datetime.combine(booking.check_out, time(hour=_checkout_hour()))
+    else:
+        out["checkout_at"] = out["stay_start"] + timedelta(days=nights + out["extra_nights"])
+
+    dev = _fmt_dev(out["deviation_minutes"])
+    co = out["checkout_at"]
+    if out["kind"] == "early":
+        if out["basis"] == "exempt_comp":
+            out["text"] = f"Early by {dev} — complimentary stay, no fee"
+        elif out["basis"] in ("free", "on_time"):
+            out["text"] = f"Early by {dev} — within the free allowance"
+        elif out["full_night"]:
+            what = "an extra night" if days_early <= 1 else f"{days_early} extra nights"
+            out["text"] = f"Early by {dev} — charged as {what} (₹{quoted:,.0f})"
+        else:
+            out["text"] = f"Early by {dev} — early check-in fee ₹{quoted:,.0f}"
+        out["text"] += f" · stay runs from {expected:%H:%M} → checkout {co:%d %b %H:%M}"
+    elif out["kind"] == "late":
+        if out["stay_start"] == expected:
+            out["text"] = (f"Late by {dev} — stay counted from the booked {expected:%d %b %H:%M}"
+                           f" → checkout {co:%d %b %H:%M}")
+        else:
+            out["text"] = f"Late by {dev} — 24 h clock starts now → checkout {co:%d %b %H:%M}"
+    else:
+        out["text"] = f"On time → checkout {co:%d %b %H:%M}"
+    if is_ota:
+        out["text"] = f"OTA stay: room until 12:00 on {booking.check_out:%d %b}" + (
+            f" · {out['text'].split(' · ')[0]}" if out["kind"] == "early" else
+            (f" · late by {dev}" if out["kind"] == "late" else ""))
+    return out
+
+
+def _arrival_public(ev: dict) -> dict:
+    """JSON-safe slice of arrival_evaluation for the desk."""
+    return {
+        "kind": ev["kind"], "text": ev["text"], "deviation_minutes": ev["deviation_minutes"],
+        "expected_at": ev["expected_at"].isoformat() if ev.get("expected_at") else None,
+        "quoted": ev["quoted"], "applied": ev["applied"], "basis": ev["basis"],
+        "full_night": ev["full_night"], "days_early": ev["days_early"], "extra_nights": ev["extra_nights"],
+        "approval": ev["approval"], "needs_approval": ev["needs_approval"],
+        "editable": ev["kind"] == "early" and ev["basis"] not in ("exempt_comp", "free", "on_time"),
+        "stay_start": ev["stay_start"].isoformat() if ev.get("stay_start") else None,
+        "checkout_at": ev["checkout_at"].isoformat() if ev.get("checkout_at") else None,
+        "is_ota": ev["is_ota"], "lapsed": ev["lapsed"], "night_rate": ev["night_rate"],
+        "comp": ev["comp"],
+        "rule": {k: v for k, v in (ev["rule"] or {}).items() if k != "sources"} if ev.get("rule") else None,
+    }
+
+
+def _assert_early_capacity(db, booking: Booking, date_from: date, date_to: date):
+    """A day-early arrival sleeps in a room tonight: the room TYPE must have capacity for the
+    extra night(s), row-locked like /extend so a concurrent check-in cannot oversell."""
+    need = {}
+    for item in booking.booking_items:
+        need[item.room_type_id] = need.get(item.room_type_id, 0) + int(item.quantity or 1)
+    for rt_id, qty in need.items():
+        rt = db.query(RoomType).filter(RoomType.room_type_id == rt_id).first()
+        name = rt.name if rt else f"type {rt_id}"
+        booked = int(_booked_qty(db, rt_id, date_from, date_to, lock=True))
+        inactive = int(_inactive_count(db, rt_id))
+        free = (rt.total_rooms if rt else 0) - booked - inactive
+        if free < qty:
+            raise HTTPException(
+                status_code=409,
+                detail=f"No {name} room is available for an early arrival tonight "
+                       f"({date_from:%d-%m-%Y}) — a reservation needs it")
+
+
+@router.post("/checkin/quote")
+def checkin_quote(data: CheckinQuoteRequest, db: Session = Depends(get_db),
+                  user=Depends(require_reception_or_admin)):
+    """v5m dry-run: what the arrival rules will do if this booking is checked in right now."""
+    booking = db.query(Booking).options(joinedload(Booking.booking_items)).filter(
+        Booking.booking_id == data.booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    ev = arrival_evaluation(db, booking, applied=data.arrival_fee_applied)
+    out = _arrival_public(ev)
+    out["booking_id"] = booking.booking_id
+    out["is_admin"] = user.get("role") == "admin"
+    return out
+
+
 def _checkin_response(db: Session, booking: Booking, folio: Folio | None, already: bool):
     valid_from, valid_to = _card_window(booking)
     cards = []
@@ -557,13 +766,35 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                     detail=f"Guest is blacklisted: {checkin_gate['reason'] or 'no reason on file'}. "
                            f"An admin login is required to override and check in.")
 
-        today = date.today()
-        if today < booking.check_in:
+        # ---- v5m: arrival rules — early / late / lapsed, evaluated once, right now ----
+        # A late guest may still check in on the check-out date (no re-dating at the desk);
+        # an early guest pays by rule; a day-early guest is an extra night IF a room is free.
+        now = datetime.now()
+        today = now.date()
+        arrival = arrival_evaluation(db, booking, now, applied=data.arrival_fee_applied)
+        if arrival["lapsed"]:
+            raise HTTPException(status_code=400, detail=arrival["lapsed"])
+        if arrival["days_early"] > 1:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Booking starts on {booking.check_in:%d-%m-%Y} — more than a day early. "
+                       f"Ask an admin to re-date the booking.")
+        if arrival["days_early"] == 1:
+            _assert_early_capacity(db, booking, today, booking.check_in)
+        fee_quoted = float(arrival["quoted"])
+        fee_applied = float(arrival["applied"])
+        fee_changed = arrival["kind"] == "early" and data.arrival_fee_applied is not None \
+            and round(fee_applied, 2) != round(fee_quoted, 2)
+        if fee_changed and not (data.arrival_fee_reason or "").strip():
             raise HTTPException(status_code=400,
-                                detail=f"Booking starts on {booking.check_in:%d-%m-%Y} — too early to check in")
-        if today >= booking.check_out:
-            raise HTTPException(status_code=400,
-                                detail=f"Stay window lapsed on {booking.check_out:%d-%m-%Y}")
+                                detail="Charging something other than the rule's early check-in fee needs a reason")
+        arrival_approval = "none"
+        if arrival["needs_approval"]:
+            if user.get("role") == "admin":
+                arrival_approval = "admin"
+            else:
+                consume_otp(db, data.arrival_otp_id, data.arrival_otp_code, "arrival_fee", user)
+                arrival_approval = "owner_otp"
 
         # Anti-fraud gate: no recorded payment => no check-in (and no card).
         # v4b1: "paid" includes a prepayment collected by the channel that sold the stay.
@@ -756,7 +987,12 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 booking.guest.email = str(data.email).strip()
 
         booking.status = "checked_in"
-        booking.checked_in_at = datetime.now()
+        booking.checked_in_at = now
+        # v5m: the 24h stay clock anchor per the arrival rules (expected time for an early or
+        # badly-late guest, the actual moment otherwise). OTA stays ignore it (always 12→12).
+        booking.stay_started_at = arrival["stay_start"]
+        if not getattr(booking, "expected_arrival_at", None):
+            booking.expected_arrival_at = arrival["expected_at"]
         for room in rooms_by_id.values():
             room.status = "occupied"
             room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
@@ -780,6 +1016,65 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # Folio (idempotent; posts room charges + advance payment credits, own commit).
         open_folio(FolioOpenRequest(booking_id=booking.booking_id), db, user)
         folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+
+        # ---- v5m: early / late arrival — post the fee or the extra night, record the event ----
+        arrival_charge_id = None
+        if folio and arrival["kind"] in ("early", "late"):
+            try:
+                gst = _room_gst_percent(db, booking)
+                exp = arrival["expected_at"]
+                if arrival["kind"] == "early" and arrival["extra_nights"] >= 1:
+                    # Whole extra night(s): priced through the rate engine (spread to the applied
+                    # amount when the desk changed it; nothing posted for a comp stay), then the
+                    # booking's check-in moves back so "room lines = nights in [check_in,
+                    # check_out)" still holds and tonight's inventory counts this stay.
+                    d_from = booking.check_in - timedelta(days=arrival["extra_nights"])
+                    room_posting.assert_nights_identifiable(db, folio.id)
+                    posted = room_posting.post_room_nights(
+                        db, booking, folio, d_from, booking.check_in, user=user,
+                        posting_reason="early", price_mode=room_posting.PRICE_QUOTE,
+                        override_total=fee_applied if fee_changed else None, recompute=False)
+                    if posted["posted"]:
+                        arrival_charge_id = posted["posted"][0]
+                        for c in db.query(FolioCharge).filter(FolioCharge.id.in_(posted["posted"])).all():
+                            c.description = f"Early check-in — {c.description}"
+                    if not booking.original_check_in:
+                        booking.original_check_in = booking.check_in
+                    booking.check_in = d_from
+                elif arrival["kind"] == "early" and fee_applied > 0:
+                    charge = FolioCharge(
+                        folio_id=folio.id, type="room",
+                        description=(f"Early check-in fee — {_fmt_dev(arrival['deviation_minutes'])} "
+                                     f"before {exp:%H:%M}"),
+                        qty=1, unit_price=fee_applied, amount=fee_applied, gst_percent=gst,
+                        posted_by=_resolve_user_id(db, user), charge_date=today,
+                        posting_reason="early")
+                    db.add(charge)
+                    db.flush()
+                    arrival_charge_id = charge.id
+                basis = arrival["basis"]
+                if fee_changed:
+                    basis = "override"
+                db.add(StayEvent(
+                    booking_id=booking.booking_id, kind="early_checkin" if arrival["kind"] == "early" else "late_arrival",
+                    expected_at=exp, actual_at=now, deviation_minutes=arrival["deviation_minutes"],
+                    charge_amount=fee_applied if arrival["kind"] == "early" else 0,
+                    charge_basis=basis if arrival["kind"] == "early" else "free",
+                    rule_json=arrival_rules.rule_snapshot({**(arrival["rule"] or {}),
+                                                           "quoted": fee_quoted,
+                                                           "reason": data.arrival_fee_reason,
+                                                           "stay_start": arrival["stay_start"].isoformat()}),
+                    approval=arrival_approval,
+                    approved_by=_resolve_user_id(db, user) if arrival_approval != "none" else None,
+                    folio_charge_id=arrival_charge_id,
+                    created_by=_resolve_user_id(db, user)))
+                _recompute(db, folio)
+                db.commit()
+            except HTTPException:
+                raise
+            except Exception as e:
+                logger.error(f"arrival fee posting failed for booking {booking.booking_id}: {e}", exc_info=True)
+                db.rollback()
 
         # Corporate bill-to (prompt 18 slice 7): the booking was flagged for a company, so route
         # the freshly-posted ROOM lines to it now. `bill_to='company'` routes everything the desk
@@ -822,6 +1117,12 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                                 "sold_as_type_id": _r.room_type_id}
                                for _i, _r in alt_sales],
                            "alt_type_otp_id": data.owner_otp_id if alt_sales else None,
+                           # v5m: how the arrival rules were applied (the report reads stay_events).
+                           "arrival": {"kind": arrival["kind"], "deviation_minutes": arrival["deviation_minutes"],
+                                       "quoted": fee_quoted, "applied": fee_applied,
+                                       "basis": arrival["basis"], "approval": arrival_approval,
+                                       "reason": data.arrival_fee_reason,
+                                       "stay_start": arrival["stay_start"].isoformat()},
                            "client_ref": data.client_ref},
                     client="desktop", commit=True)
 
@@ -861,6 +1162,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         resp["blacklist_warning"] = (checkin_gate["reason"] or "Guest is on the watchlist") \
             if checkin_gate["blacklist"] else None
         resp["company_routing"] = company_routing
+        resp["arrival"] = _arrival_public(arrival)
+        resp["folio_balance"] = float(folio.balance or 0) if folio else None
         return resp
     except HTTPException:
         db.rollback()
@@ -2183,17 +2486,22 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
     # rate" on every website/OTA arrival, which is how a guest gets asked to pay twice. `paid`
     # is passed in because the row already summed it; the rule itself lives in payments.py.
 
-    arrivals = []
-    for b in db.query(Booking).options(
-            joinedload(Booking.guest),
-            joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
-    ).filter(
-        Booking.status == "confirmed",
-        Booking.check_in <= today,
-        Booking.check_out > today,
-    ).order_by(Booking.check_in_time, Booking.booking_id).all():
+    # v5m: arrivals now include a late guest up to and including the check-out date (no re-dating
+    # at the desk; the arrival rules decide the stay clock), each row carrying the server-side
+    # evaluation the wizard shows. `upcoming` lists the next 7 days for early check-ins.
+    _rules = arrival_rules.load_rules(db)
+    _now = datetime.now()
+
+    def _arrival_row(b):
         paid, folio_id, folio_balance = _paid_and_folio(b.booking_id)
-        arrivals.append({
+        try:
+            ev = arrival_evaluation(db, b, _now, rules=_rules)
+            preview = _arrival_public(ev)
+        except Exception as e:  # never let a rules problem hide an arrival
+            logger.warning(f"arrival preview failed for booking {b.booking_id}: {e}")
+            preview = None
+        exp = expected_arrival(b, db)
+        return {
             "booking_id": b.booking_id,
             "guest_id": b.guest_id,
             "guest_name": b.guest.name if b.guest else None,
@@ -2210,6 +2518,11 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "folio_balance": folio_balance,
             "adults": int(b.adults or 1),
             "children": int(b.children or 0),
+            "expected_arrival_at": exp.isoformat(),
+            "is_late": bool(preview and preview["kind"] == "late"),
+            "is_early": bool(preview and preview["kind"] == "early"),
+            "lapsed": (preview or {}).get("lapsed"),
+            "arrival_preview": preview,
             **prepaid_slice(db, b, paid=paid),
             **_bill_to(b),
             "items": [{
@@ -2218,7 +2531,18 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
                 "room_type_name": i.room_type.name if i.room_type else None,
                 "quantity": i.quantity,
             } for i in b.booking_items],
-        })
+        }
+
+    _arrival_q = db.query(Booking).options(
+        joinedload(Booking.guest),
+        joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
+    ).filter(Booking.status == "confirmed")
+    arrivals = [_arrival_row(b) for b in _arrival_q.filter(
+        Booking.check_in <= today, Booking.check_out >= today,
+    ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()]
+    upcoming = [_arrival_row(b) for b in _arrival_q.filter(
+        Booking.check_in > today, Booking.check_in <= today + timedelta(days=7),
+    ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()]
 
     # Read the overstay config ONCE for the whole board rather than per row.
     ov_cfg = app_settings.get_overstay_config(db)
@@ -2263,6 +2587,9 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             # The expected check-out MOMENT (not just the date) so the desk can show "out 12:00" beside
             # the "in HH:mm" arrival time. Same source-aware anchor as card expiry / overstay billing.
             "expected_check_out": booking_checkout_moment(b).isoformat(),
+            # v5m: an hourly extension in force (the moment above already follows it).
+            "checkout_extended_until": b.checkout_extended_until.isoformat() if b.checkout_extended_until else None,
+            "stay_started_at": b.stay_started_at.isoformat() if b.stay_started_at else None,
             "grand_total": float(b.grand_total or 0),
             "paid_total": paid,
             "folio_id": folio_id,
@@ -2321,7 +2648,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "cleaning_card": cleaning_card_state(db, r),
         })
 
-    return {"date": str(today), "arrivals": arrivals, "inhouse": inhouse,
+    return {"date": str(today), "arrivals": arrivals, "upcoming": upcoming, "inhouse": inhouse,
             "vacant_rooms": vacant_rooms, "rooms": rooms_hk}
 
 
