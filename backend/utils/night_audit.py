@@ -121,6 +121,26 @@ def roll_business_date(db, business_date, user=None):
     set_setting(db, BUSINESS_DATE_KEY, business_date.isoformat(), user, commit=True)
 
 
+def mark_no_shows(db, today=None, generated_by="scheduler") -> list:
+    """v5m: a `confirmed` booking whose booked check-OUT date is over never arrived — mark it a
+    no-show. Never earlier: a badly-late guest may still check in on any booked date (the
+    arrival rules decide the stay clock). Money is untouched; `no_show` is not a reserved
+    status, so the inventory is released. Idempotent. Returns the booking ids marked."""
+    from models import Booking
+    from routers.booking_lifecycle import mark_no_show
+    today = today or date.today()
+    marked = []
+    rows = db.query(Booking).filter(Booking.status == "confirmed", Booking.check_out < today).all()
+    for b in rows:
+        mark_no_show(db, b, None, reason=f"check-out date {b.check_out} passed without arrival",
+                     client=generated_by, automatic=True)
+        marked.append(b.booking_id)
+    if marked:
+        db.commit()
+        logger.info(f"night-audit: {len(marked)} no-show(s) marked: {marked}")
+    return marked
+
+
 def run_night_audit(db, business_date=None, user=None, generated_by="scheduler"):
     """Full night-audit sweep for one business date. Idempotent — safe to re-run. Returns a
     summary dict {business_date, folios_posted, snapshot}."""
@@ -136,6 +156,14 @@ def run_night_audit(db, business_date=None, user=None, generated_by="scheduler")
     except Exception as e:
         logger.error(f"night-audit: overstay sweep failed: {e}")
         db.rollback()
+
+    # v5m: bookings whose check-out date is over without an arrival are no-shows.
+    try:
+        no_shows = mark_no_shows(db, generated_by="night-audit")
+    except Exception as e:
+        logger.error(f"night-audit: mark_no_shows failed: {e}")
+        db.rollback()
+        no_shows = []
 
     try:
         folios_posted = ensure_folios_posted(db)
@@ -169,4 +197,5 @@ def run_night_audit(db, business_date=None, user=None, generated_by="scheduler")
     logger.info(f"✅ Day-close {target}: sales ₹{snapshot['total_sales']} "
                 f"occ {snapshot['occupancy_pct']}% cash ₹{snapshot['cash_collected']} "
                 f"(folios opened: {folios_posted})")
-    return {"business_date": str(target), "folios_posted": folios_posted, "snapshot": snapshot}
+    return {"business_date": str(target), "folios_posted": folios_posted, "snapshot": snapshot,
+            "no_shows": no_shows}

@@ -7,9 +7,9 @@ import {
   getBookingGuests,
   getGuestScanObjectUrl,
 } from "../../api/bookings";
-import { adminCancelBooking } from "../../api/admin";
+import { adminCancelBooking, markNoShow, reinstateBooking, redateBooking } from "../../api/admin";
 import { jwtDecode } from "jwt-decode";
-import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard } from "react-icons/fa";
+import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard, FaUserSlash, FaUndo, FaCalendarAlt } from "react-icons/fa";
 import { prettyCategory } from "../../utils/useCategoryList";
 
 // "2026-08-02T14:32:10" -> "14:32". Times are stored/served in Asia/Kolkata.
@@ -47,6 +47,9 @@ const Bookings = () => {
   const [adminCancelRefundType, setAdminCancelRefundType] = useState("full");
   const [adminCancelNotes, setAdminCancelNotes] = useState("");
   const [adminCancelLoading, setAdminCancelLoading] = useState(false);
+  // v5m: admin re-date dialog + no-show / reinstate actions
+  const [redate, setRedate] = useState(null);   // { booking, check_in, check_out, check_in_time, reason }
+  const [redateBusy, setRedateBusy] = useState(false);
 
   const limit = 15;
   const totalPages = Math.ceil(total / limit);
@@ -174,6 +177,41 @@ const Bookings = () => {
     }
   };
 
+  // v5m ---------------------------------------------------------------------
+  const doNoShow = async (b) => {
+    const reason = window.prompt(`Mark booking #${b.booking_id} (${b.guest_name || "guest"}) as a NO-SHOW?\nMoney already paid stays as it is. Reason (optional):`, "");
+    if (reason === null) return;
+    try {
+      await markNoShow(b.booking_id, reason || null);
+      showToast("Marked as no-show.");
+      loadBookings();
+    } catch (e) { showToast(e.message || "Could not mark no-show", "error"); }
+  };
+  const doReinstate = async (b) => {
+    if (!window.confirm(`Reinstate booking #${b.booking_id} to CONFIRMED? The dates stay ${b.check_in} to ${b.check_out}; use Re-date to move them.`)) return;
+    try {
+      await reinstateBooking(b.booking_id, null);
+      showToast("Booking reinstated.");
+      loadBookings();
+    } catch (e) { showToast(e.message || "Could not reinstate", "error"); }
+  };
+  const openRedate = (b) => setRedate({ booking: b, check_in: b.check_in, check_out: b.check_out, check_in_time: "", reason: "" });
+  const submitRedate = async () => {
+    if (!redate || redate.reason.trim().length < 3) { showToast("A reason is required (3+ characters).", "error"); return; }
+    setRedateBusy(true);
+    try {
+      const payload = { check_in: redate.check_in, check_out: redate.check_out || null, reason: redate.reason.trim() };
+      if (redate.check_in_time) payload.check_in_time = redate.check_in_time;
+      const res = await redateBooking(redate.booking.booking_id, payload);
+      showToast(res.length_changed
+        ? `Re-dated to ${res.check_in} to ${res.check_out} (${res.nights} nights; price unchanged, adjust on the folio).`
+        : `Re-dated to ${res.check_in} to ${res.check_out}.`);
+      setRedate(null);
+      loadBookings();
+    } catch (e) { showToast(e.message || "Could not re-date", "error"); }
+    finally { setRedateBusy(false); }
+  };
+
   const confirmCancel = async () => {
     try {
       await cancelBooking(confirmId);
@@ -206,6 +244,8 @@ const Bookings = () => {
         return "bg-red-500/20 text-red-300 border-red-500/30";
       case "admin_cancelled":
         return "bg-red-600/30 text-red-200 border-red-600/50";
+      case "no_show":
+        return "bg-orange-600/25 text-orange-200 border-orange-500/50";
       case "pending_payment":
         return "bg-yellow-500/20 text-yellow-300 border-yellow-500/30";
       case "payment_failed":
@@ -254,11 +294,13 @@ const Bookings = () => {
                 onChange={(e) => { setPage(1); setStatusFilter(e.target.value); }}
               >
                 <option value="">All statuses</option>
-                <option value="pending">Pending</option>
+                <option value="pending_payment">Pending payment</option>
                 <option value="confirmed">Confirmed</option>
                 <option value="checked_in">Checked in</option>
                 <option value="checked_out">Checked out</option>
+                <option value="no_show">No-show</option>
                 <option value="cancelled">Cancelled</option>
+                <option value="admin_cancelled">Cancelled by admin</option>
               </select>
             </div>
             <button
@@ -436,6 +478,35 @@ const Bookings = () => {
                                 className="bg-red-600 hover:bg-red-700 px-3 py-2 rounded-lg text-white text-sm font-medium transition inline-flex items-center gap-1"
                               >
                                 <FaTrash size={12} /> Cancel
+                              </button>
+                            )}
+                            {/* v5m: arrival lifecycle - re-date (admin only, with an availability check),
+                                mark no-show, reinstate a no-show. */}
+                            {role === "admin" && (b.status === "confirmed" || b.status === "no_show") && (
+                              <button
+                                onClick={() => openRedate(b)}
+                                title="Move the booked dates (checks room availability)"
+                                className="bg-slate-600 hover:bg-slate-500 px-3 py-2 rounded-lg text-white text-sm font-medium transition inline-flex items-center gap-1"
+                              >
+                                <FaCalendarAlt size={12} /> Re-date
+                              </button>
+                            )}
+                            {b.status === "confirmed" && (
+                              <button
+                                onClick={() => doNoShow(b)}
+                                title="The guest did not arrive"
+                                className="bg-orange-700 hover:bg-orange-600 px-3 py-2 rounded-lg text-white text-sm font-medium transition inline-flex items-center gap-1"
+                              >
+                                <FaUserSlash size={12} /> No-show
+                              </button>
+                            )}
+                            {role === "admin" && b.status === "no_show" && (
+                              <button
+                                onClick={() => doReinstate(b)}
+                                title="Undo the no-show (back to confirmed)"
+                                className="bg-green-700 hover:bg-green-600 px-3 py-2 rounded-lg text-white text-sm font-medium transition inline-flex items-center gap-1"
+                              >
+                                <FaUndo size={12} /> Reinstate
                               </button>
                             )}
                           </td>
@@ -694,6 +765,57 @@ const Bookings = () => {
         )}
 
         {/* ── ADMIN CANCELLATION MODAL ── */}
+        {/* v5m: admin re-date dialog */}
+        {redate && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
+              <h2 className="text-2xl font-bold mb-2 text-[#E5C07B]">Re-date arrival</h2>
+              <p className="text-sm text-slate-400 mb-5">
+                Booking #{redate.booking.booking_id} - {redate.booking.guest_name} - booked {redate.booking.check_in} to {redate.booking.check_out}.
+                Room availability is checked for the new dates. The price stays as booked; a longer or shorter stay is adjusted on the folio.
+                {redate.booking.status === "no_show" && " Re-dating a no-show reinstates it."}
+              </p>
+              <div className="space-y-4">
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">New check-in*</label>
+                    <input type="date" value={redate.check_in} min={new Date().toISOString().slice(0, 10)}
+                           onChange={(e) => setRedate({ ...redate, check_in: e.target.value })}
+                           className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]" />
+                  </div>
+                  <div>
+                    <label className="block text-xs font-semibold text-slate-300 mb-1">New check-out</label>
+                    <input type="date" value={redate.check_out || ""} min={redate.check_in}
+                           onChange={(e) => setRedate({ ...redate, check_out: e.target.value })}
+                           className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]" />
+                    <p className="text-[11px] text-slate-500 mt-1">Blank = keep the same number of nights.</p>
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Expected arrival time (optional)</label>
+                  <input type="time" value={redate.check_in_time}
+                         onChange={(e) => setRedate({ ...redate, check_in_time: e.target.value })}
+                         className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]" />
+                </div>
+                <div>
+                  <label className="block text-xs font-semibold text-slate-300 mb-1">Reason*</label>
+                  <input type="text" value={redate.reason} placeholder="Guest called - train delayed a day"
+                         onChange={(e) => setRedate({ ...redate, reason: e.target.value })}
+                         className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]" />
+                </div>
+              </div>
+              <div className="flex justify-end gap-3 mt-6">
+                <button onClick={() => setRedate(null)} disabled={redateBusy}
+                        className="bg-slate-700 hover:bg-slate-600 px-5 py-2 rounded-lg text-white font-medium transition">Close</button>
+                <button onClick={submitRedate} disabled={redateBusy}
+                        className="bg-[#E5C07B] hover:bg-[#D4AF37] px-5 py-2 rounded-lg text-slate-900 font-semibold transition disabled:opacity-50">
+                  {redateBusy ? "Saving..." : "Re-date"}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {adminCancelBookingId && (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
             <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">

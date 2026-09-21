@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager
 from routers import room_types, admin, users, adminsecurity, payments
 from routers import backup   # v4b10: /admin/backup/* (pg_dump export for the admin PC)
 from routers import documents   # v5j: admin document index (invoices / receipts / slips / reports)
+from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-date
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
@@ -417,6 +418,7 @@ app.include_router(portal.router)
 app.include_router(roomservice.router)
 app.include_router(audit.router)
 app.include_router(opsettings.router)
+app.include_router(booking_lifecycle.router)
 app.include_router(linen.router)
 app.include_router(documents.router)
 

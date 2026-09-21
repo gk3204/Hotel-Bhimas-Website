@@ -106,3 +106,16 @@ export async function adminCancelBooking(bookingId, reason, refundAmount, adminN
     throw new Error(msg);
   }
 }
+// v5m — booking lifecycle: no-show / reinstate / re-date (admin web only)
+export async function markNoShow(bookingId, reason = null) {
+  return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/no-show`, {
+    method: "POST", headers: authHeader(), body: JSON.stringify({ reason }) }), "Could not mark no-show");
+}
+export async function reinstateBooking(bookingId, reason = null) {
+  return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/reinstate`, {
+    method: "POST", headers: authHeader(), body: JSON.stringify({ reason }) }), "Could not reinstate");
+}
+export async function redateBooking(bookingId, payload) {
+  return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/redate`, {
+    method: "POST", headers: authHeader(), body: JSON.stringify(payload) }), "Could not re-date");
+}
