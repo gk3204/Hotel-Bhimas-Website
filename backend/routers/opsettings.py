@@ -103,3 +103,30 @@ def desk_public_key():
         raise HTTPException(status_code=503,
                             detail="Offline scan capture is not configured on the server.")
     return pk
+
+
+# --- Arrival & departure rules (v5m) -------------------------------------------------------------
+# One JSON document (utils/arrival_rules.py documents the shape). GET is reception-or-admin so the
+# desk can show "free up to 30 min" hints; PUT is admin-only, validated, audited.
+
+@router.get("/arrival-rules", dependencies=[Depends(require_reception_or_admin)])
+def get_arrival_rules(db: Session = Depends(get_db)):
+    from utils import arrival_rules
+    return {"rules": arrival_rules.load_rules(db), "defaults": arrival_rules.DEFAULT_RULES}
+
+
+@router.put("/arrival-rules")
+def set_arrival_rules(rules: dict = Body(..., embed=True),
+                      db: Session = Depends(get_db),
+                      user=Depends(require_admin)):
+    import json
+    from utils import arrival_rules
+    errs = arrival_rules.validate(rules)
+    if errs:
+        raise HTTPException(status_code=422, detail="; ".join(errs))
+    clean = arrival_rules.normalise(rules)
+    before = arrival_rules.load_rules(db)
+    app_settings.set_setting(db, arrival_rules.RULES_KEY, json.dumps(clean), user=user, commit=True)
+    write_audit(db, user, "settings.arrival_rules_update", "app_settings", None,
+                before=before, after=clean, client="web", commit=True)
+    return {"rules": clean}

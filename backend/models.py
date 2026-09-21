@@ -128,6 +128,17 @@ class Booking(Base):
     # What the guest actually BOOKED. Set once on the first extension of any kind and never
     # overwritten, because check_out itself moves. The v4b3 runaway guard reads it.
     original_check_out = Column(Date, nullable=True)
+    # --- Arrival & departure rules (v5m, migration 043, additive) ---
+    # expected_arrival_at: booked date + expected time (OTA forced 12:00) — what "early"/"late" is measured
+    # against. stay_started_at: the anchor the 24h stay clock runs from (set at check-in per the rules;
+    # booking_checkout_moment prefers it over checked_in_at). checkout_extended_until: a planned hourly
+    # extension = an explicit checkout moment. no_show_at: booked check-out date passed unarrived.
+    # original_check_in: booked check-in before an admin re-date (pairs original_check_out).
+    expected_arrival_at = Column(DateTime, nullable=True)
+    stay_started_at = Column(DateTime, nullable=True)
+    checkout_extended_until = Column(DateTime, nullable=True)
+    no_show_at = Column(DateTime, nullable=True)
+    original_check_in = Column(Date, nullable=True)
     # --- Prepayment collected by a third party (v4b1, migration 028, additive) ---
     # OTA bookings record NO Payment row — the channel took the money, not the hotel — so
     # total_paid() returned 0 and the desk billed the guest for the room a SECOND time.
@@ -432,6 +443,33 @@ class Invoice(Base):
     # --- Corporate billing (prompt 18 slice 7, additive) ---
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
     company_invoice_id = Column(Integer, ForeignKey("company_invoices.id"), nullable=True, index=True)  # rolled into this consolidated bill
+    # --- B2B buyer snapshot (v5m, migration 043) — filled only when the guest asked for a GST invoice ---
+    buyer_name = Column(String(160), nullable=True)
+    buyer_gstin = Column(String(20), nullable=True)
+    buyer_address = Column(String(300), nullable=True)
+    buyer_state_code = Column(String(4), nullable=True)   # place of supply (GSTIN's first two digits)
+
+
+class StayEvent(Base):
+    """v5m: one row per early check-in / late arrival / hourly extension — the source of truth for the
+    arrival-exceptions report and the owner's daily digest (fees themselves are folio charge lines;
+    `folio_charge_id` links the two so a void can zero the event)."""
+    __tablename__ = "stay_events"
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=False, index=True)
+    kind = Column(String(24), nullable=False, index=True)        # early_checkin | late_arrival | hourly_extension
+    expected_at = Column(DateTime, nullable=True)
+    actual_at = Column(DateTime, nullable=True)
+    deviation_minutes = Column(Integer, nullable=True)
+    hours = Column(Integer, nullable=True)
+    charge_amount = Column(Numeric(10, 2), nullable=False, default=0)
+    charge_basis = Column(String(16), nullable=False, default="free")  # free|fixed|percent|full_night|exempt_comp|override|voided
+    rule_json = Column(String, nullable=True)
+    approval = Column(String(12), nullable=False, default="none")     # none | admin | owner_otp
+    approved_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    folio_charge_id = Column(Integer, ForeignKey("folio_charges.id"), nullable=True)
+    created_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    created_at = Column(DateTime, server_default=func.now(), index=True)
 
 
 class InvoiceCounter(Base):
@@ -768,6 +806,8 @@ class GuestProfile(Base):
     address = Column(String(300), nullable=True)
     dob = Column(Date, nullable=True)
     gstin = Column(String(20), nullable=True)                 # for company/GST invoices
+    gst_legal_name = Column(String(160), nullable=True)       # v5m: name on the GST registration
+    gst_state_code = Column(String(4), nullable=True)         # v5m: place of supply (GSTIN's first 2 digits)
     vip = Column(Boolean, default=False, index=True)
     blacklist = Column(Boolean, default=False, index=True)
     blacklist_reason = Column(String(300), nullable=True)

@@ -13,6 +13,7 @@ import {
 import ConfigPanel from "../../components/admin/ConfigPanel";
 import BackupsPanel from "../../components/admin/BackupsPanel";
 import LoyaltyPanel from "../../components/admin/LoyaltyPanel";
+import ArrivalRulesPanel from "../../components/admin/ArrivalRulesPanel";
 import { SETTINGS_GROUPS } from "../../components/admin/settingsGroups";
 import {
   getCategories, setCategoryList, getRegistrationRules, setRegistrationRules,
@@ -66,7 +67,7 @@ const SUBSET_OF = { ota_source: "booking_source" };
 // v4b10: Backups is an action + a status, not a load/save config group, so it is its own tab
 // rather than a SETTINGS_GROUPS entry that ConfigPanel could not render.
 const TABS = [["lists", "Lists & printed text"], ...SETTINGS_GROUPS.map((g) => [g.key, g.label]),
-              ["loyalty", "Loyalty"], ["backups", "Backups"]];
+              ["arrival", "Arrival & departure"], ["loyalty", "Loyalty"], ["backups", "Backups"]];
 
 // A category is stored as a lowercase slug; show it title-cased for readability.
 const pretty = (s) => (s || "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
@@ -238,6 +239,8 @@ export default function Settings() {
       <Tabs tabs={TABS} active={tab} onChange={setTab} />
 
       {activeGroup && <ConfigPanel key={activeGroup.key} group={activeGroup} showToast={showToast} />}
+
+      {tab === "arrival" && <ArrivalRulesPanel showToast={showToast} />}
 
       {tab === "loyalty" && <LoyaltyPanel showToast={showToast} />}
 

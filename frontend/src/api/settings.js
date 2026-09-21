@@ -48,3 +48,14 @@ export const setRegistrationRules = (text) =>
     headers: authHeaders(),
     body: JSON.stringify({ text }),
   }).then(handle);
+
+// v5m - arrival & departure rules: { rules, defaults }
+export const getArrivalRules = () =>
+  fetch(`${BASE_URL}/settings/arrival-rules`, { headers: authHeaders() }).then(handle);
+
+export const setArrivalRules = (rules) =>
+  fetch(`${BASE_URL}/settings/arrival-rules`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify({ rules }),
+  }).then(handle);

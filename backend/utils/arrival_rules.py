@@ -1,0 +1,258 @@
+"""Arrival & departure rules (v5m) — the owner's policy for early check-in, late arrival and hourly
+(late-checkout) extensions, keyed by booking source and editable in the admin Settings page.
+
+One JSON setting, `arrival_rules`:
+
+    {"exempt_comp": true,
+     "early_checkin":     [ {sources, threshold_minutes, full_night_after_minutes, charge, approval}, ... ],
+     "late_arrival":      [ {sources, threshold_minutes}, ... ],
+     "hourly_extension":  [ {sources, threshold_minutes, full_night_after_minutes, max_hours, overflow,
+                             charge, approval}, ... ]}
+
+* `sources` — booking sources the row applies to; `"*"` is the default row. First match wins.
+* `threshold_minutes` — deviation up to this is free / ignored (a guest 2 minutes early is not "early").
+* `full_night_after_minutes` — beyond this the deviation is treated as a whole night ("too early" ->
+  an extra night is posted; "too late" extension -> refused or a full night, per `overflow`).
+* `charge` — {"mode": "free" | "fixed" (amount, Rs) | "percent" (percent of one night's GST-inclusive rate)}.
+* `approval` — "always" | "on_change" (only when the desk edits the computed amount / makes it free) |
+  "never"; satisfied by an admin login or an owner OTP (action `arrival_fee` / `extend_hours`).
+* `exempt_comp` — a fully complimentary stay is never charged (the event is still recorded).
+
+Evaluation is pure (no DB writes) so the desk can dry-run it ("Early by 2 h 10 m -> Rs 300").
+"""
+import json
+import logging
+from copy import deepcopy
+from datetime import datetime, timedelta
+
+logger = logging.getLogger(__name__)
+
+RULES_KEY = "arrival_rules"
+OTA_SOURCES_DEFAULT = ("makemytrip", "goibibo", "booking_com", "agoda", "yatra", "other_ota")
+
+DEFAULT_RULES = {
+    "exempt_comp": True,
+    "early_checkin": [
+        {"sources": list(OTA_SOURCES_DEFAULT) + ["website"],
+         "threshold_minutes": 30, "full_night_after_minutes": 360,
+         "charge": {"mode": "fixed", "amount": 300}, "approval": "on_change"},
+        {"sources": ["*"], "threshold_minutes": 120, "full_night_after_minutes": 480,
+         "charge": {"mode": "percent", "percent": 25}, "approval": "on_change"},
+    ],
+    "late_arrival": [{"sources": ["*"], "threshold_minutes": 120}],
+    "hourly_extension": [
+        {"sources": ["*"], "threshold_minutes": 30, "full_night_after_minutes": 360,
+         "max_hours": 8, "overflow": "refuse",
+         "charge": {"mode": "percent", "percent": 25}, "approval": "on_change"},
+    ],
+}
+
+CHARGE_MODES = ("free", "fixed", "percent")
+APPROVALS = ("always", "on_change", "never")
+OVERFLOWS = ("refuse", "full_night")
+
+
+# ------------------------------------------------------------------ load / validate
+
+def load_rules(db) -> dict:
+    """The active rule set (setting -> defaults), normalised so every consumer sees full rows."""
+    from utils.settings import get_setting
+    raw = get_setting(db, RULES_KEY)
+    rules = None
+    if raw:
+        try:
+            rules = json.loads(raw)
+        except (ValueError, TypeError):
+            logger.warning("arrival_rules setting is not valid JSON — using defaults")
+    return normalise(rules or {})
+
+
+def normalise(rules: dict) -> dict:
+    """Fill gaps with defaults and coerce types; never raises on odd input."""
+    out = deepcopy(DEFAULT_RULES)
+    if not isinstance(rules, dict):
+        return out
+    out["exempt_comp"] = bool(rules.get("exempt_comp", True))
+    for kind in ("early_checkin", "late_arrival", "hourly_extension"):
+        rows = rules.get(kind)
+        if isinstance(rows, list) and rows:
+            out[kind] = [_norm_row(kind, r) for r in rows if isinstance(r, dict)]
+            if not any("*" in r["sources"] for r in out[kind]):
+                out[kind].append(_norm_row(kind, DEFAULT_RULES[kind][-1]))
+    return out
+
+
+def _norm_row(kind: str, r: dict) -> dict:
+    srcs = r.get("sources") or ["*"]
+    if isinstance(srcs, str):
+        srcs = [srcs]
+    row = {"sources": [str(s).strip().lower() for s in srcs if str(s).strip()] or ["*"],
+           "threshold_minutes": max(0, int(_num(r.get("threshold_minutes"), 0)))}
+    if kind == "late_arrival":
+        return row
+    row["full_night_after_minutes"] = max(row["threshold_minutes"],
+                                          int(_num(r.get("full_night_after_minutes"), 360)))
+    ch = r.get("charge") if isinstance(r.get("charge"), dict) else {}
+    mode = str(ch.get("mode", "free")).lower()
+    row["charge"] = {"mode": mode if mode in CHARGE_MODES else "free",
+                     "amount": round(max(0.0, _num(ch.get("amount"), 0.0)), 2),
+                     "percent": round(min(100.0, max(0.0, _num(ch.get("percent"), 0.0))), 2)}
+    ap = str(r.get("approval", "on_change")).lower()
+    row["approval"] = ap if ap in APPROVALS else "on_change"
+    if kind == "hourly_extension":
+        row["max_hours"] = max(1, int(_num(r.get("max_hours"), 8)))
+        ov = str(r.get("overflow", "refuse")).lower()
+        row["overflow"] = ov if ov in OVERFLOWS else "refuse"
+    return row
+
+
+def validate(rules: dict) -> list[str]:
+    """Human-readable problems for the admin editor (empty list = OK)."""
+    errs = []
+    if not isinstance(rules, dict):
+        return ["rules must be an object"]
+    for kind in ("early_checkin", "late_arrival", "hourly_extension"):
+        rows = rules.get(kind)
+        if not isinstance(rows, list) or not rows:
+            errs.append(f"{kind}: at least one rule row is required")
+            continue
+        if not any("*" in (r.get("sources") or []) for r in rows if isinstance(r, dict)):
+            errs.append(f"{kind}: one row must apply to all sources (\"*\")")
+        for i, r in enumerate(rows, 1):
+            if not isinstance(r, dict):
+                errs.append(f"{kind} row {i}: not an object"); continue
+            t = _num(r.get("threshold_minutes"), 0)
+            if t < 0:
+                errs.append(f"{kind} row {i}: threshold must be >= 0")
+            if kind != "late_arrival":
+                b = _num(r.get("full_night_after_minutes"), 0)
+                if b < t:
+                    errs.append(f"{kind} row {i}: full-night bound must be >= threshold")
+                ch = r.get("charge") or {}
+                if str(ch.get("mode", "free")).lower() not in CHARGE_MODES:
+                    errs.append(f"{kind} row {i}: charge mode must be free / fixed / percent")
+                if str(ch.get("mode")) == "percent" and not (0 <= _num(ch.get("percent"), -1) <= 100):
+                    errs.append(f"{kind} row {i}: percent must be 0-100")
+                if str(ch.get("mode")) == "fixed" and _num(ch.get("amount"), -1) < 0:
+                    errs.append(f"{kind} row {i}: amount must be >= 0")
+                if str(r.get("approval", "on_change")).lower() not in APPROVALS:
+                    errs.append(f"{kind} row {i}: approval must be always / on_change / never")
+            if kind == "hourly_extension" and _num(r.get("max_hours"), 1) < 1:
+                errs.append(f"{kind} row {i}: max hours must be >= 1")
+    return errs
+
+
+def rule_for(rules: dict, kind: str, source: str | None) -> dict:
+    src = (source or "direct").strip().lower()
+    rows = rules.get(kind) or []
+    for r in rows:
+        if src in r["sources"]:
+            return r
+    for r in rows:
+        if "*" in r["sources"]:
+            return r
+    return _norm_row(kind, DEFAULT_RULES[kind][-1])
+
+
+# ------------------------------------------------------------------ evaluation
+
+def charge_for(rule: dict, night_rate: float, units: float = 1.0) -> tuple[float, str]:
+    """(amount, basis) for one application of a rule. `night_rate` is the stay's one-night
+    GST-inclusive rate (all rooms)."""
+    ch = rule.get("charge") or {}
+    mode = ch.get("mode", "free")
+    if mode == "fixed":
+        return round(float(ch.get("amount", 0)) * units, 2), "fixed"
+    if mode == "percent":
+        return round(float(night_rate) * float(ch.get("percent", 0)) / 100.0, 2), "percent"
+    return 0.0, "free"
+
+
+def needs_approval(rule: dict, quoted: float, applied: float | None) -> bool:
+    ap = rule.get("approval", "on_change")
+    if ap == "always":
+        return True
+    if ap == "never":
+        return False
+    return applied is not None and round(float(applied), 2) != round(float(quoted), 2)
+
+
+def evaluate_early(rules: dict, source: str, expected_at: datetime, now: datetime,
+                   night_rate: float, comp: bool) -> dict:
+    """Early check-in: how early, what it costs, whether an extra night is needed."""
+    rule = rule_for(rules, "early_checkin", source)
+    dev = int((expected_at - now).total_seconds() // 60) if expected_at else 0   # minutes early (+)
+    out = {"kind": "early_checkin", "deviation_minutes": max(0, dev), "rule": rule,
+           "charge": 0.0, "basis": "free", "full_night": False, "approval": rule["approval"],
+           "exempt": False}
+    if dev <= 0:
+        out["basis"] = "on_time"
+        return out
+    if comp and rules.get("exempt_comp", True):
+        out.update(basis="exempt_comp", exempt=True)
+        return out
+    if dev <= rule["threshold_minutes"]:
+        return out                                            # within tolerance: free
+    if dev > rule["full_night_after_minutes"]:
+        out.update(full_night=True, charge=round(float(night_rate), 2), basis="full_night")
+        return out
+    amt, basis = charge_for(rule, night_rate)
+    out.update(charge=amt, basis=basis)
+    return out
+
+
+def evaluate_late_arrival(rules: dict, source: str, expected_at: datetime, now: datetime) -> dict:
+    """Late arrival: how late, and where the stay clock starts (actual vs expected)."""
+    rule = rule_for(rules, "late_arrival", source)
+    dev = int((now - expected_at).total_seconds() // 60) if expected_at else 0      # minutes late (+)
+    if dev <= 0:
+        return {"kind": "late_arrival", "deviation_minutes": 0, "rule": rule, "stay_start": now,
+                "from_expected": False}
+    from_expected = dev > rule["threshold_minutes"]
+    return {"kind": "late_arrival", "deviation_minutes": dev, "rule": rule,
+            "stay_start": expected_at if from_expected else now, "from_expected": from_expected}
+
+
+def evaluate_extension(rules: dict, source: str, current_checkout: datetime, hours: int,
+                       night_rate: float, comp: bool) -> dict:
+    """Hourly extension: new checkout moment, cost, or a refusal beyond the bound."""
+    rule = rule_for(rules, "hourly_extension", source)
+    hours = int(hours)
+    out = {"kind": "hourly_extension", "hours": hours, "rule": rule, "until": None,
+           "charge": 0.0, "basis": "free", "approval": rule["approval"], "refused": None, "exempt": False,
+           "full_night": False}
+    if hours < 1:
+        out["refused"] = "hours must be at least 1"
+        return out
+    if hours > rule["max_hours"]:
+        out["refused"] = f"more than {rule['max_hours']} hours — extend the stay by a night instead"
+        return out
+    minutes = hours * 60
+    until = current_checkout + timedelta(hours=hours)
+    out["until"] = until
+    if comp and rules.get("exempt_comp", True):
+        out.update(basis="exempt_comp", exempt=True)
+        return out
+    if minutes <= rule["threshold_minutes"]:
+        return out
+    if minutes > rule["full_night_after_minutes"]:
+        if rule.get("overflow") == "full_night":
+            out.update(full_night=True, charge=round(float(night_rate), 2), basis="full_night")
+            return out
+        out["refused"] = (f"beyond {rule['full_night_after_minutes'] // 60} h counts as a night — "
+                          "extend the stay by a night instead")
+        return out
+    amt, basis = charge_for(rule, night_rate)          # one fee per extension, not per hour
+    out.update(charge=amt, basis=basis)
+    return out
+
+
+def rule_snapshot(rule: dict) -> str:
+    return json.dumps(rule, default=str)
+
+
+def _num(v, default):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
