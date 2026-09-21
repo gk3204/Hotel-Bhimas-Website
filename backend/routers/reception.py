@@ -29,7 +29,7 @@ from utils import settings as app_settings
 from utils.settings import validate_category
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, ComplimentaryRequest, \
     ExtendStayRequest, FolioOpenRequest, ReverseOverstayRequest, RoomShiftRequest, EarlyCheckoutRequest, \
-    CheckinQuoteRequest
+    CheckinQuoteRequest, ExtendHoursRequest
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
@@ -2026,6 +2026,9 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             booking.original_check_out = old_co
         booking.check_out = new_co
         booking.card_reencode_required = True
+        # v5m: a night extension supersedes any hourly one — the clock runs from the stay anchor
+        # again over the new number of nights.
+        booking.checkout_extended_until = None
 
         cards = db.query(CardIssuance).filter(
             CardIssuance.booking_id == booking.booking_id,
@@ -2095,6 +2098,169 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         logger.error(f"extend_stay failed: {e}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail="Extend stay failed")
+
+
+@router.post("/extend-hours")
+def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
+                 user=Depends(require_reception_or_admin)):
+    """v5m — late checkout by the hour, priced by the admin's hourly-extension rule.
+
+    Sibling of /extend (dry-run then commit, server prices, same card payload shape), but the
+    unit is HOURS: `until = current checkout moment + hours`. The rule decides free / fee /
+    refuse ("beyond N h counts as a night — extend by a night instead"). Can be requested any
+    time during the stay, before or after the checkout moment, until an invoice exists.
+    The fee is a folio `room` line at the room GST %, so it prints on the invoice; the event
+    is recorded in stay_events for the arrival-exceptions report."""
+    try:
+        booking = (db.query(Booking)
+                     .filter(Booking.booking_id == data.booking_id)
+                     .with_for_update().first())
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        if booking.status != "checked_in":
+            raise HTTPException(
+                status_code=409,
+                detail=f"Only an in-house stay can be extended (this one is '{booking.status}')")
+        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        if not folio:
+            raise HTTPException(status_code=409, detail="No folio for this stay — open it first")
+        inv = _get_invoice(db, folio.id)
+        if folio.status != "open" or inv:
+            raise HTTPException(
+                status_code=409,
+                detail=(f"Invoice {inv.invoice_no} has already been raised for this stay — "
+                        f"an extension cannot be added to an issued tax invoice."
+                        if inv else "Folio is not open — an extension cannot be posted"))
+
+        current = booking_checkout_moment(booking)
+        # Replay guard: the desk sends the `until` it previewed; if the stay already ends there
+        # (or later) this is a re-flush, not a second extension.
+        if data.until and booking.checkout_extended_until and booking.checkout_extended_until >= data.until:
+            return {"booking_id": booking.booking_id, "dry_run": data.dry_run, "already": True,
+                    "from": current.isoformat(), "until": booking.checkout_extended_until.isoformat(),
+                    "hours": 0, "quoted_amount": 0.0, "applied_amount": 0.0, "refused": None,
+                    "folio_id": folio.id, "folio_balance_before": float(folio.balance or 0),
+                    "folio_balance_after": float(folio.balance or 0), "posted_charge_ids": [],
+                    "superseded_card_ids": [], "card_reencode_required": bool(booking.card_reencode_required),
+                    "cards": [], "requires_owner_otp": False, "requires_reason": False}
+
+        rules = arrival_rules.load_rules(db)
+        comp = room_posting._is_comped(booking)
+        rate = _night_rate(db, booking)
+        ev = arrival_rules.evaluate_extension(rules, booking.booking_source or "direct", current,
+                                              data.hours, rate, comp)
+        if ev["refused"]:
+            raise HTTPException(status_code=400, detail=f"Cannot extend by {data.hours} h: {ev['refused']}")
+        until = ev["until"]
+        quoted = float(ev["charge"])
+        applied = quoted if data.applied_amount is None else round(float(data.applied_amount), 2)
+        changed = data.applied_amount is not None and applied != quoted
+        if changed and not data.dry_run and not (data.reason or "").strip():
+            raise HTTPException(status_code=400,
+                                detail="Charging something other than the rule's fee needs a reason")
+        needs_approval = (not ev["exempt"]) and arrival_rules.needs_approval(
+            ev["rule"], quoted, data.applied_amount)
+        is_admin = user.get("role") == "admin"
+        gst = _room_gst_percent(db, booking)
+        balance_before = float(folio.balance or 0)
+        text = (f"Late checkout +{data.hours} h (until {until:%H:%M %d %b})"
+                + (" — complimentary" if ev["exempt"] else
+                   (" — free" if quoted == 0 else f" — ₹{quoted:,.0f}")))
+
+        if data.dry_run:
+            db.rollback()
+            return {"booking_id": booking.booking_id, "dry_run": True, "already": False,
+                    "from": current.isoformat(), "until": until.isoformat(), "hours": data.hours,
+                    "quoted_amount": quoted, "applied_amount": None, "basis": ev["basis"],
+                    "exempt": ev["exempt"], "text": text, "refused": None,
+                    "rule": {k: v for k, v in ev["rule"].items() if k != "sources"},
+                    "requires_reason": changed, "requires_owner_otp": bool(needs_approval and not is_admin),
+                    "requires_admin": False,
+                    "folio_id": folio.id, "folio_balance_before": balance_before,
+                    "folio_balance_after": round(balance_before + applied, 2),
+                    "posted_charge_ids": [], "superseded_card_ids": [],
+                    "card_reencode_required": True, "cards": []}
+
+        approval = "none"
+        if needs_approval:
+            if is_admin:
+                approval = "admin"
+            else:
+                consume_otp(db, data.owner_otp_id, data.owner_otp_code, "extend_hours", user)
+                approval = "owner_otp"
+
+        charge_id = None
+        if applied > 0 and not ev["exempt"]:
+            charge = FolioCharge(
+                folio_id=folio.id, type="room",
+                description=f"Late checkout +{data.hours} h (until {until:%H:%M %d %b})",
+                qty=1, unit_price=applied, amount=applied, gst_percent=gst,
+                posted_by=_resolve_user_id(db, user), charge_date=current.date(),
+                posting_reason="extend_hours")
+            db.add(charge)
+            db.flush()
+            charge_id = charge.id
+            booking.grand_total = round(float(booking.grand_total or 0) + applied, 2)
+            booking.total_amount = round(float(booking.total_amount or 0) + applied, 2)
+        db.add(StayEvent(
+            booking_id=booking.booking_id, kind="hourly_extension",
+            expected_at=current, actual_at=until, deviation_minutes=data.hours * 60, hours=data.hours,
+            charge_amount=applied if not ev["exempt"] else 0,
+            charge_basis="override" if changed else ev["basis"],
+            rule_json=arrival_rules.rule_snapshot({**ev["rule"], "quoted": quoted, "reason": data.reason}),
+            approval=approval,
+            approved_by=_resolve_user_id(db, user) if approval != "none" else None,
+            folio_charge_id=charge_id, created_by=_resolve_user_id(db, user)))
+
+        booking.checkout_extended_until = until
+        booking.card_reencode_required = True
+        cards = db.query(CardIssuance).filter(
+            CardIssuance.booking_id == booking.booking_id,
+            CardIssuance.status == "active").all()
+        for c in cards:
+            c.status = "superseded"
+        superseded_ids = [c.id for c in cards]
+        _recompute(db, folio)
+        db.commit()
+
+        write_audit(db, user, "reception.extend_hours", "booking", booking.booking_id,
+                    before={"checkout_at": current.isoformat(), "folio_balance": balance_before},
+                    after={"until": until.isoformat(), "hours": data.hours, "quoted_amount": quoted,
+                           "applied_amount": applied, "basis": ev["basis"], "approval": approval,
+                           "reason": data.reason, "folio_charge_id": charge_id,
+                           "superseded_card_ids": superseded_ids,
+                           "folio_balance": float(folio.balance or 0), "client_ref": data.client_ref},
+                    client="desktop", commit=True)
+
+        valid_from, valid_to = _card_window(booking)
+        card_payloads = []
+        for item in booking.booking_items:
+            if not item.room_id:
+                continue
+            room = db.query(Room).filter(Room.room_id == item.room_id).first()
+            if room and room.lock_type != "key":
+                try:
+                    card_payloads.append(_encode_payload(db, item, room, valid_from, valid_to))
+                except HTTPException as e:
+                    logger.error(f"extend-hours: no card payload for room {room.room_number}: {e.detail}")
+
+        return {"booking_id": booking.booking_id, "dry_run": False, "already": False,
+                "from": current.isoformat(), "until": until.isoformat(), "hours": data.hours,
+                "quoted_amount": quoted, "applied_amount": applied, "basis": ev["basis"],
+                "exempt": ev["exempt"], "text": text, "refused": None,
+                "requires_reason": changed, "requires_owner_otp": False, "requires_admin": False,
+                "folio_id": folio.id, "folio_balance_before": balance_before,
+                "folio_balance_after": float(folio.balance or 0),
+                "posted_charge_ids": [charge_id] if charge_id else [],
+                "superseded_card_ids": superseded_ids,
+                "card_reencode_required": True, "cards": card_payloads}
+    except HTTPException:
+        db.rollback()
+        raise
+    except Exception as e:
+        logger.error(f"extend_hours failed: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Hourly extension failed")
 
 
 COMP_VOID_PREFIX = "Complimentary"

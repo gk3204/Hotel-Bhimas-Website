@@ -209,6 +209,10 @@ def _bill_one(db: Session, booking_id: int, *, now, cfg) -> dict:
         if booking.original_check_out is None:
             booking.original_check_out = old_co
         booking.check_out = new_co
+        # v5m: an hourly extension was the explicit checkout moment; now that a whole night has
+        # been billed the clock runs from the stay anchor again. Leaving it set would keep the
+        # (past) moment authoritative and re-bill the same guest on every tick.
+        booking.checkout_extended_until = None
         booking.card_reencode_required = True
         superseded = _supersede_cards(db, booking)
 

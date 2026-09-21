@@ -377,6 +377,21 @@ class CheckinRequest(BaseModel):
     client_ref: Optional[str] = Field(None, max_length=64)
 
 
+class ExtendHoursRequest(BaseModel):
+    """v5m hourly extension (late checkout by rule). `hours` is added to the CURRENT checkout
+    moment; `until` (absolute, from the last dry-run) makes a desk-outbox replay land in the
+    `already` branch instead of extending twice."""
+    booking_id: int = Field(..., gt=0)
+    hours: int = Field(..., ge=1, le=24)
+    until: Optional[datetime] = None
+    applied_amount: Optional[float] = Field(None, ge=0)
+    reason: Optional[str] = Field(None, max_length=200)
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+    dry_run: bool = False
+    client_ref: Optional[str] = Field(None, max_length=64)
+
+
 class CheckinQuoteRequest(BaseModel):
     """v5m dry-run of the arrival rules for the check-in wizard (no writes)."""
     booking_id: int = Field(..., gt=0)
