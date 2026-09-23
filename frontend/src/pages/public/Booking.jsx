@@ -116,6 +116,9 @@ const Booking = () => {
     });
   };
 
+  // v5r: how many rooms are in the cart, so the occupancy box can say what the minimum is.
+  const roomsSelectedTotal = Object.values(selectedRooms).reduce((n, q) => n + (Number(q) || 0), 0);
+
   const handleRoomQuantityChange = (roomTypeId, quantity) => {
     const q = parseInt(quantity) || 0;
     const maxAvailable = availability[roomTypeId]?.available_rooms || 5;
@@ -250,6 +253,16 @@ const Booking = () => {
 
     if (selectedRoomsList.length === 0) {
       setError("Please select at least one room");
+      return;
+    }
+
+    // v5r: one adult per room, at least. The form asks for occupancy once for the whole booking, so a
+    // three-room reservation used to be submitted as "1 adult" — which then misleads the front desk
+    // (it asks for one guest's ID per room on arrival) and the occupancy reports. The server refuses
+    // this too; catching it here means the guest is told before the payment step rather than after.
+    const roomsTotal = selectedRoomsList.reduce((n, r) => n + (Number(r.quantity) || 0), 0);
+    if ((Number(formData.adults) || 0) < roomsTotal) {
+      setError(`You have selected ${roomsTotal} rooms — please enter at least ${roomsTotal} adults (one per room).`);
       return;
     }
 
@@ -655,9 +668,16 @@ const Booking = () => {
                 {/* Guests */}
                 <div className="grid md:grid-cols-2 gap-6">
                   <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Adults *</label>
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">
+                      Adults *
+                      {roomsSelectedTotal > 1 && (
+                        <span className="ml-2 font-normal text-gray-500">
+                          (at least {roomsSelectedTotal} — one per room)
+                        </span>
+                      )}
+                    </label>
                     <input
-                      type="number" name="adults" min="1" required
+                      type="number" name="adults" min={Math.max(1, roomsSelectedTotal)} required
                       value={formData.adults}
                       onChange={handleChange}
                       className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition"

@@ -146,13 +146,37 @@ def create_booking(
                 detail=f"{data.adults} adults exceed the selected rooms' capacity ({capacity}). "
                        f"Add a room or reduce adults.")
 
-        # 4️⃣ Create guest
-        guest = Guest(
-            name=data.guest_name,
-            phone=data.phone,
-            email=data.email
-        )
-        db.add(guest)
+        # v5r: and a FLOOR. A booking for three rooms that says "1 adult" is what the website has been
+        # sending (one occupancy box for the whole reservation), and it misleads the desk, which is
+        # asked for one ID per room at check-in, and the occupancy reports, which credit the whole stay
+        # with one guest.
+        total_rooms = sum(int(item.quantity or 1) for item in data.rooms) or 1
+        if data.adults < total_rooms:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{total_rooms} rooms need at least {total_rooms} adults "
+                       f"(one per room) — you have entered {data.adults}.")
+
+        # 4️⃣ Guest — reuse the existing record for this number (v5r)
+        # The desk has always called match_guest; the website created a new Guest row on every booking,
+        # so a repeat customer fragmented into several profiles — production had 139 rows for 99 real
+        # numbers, one guest with eight. Loyalty, VIP/blacklist and stay history all follow guest_id, so
+        # each of those profiles knew only part of the story.
+        from routers.crm import match_guest
+        guest = match_guest(db, data.phone)
+        if guest is not None:
+            # Keep the freshest spelling the guest gave us, but never blank a field we already hold.
+            if data.guest_name:
+                guest.name = data.guest_name
+            if data.email:
+                guest.email = data.email
+        else:
+            guest = Guest(
+                name=data.guest_name,
+                phone=data.phone,
+                email=data.email
+            )
+            db.add(guest)
         db.flush()  # Get guest_id without committing
 
         # 5️⃣ Calculate amounts for each room and total

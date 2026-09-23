@@ -195,11 +195,26 @@ def check_guest_gate(db: Session, guest: Guest | None) -> dict:
 
 
 def match_guest(db: Session, phone: str | None) -> Guest | None:
-    """Most-recent existing guest with this exact phone (repeat-guest recognition)."""
-    if not phone:
+    """Most-recent existing guest with this phone (repeat-guest recognition).
+
+    v5r: matched on NORMALISED digits, not on the string. Exact-string matching meant `+919876543210`,
+    `09876543210` and `9876543210` were three different people, and because the website path did not
+    call this at all, production had 139 guest rows for 99 real numbers — one repeat customer held
+    eight profiles, each with its own loyalty balance and its own view of the blacklist.
+
+    Newest row wins, as before, so the most recently corrected name/email is the one the desk sees.
+    """
+    from utils.phone import normalize
+    n = normalize(phone)
+    if not n:
         return None
-    return db.query(Guest).filter(Guest.phone == phone.strip()).order_by(
-        Guest.guest_id.desc()).first()
+    # Compare on the stored digits so old rows in any format still match. The suffix is the last ten
+    # digits (the subscriber number), which is what identifies an Indian mobile regardless of prefix.
+    tail = n[-10:]
+    return (db.query(Guest)
+            .filter(func.regexp_replace(Guest.phone, r"[^0-9]", "", "g").like(f"%{tail}"))
+            .order_by(Guest.guest_id.desc())
+            .first())
 
 
 def guest_has_open_complaint(db: Session, guest_id: int) -> bool:

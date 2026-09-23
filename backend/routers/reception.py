@@ -191,9 +191,18 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
                 status_code=409,
                 detail=f"{data.adults} adults exceed the selected rooms' capacity "
                        f"({capacity} adult{'s' if capacity != 1 else ''}). Add a room or reduce adults.")
+        # v5r: and a floor — a booking for three rooms with "1 adult" tells the desk nothing true, and
+        # at check-in it will be asked for one identified guest per room anyway.
+        _total_rooms = sum(int(item.quantity or 1) for item in data.rooms) or 1
+        if data.adults < _total_rooms:
+            raise HTTPException(
+                status_code=409,
+                detail=f"{_total_rooms} rooms need at least {_total_rooms} adults (one per room) — "
+                       f"{data.adults} entered.")
 
-        # Guest — reuse an existing record on an exact phone match (repeat-guest
-        # recognition, prompt 14) so history + loyalty attach to one customer; else create.
+        # Guest — reuse an existing record for this number (repeat-guest recognition, prompt 14) so
+        # history + loyalty attach to one customer; else create. v5r: matched on normalised digits, so
+        # +91 / 0 / bare spellings of one mobile are one guest.
         guest = match_guest(db, data.phone)
         blacklist_warning = None
         if guest:
