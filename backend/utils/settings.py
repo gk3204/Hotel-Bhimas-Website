@@ -101,6 +101,10 @@ DESK_PAY_FEE_ON_UPI_KEY = "desk_pay_fee_on_upi"
 DESK_PAY_FEE_ON_LINK_KEY = "desk_pay_fee_on_link"
 DESK_PAY_QR_EXPIRY_MIN_KEY = "desk_pay_qr_expiry_minutes"     # dynamic-QR lifetime before it expires
 DESK_PAY_VPA_ENABLED_KEY = "desk_pay_vpa_enabled"             # own-bank UPI VPA (0%) mode — DEFERRED, off
+# v5q: which gateway raises a desk UPI QR. "razorpay" (2% + GST) or "phonepe" (0% on UPI).
+# Desk payment LINKS and the website stay on Razorpay whatever this says — see services/phonepe_client.
+# A DB setting rather than env alone so the owner can switch back mid-shift without a redeploy.
+DESK_PAY_GATEWAY_KEY = "desk_pay_gateway"
 
 # Google review auto-reply config keys + defaults (prompt 20; seeded in migration 018).
 # GBP OAuth + Claude SECRETS live in ENV (GBP_*, ANTHROPIC_API_KEY), not here — these are the
@@ -434,7 +438,31 @@ def get_desk_pay_config(db) -> dict:
         "fee_on_link": _as_bool(get_setting(db, DESK_PAY_FEE_ON_LINK_KEY, "false")),
         "qr_expiry_minutes": min(60, max(2, _as_int(get_setting(db, DESK_PAY_QR_EXPIRY_MIN_KEY), 15))),
         "vpa_enabled": _as_bool(get_setting(db, DESK_PAY_VPA_ENABLED_KEY, "false")),
+        "gateway": _desk_gateway(db),
     }
+
+
+def _desk_gateway(db) -> str:
+    """Which gateway raises desk UPI QRs: the DB row, else DESK_PAY_GATEWAY, else Razorpay.
+
+    Resolved by hand rather than through get_setting's default chain because the env fallback has
+    to sit BETWEEN the row and the hard default — a deployment can select PhonePe before anyone
+    has touched the settings screen, and an unrecognised value must never silently disable desk
+    payments: it falls back to the gateway that has always worked."""
+    row = db.query(AppSetting).filter(AppSetting.key == DESK_PAY_GATEWAY_KEY).first()
+    value = (row.value if row is not None and row.value else os.getenv("DESK_PAY_GATEWAY")) or "razorpay"
+    value = value.strip().lower()
+    return value if value in ("razorpay", "phonepe") else "razorpay"
+
+
+# Keys an admin may edit through PUT /payments/desk/config. The gateway CREDENTIALS
+# (RAZORPAY_*, PHONEPE_*) stay in ENV — this list only chooses between what is configured.
+DESK_PAY_EDITABLE_KEYS = (
+    DESK_PAY_UPI_QR_ENABLED_KEY, DESK_PAY_LINK_ENABLED_KEY, DESK_PAY_CASH_ENABLED_KEY,
+    DESK_PAY_FEE_CARD_PERCENT_KEY, DESK_PAY_FEE_GST_PERCENT_KEY,
+    DESK_PAY_FEE_ON_CARD_KEY, DESK_PAY_FEE_ON_UPI_KEY, DESK_PAY_FEE_ON_LINK_KEY,
+    DESK_PAY_QR_EXPIRY_MIN_KEY, DESK_PAY_VPA_ENABLED_KEY, DESK_PAY_GATEWAY_KEY,
+)
 
 
 # Keys an admin may edit through PUT /reviews/config (GBP OAuth + Claude secrets stay in ENV).

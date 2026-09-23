@@ -240,7 +240,7 @@ class Payment(Base):
     __tablename__ = "payments"
     payment_id = Column(Integer, primary_key=True)
     booking_id = Column(Integer, ForeignKey("bookings.booking_id"), index=True)
-    gateway = Column(String, index=True)   # razorpay | desk
+    gateway = Column(String, index=True)   # razorpay | phonepe | desk  (v5q: two live gateways at once)
     order_id = Column(String, index=True)
     payment_id_gateway = Column(String, index=True)
     amount = Column(Numeric(10, 2))
@@ -263,6 +263,10 @@ class Payment(Base):
     qr_code_id = Column(String(50), nullable=True, index=True)      # Razorpay qr_code id (qr_code.credited match)
     qr_image_url = Column(String(300), nullable=True)               # Razorpay-hosted QR image (proxied by /qr.png)
     payment_link_id = Column(String(50), nullable=True, index=True) # Razorpay payment_link id (payment_link.paid match)
+    # v5q: PhonePe returns a `upi://pay?...` intent rather than a hosted image. Stored here and
+    # rendered to a PNG on demand by /payments/{id}/qr.png (segno), so nothing is fetched from a
+    # third party while a guest waits. NULL on every Razorpay row.
+    upi_intent = Column(Text, nullable=True)
     convenience_fee_amount = Column(Numeric(10, 2), nullable=True)  # GST-incl. fee the guest paid on top of base (posted to folio on capture)
     created_at = Column(DateTime, server_default=func.now(), index=True)
 

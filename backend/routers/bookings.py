@@ -11,7 +11,9 @@ from schemas import BookingCreate
 from sqlalchemy.orm import joinedload
 from utils.auth_utils import require_reception_or_admin, require_admin
 from scripts.expire_booking_jobs import expire_pending_bookings
-from routers.payments import process_razorpay_refund
+# Gateway-agnostic: a booking's paid payment may have been taken on Razorpay (website,
+# desk link) or PhonePe (desk UPI QR), and this path picks the payment before it knows which.
+from routers.payments import process_gateway_refund
 from routers.promotions import get_active_promotions, best_promotion_for_item
 from utils.email_service import send_admin_cancellation_email
 
@@ -567,7 +569,7 @@ def admin_cancel_booking(
             raise HTTPException(status_code=404, detail="Payment record not found")
         
         # 4️⃣ Process refund via Razorpay
-        success, refund_id, refund_msg = process_razorpay_refund(
+        success, refund_id, refund_msg = process_gateway_refund(
             db, 
             payment.payment_id, 
             request.refund_amount, 

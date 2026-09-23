@@ -1,0 +1,10 @@
+# Test-only dependencies. NOT installed on Railway — requirements.txt is what the Dockerfile uses.
+#   cd backend && pip install -r requirements-dev.txt && python -m pytest tests -q
+#
+# The suite drives the ASGI app through httpx.ASGITransport rather than fastapi's TestClient:
+# fastapi 0.109 pins starlette 0.35, whose TestClient passes `app=` to httpx, and httpx 0.28
+# removed that argument. Going through the transport directly works either side of that split,
+# so no version is pinned here beyond the test runner itself.
+pytest>=8.0
+pytest-asyncio>=0.23
+httpx>=0.24

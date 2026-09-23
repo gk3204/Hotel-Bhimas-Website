@@ -19,8 +19,12 @@ Usage:
 import glob
 import os
 import sys
+import time
 
 import psycopg2
+
+# Connection attempts per migration (Railway's public proxy drops connections at random).
+ATTEMPTS = 3
 
 MIGRATIONS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "migrations")
 
@@ -56,7 +60,26 @@ def main():
         name = os.path.basename(path)
         with open(path, encoding="utf-8") as fh:
             body = fh.read()
-        conn = psycopg2.connect(url, connect_timeout=15)
+
+        # One connection per migration, retried: Railway's public TCP proxy drops connections
+        # under no particular provocation, and a 44-file run over it is 44 chances to be unlucky.
+        # A dropped connection is not a bad migration — retrying is right, and safe because every
+        # migration is idempotent.
+        conn = None
+        for attempt in range(1, ATTEMPTS + 1):
+            try:
+                conn = psycopg2.connect(url, connect_timeout=15)
+                break
+            except psycopg2.OperationalError as exc:
+                if attempt == ATTEMPTS:
+                    print(f"    FAIL  {name}\n            could not connect: "
+                          f"{str(exc).strip().splitlines()[0]}")
+                    failed.append(name)
+                else:
+                    time.sleep(2 * attempt)
+        if conn is None:
+            continue
+
         conn.autocommit = False
         try:
             conn.cursor().execute(body)
@@ -66,12 +89,21 @@ def main():
                 conn.commit()
             print(f"    OK    {name}")
         except Exception as exc:
-            conn.rollback()
+            # The rollback can itself fail when the connection is what died — and an unhandled
+            # error here used to abort the whole run with a traceback, hiding both which
+            # migration failed and the ones that had already applied.
+            try:
+                conn.rollback()
+            except psycopg2.Error:
+                pass
             msg = str(exc).strip().splitlines()[0]
             print(f"    FAIL  {name}\n            {msg}")
             failed.append(name)
         finally:
-            conn.close()
+            try:
+                conn.close()
+            except psycopg2.Error:
+                pass
 
     print()
     if failed:

@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
 from decimal import Decimal
 import os
+import json
 import uuid
 import logging
 from datetime import datetime, timedelta
@@ -15,10 +16,12 @@ from models import Booking, Payment, BookingItem, RoomType, WebhookEvent, Folio,
 from schemas import DeskPaymentRecord, PaymentRefundRequest, ExcessReturnRequest, DeskCollectRequest
 from utils.pdf_generator import generate_booking_pdf, generate_payment_receipt_pdf
 from utils.email_service import send_booking_email
-from utils.auth_utils import require_reception_or_admin, get_current_user
+from utils.auth_utils import require_reception_or_admin, require_admin, get_current_user
 from utils.audit import write_audit, _resolve_user_id
 from utils.owner_otp import consume_otp
-from utils.settings import get_desk_pay_config
+from utils.settings import (get_desk_pay_config, set_setting,
+                            DESK_PAY_EDITABLE_KEYS, DESK_PAY_GATEWAY_KEY)
+from services import phonepe_client
 from utils import settings as app_settings
 from routers.folio import _recompute as _folio_recompute
 
@@ -109,10 +112,62 @@ def process_razorpay_refund(db: Session, payment_id: int, refund_amount: float, 
         
         logger.info(f"✅ Refund processed: Payment {payment_id}, Refund ID: {payment.refund_id}, Amount: ₹{refund_amount}")
         return True, payment.refund_id, "Refund processed successfully"
-        
+
     except Exception as e:
         logger.error(f"❌ Refund failed for payment {payment_id}: {str(e)}")
         return False, None, f"Refund failed: {str(e)}"
+
+
+def process_phonepe_refund(db: Session, payment_id: int, refund_amount: float, reason: str):
+    """Refund a PhonePe desk collection. Same (ok, refund_id, message) contract as the Razorpay one.
+
+    One difference that matters: PhonePe frequently ACCEPTS a refund as PENDING and completes it
+    minutes later, so refund_status records what PhonePe actually said rather than optimistically
+    claiming "completed". Nothing polls a pending refund yet — the owner confirms it in the
+    PhonePe dashboard, which the runbook says."""
+    try:
+        payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
+        if not payment:
+            return False, None, "Payment not found"
+        if payment.status != "paid":
+            return False, None, f"Cannot refund payment with status: {payment.status}"
+        if payment.refund_status and payment.refund_status != "failed":
+            return False, payment.refund_id, "Payment already refunded"
+        if not payment.order_id:
+            return False, None, "This PhonePe payment has no order reference to refund against"
+
+        refund_ref = f"BHSR-{payment.payment_id}-{uuid.uuid4().hex[:6]}"
+        result = phonepe_client.refund(refund_ref, payment.order_id, int(round(refund_amount * 100)))
+
+        payment.refund_id = refund_ref
+        payment.refund_amount = Decimal(str(refund_amount))
+        payment.refund_status = "completed" if result.get("state") == "COMPLETED" else "pending"
+        payment.refund_reason = reason
+        db.commit()
+        logger.info(f"✅ PhonePe refund {payment.refund_status}: payment {payment_id}, "
+                    f"ref {refund_ref}, ₹{refund_amount}")
+        return True, refund_ref, ("Refund processed successfully" if payment.refund_status == "completed"
+                                  else "Refund accepted by PhonePe — it settles within a few minutes")
+    except Exception as e:
+        db.rollback()
+        logger.error(f"❌ PhonePe refund failed for payment {payment_id}: {e}")
+        return False, None, f"Refund failed: {e}"
+
+
+def process_gateway_refund(db: Session, payment_id: int, refund_amount: float, reason: str):
+    """Refund through whichever gateway actually took the money.
+
+    Two gateways run at once in production (Razorpay for the website and desk links, PhonePe for
+    desk UPI QRs), so the gateway can no longer be assumed. Before this existed, the admin-cancel
+    path in routers/bookings.py took the booking's first paid payment and handed it to Razorpay
+    regardless — which would have sent a PhonePe transaction id to Razorpay and failed, with the
+    booking already cancelled."""
+    payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
+    if not payment:
+        return False, None, "Payment not found"
+    if payment.gateway == "phonepe":
+        return process_phonepe_refund(db, payment_id, refund_amount, reason)
+    return process_razorpay_refund(db, payment_id, refund_amount, reason)
 
 
 # 📊 GET all payments (admin only)
@@ -594,6 +649,80 @@ async def payment_webhook(request: Request, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail="Webhook processing failed")
 
 
+@router.post("/phonepe/webhook")
+async def phonepe_webhook(request: Request, db: Session = Depends(get_db)):
+    """PhonePe's payment callback — the thing that makes a 0% UPI QR self-confirming (v5q).
+
+    Shape differs from Razorpay's in every respect, which is why it is a separate endpoint rather
+    than a branch: no body signature (a shared username/password digest in `Authorization`
+    instead), flat `payload` with no `.entity` nesting, and `merchantOrderId` — an id we minted —
+    as the match key.
+
+    Answers 200 to everything it understood, including events it deliberately ignores: a non-2xx
+    makes PhonePe retry, and retrying is pointless for an event we will ignore again. The one
+    exception is bad auth, which must be a 401 so a misconfigured secret is loud rather than
+    silently accepted.
+
+    Dropping a callback is survivable: `_reconcile_phonepe` picks the payment up on the desk's
+    next status poll."""
+    body = await request.body()
+    if not phonepe_client.verify_webhook(request.headers, body):
+        logger.warning("📥 PhonePe webhook rejected: bad or missing Authorization")
+        raise HTTPException(status_code=401, detail="Invalid webhook credentials")
+
+    try:
+        data = json.loads(body or b"{}")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed webhook body")
+
+    event = (data.get("event") or "").strip()
+    payload = data.get("payload") or {}
+    order_ref = payload.get("merchantOrderId")
+    state = (payload.get("state") or "").upper()
+    details = payload.get("paymentDetails") or []
+    txn_id = (details[0] or {}).get("transactionId") if details else None
+    logger.info(f"📥 PhonePe webhook: {event} order={order_ref} state={state}")
+
+    if not order_ref:
+        return {"status": "ignored", "reason": "no merchantOrderId"}
+
+    # One order can legitimately notify more than once (PENDING then COMPLETED), so the event key
+    # is order+state rather than order alone — a retry of the SAME state is the duplicate we want
+    # to drop. VARCHAR(100) is ample: "phonepe:BHS-123456-deadbeef:COMPLETED" is ~40.
+    event_id = f"phonepe:{order_ref}:{state}"[:100]
+    if db.query(WebhookEvent).filter(WebhookEvent.event_id == event_id).first():
+        logger.info(f"⚠️ PhonePe webhook {event_id} already processed — skipping")
+        return {"status": "already_processed", "event_id": event_id}
+
+    payment = db.query(Payment).filter(Payment.order_id == order_ref,
+                                       Payment.gateway == "phonepe").first()
+    status = "ignored"
+    if payment is None:
+        status = "payment_not_found"
+        logger.warning(f"⚠️ PhonePe webhook for unknown order {order_ref}")
+    elif state == "COMPLETED":
+        if payment.status != "paid":
+            _mark_payment_paid(db, payment, txn_id or order_ref, method="upi")
+            db.commit()
+            write_audit(db, None, "payment.desk_collect_captured", "payment", payment.payment_id,
+                        after={"event": event, "gateway": "phonepe", "gateway_payment_id": txn_id,
+                               "booking_id": payment.booking_id, "amount": float(payment.amount or 0)},
+                        client="system", commit=True)
+            logger.info(f"✅ Desk collection captured on PhonePe: payment {payment.payment_id}")
+        status = "processed"
+    elif state in ("FAILED", "EXPIRED"):
+        if payment.status == "created":
+            payment.status = "failed" if state == "FAILED" else "expired"
+            db.commit()
+        status = "processed"
+
+    db.add(WebhookEvent(event_id=event_id, event_type=event or f"phonepe.{state.lower()}",
+                        booking_id=payment.booking_id if payment else None,
+                        payment_id=txn_id, status=status, raw_data=str(data)))
+    db.commit()
+    return {"status": "received", "event_id": event_id, "state": state}
+
+
 # =====================================================================
 # DESK PAYMENTS & REFUNDS (prompts 06 + 08).
 # Records payments taken at the front desk (cash / card-machine / UPI / bank),
@@ -783,10 +912,38 @@ def _mark_payment_paid(db: Session, payment: Payment, gateway_payment_id, method
         _folio_recompute(db, folio)
 
 
+def _reconcile_phonepe(db: Session, payment: Payment):
+    """The PhonePe half of the live reconcile. Never raises.
+
+    This is what makes the webhook credentials optional rather than load-bearing: with
+    PHONEPE_WEBHOOK_* unset, every callback is rejected and confirmation still arrives here,
+    within one poll interval. Slower, never wrong."""
+    try:
+        st = phonepe_client.fetch_status(payment.order_id) if payment.order_id else None
+        if not st:
+            return
+        state = st.get("state")
+        if state == "COMPLETED":
+            gw_id = st.get("transaction_id") or payment.order_id
+            _mark_payment_paid(db, payment, gw_id, method="upi")
+            db.commit()
+            write_audit(db, None, "payment.desk_collect_reconciled", "payment", payment.payment_id,
+                        after={"gateway_payment_id": gw_id, "gateway": "phonepe", "source": "poll"},
+                        client="system", commit=True)
+        elif state in ("FAILED", "EXPIRED") and payment.status == "created":
+            payment.status = "failed" if state == "FAILED" else "expired"
+            db.commit()
+    except Exception as e:
+        db.rollback()
+        logger.warning(f"PhonePe reconcile failed for payment {getattr(payment, 'payment_id', '?')}: {e}")
+
+
 def _try_live_reconcile(db: Session, payment: Payment):
-    """Best-effort belt-and-suspenders to the webhook: ask Razorpay directly whether a still-
+    """Best-effort belt-and-suspenders to the webhook: ask the gateway directly whether a still-
     pending desk-collect payment has been captured (or has expired). The webhook is primary; this
     covers webhook delay/misconfiguration when the desktop polls GET /{id}/status. Never raises."""
+    if payment.gateway == "phonepe":
+        return _reconcile_phonepe(db, payment)
     try:
         client = get_razorpay_client()
         if not client:
@@ -974,6 +1131,59 @@ def _desk_collect_response(db: Session, payment: Payment, short_url=None, expire
     }
 
 
+def _desk_collect_phonepe_qr(db: Session, booking, fee, charge, cfg: dict,
+                             data: DeskCollectRequest, user):
+    """Raise a PhonePe UPI QR. Returns the desk response, or None to fall back to Razorpay.
+
+    The Payment row is inserted and flushed BEFORE PhonePe is called, because the merchant order
+    id embeds our own payment id — that is what lets the webhook find the row with one indexed
+    lookup instead of scanning notes. The uuid tail keeps it unique if a payment is ever retried
+    against a fresh row.
+
+    On refusal the row is rolled back rather than left behind as a `created` payment nobody can
+    pay: an orphan would sit in the desk's poll loop until it expired.
+    """
+    payment = Payment(
+        booking_id=booking.booking_id, gateway="phonepe", method="upi",
+        collect_method="upi_qr", amount=Decimal(str(charge)),
+        convenience_fee_amount=Decimal(str(fee)), currency="INR", status="created",
+        client_ref=data.client_ref, collected_by=_resolve_user_id(db, user))
+    db.add(payment)
+    db.flush()
+
+    order_ref = f"BHS-{payment.payment_id}-{uuid.uuid4().hex[:8]}"
+    expiry_seconds = cfg["qr_expiry_minutes"] * 60
+    try:
+        qr = phonepe_client.create_upi_qr(
+            order_ref, int(round(charge * 100)), expiry_seconds,
+            meta={"booking_id": booking.booking_id, "desk": "reception"})
+    except phonepe_client.PhonePeError as e:
+        db.rollback()
+        logger.error(f"❌ PhonePe QR create failed for booking {booking.booking_id}: {e}")
+        # Hand back to the Razorpay path, which tries its own QR and then a link. A guest is at
+        # the counter: a 2% collection beats no collection. But only if Razorpay is actually
+        # configured — otherwise the receptionist would be told "Razorpay not configured" for a
+        # PhonePe failure, which sends them looking in the wrong place.
+        if get_razorpay_client() is None:
+            raise HTTPException(status_code=502, detail=f"UPI QR is unavailable: {e}")
+        return None
+
+    payment.order_id = order_ref
+    payment.upi_intent = qr["intent_url"]
+    # PhonePe's own order id is not how we match the webhook (merchantOrderId is), but keeping it
+    # makes a support conversation with PhonePe possible from the payment row alone.
+    if qr.get("order_id"):
+        payment.qr_code_id = str(qr["order_id"])[:50]
+    db.commit()
+    write_audit(db, user, "payment.desk_collect", "payment", payment.payment_id,
+                after={"booking_id": booking.booking_id, "method": "upi_qr", "gateway": "phonepe",
+                       "amount": float(charge), "fee": float(fee), "order_ref": order_ref},
+                client="desktop", commit=True)
+    logger.info(f"🧾 Desk UPI QR ₹{charge} raised on PhonePe for booking {booking.booking_id} ({order_ref})")
+    expires_at = qr.get("expire_at") or int((datetime.utcnow() + timedelta(seconds=expiry_seconds)).timestamp())
+    return _desk_collect_response(db, payment, expires_at=expires_at)
+
+
 @router.post("/desk/collect")
 def desk_collect(data: DeskCollectRequest, db: Session = Depends(get_db),
                  user=Depends(require_reception_or_admin)):
@@ -1011,13 +1221,28 @@ def desk_collect(data: DeskCollectRequest, db: Session = Depends(get_db),
         rec["collect_method"] = "cash"
         return rec
 
-    client = get_razorpay_client()
-    if not client:
-        raise HTTPException(status_code=503, detail="Online payments are unavailable (Razorpay not configured)")
-
     fee = _compute_desk_fee(cfg, data.method, base, data.apply_fee)
     charge = round(base + fee, 2)
     guest = booking.guest
+
+    # ---- PhonePe UPI QR (v5q): 0% on UPI, so this is the cheap path when it is selected ----
+    # QR only. Links and the website stay on Razorpay — which is why the Razorpay client is now
+    # resolved AFTER this branch rather than being a precondition for collecting at all.
+    if data.method == "upi_qr" and cfg["gateway"] == "phonepe":
+        if not cfg["upi_qr_enabled"]:
+            raise HTTPException(status_code=409, detail="UPI QR collection is disabled")
+        if not phonepe_client.is_configured():
+            raise HTTPException(status_code=503,
+                                detail="Online payments are unavailable (PhonePe not configured)")
+        result = _desk_collect_phonepe_qr(db, booking, fee, charge, cfg, data, user)
+        if result is not None:
+            return result
+        # PhonePe refused. Fall through to the Razorpay path below, which tries its own QR first
+        # and a payment link after that — a 2% collection beats telling a waiting guest "no".
+
+    client = get_razorpay_client()
+    if not client:
+        raise HTTPException(status_code=503, detail="Online payments are unavailable (Razorpay not configured)")
 
     # ---- UPI dynamic QR ----
     if data.method == "upi_qr":
@@ -1098,6 +1323,53 @@ def desk_collect(data: DeskCollectRequest, db: Session = Depends(get_db),
     return _desk_collect_response(db, payment, short_url=plink.get("short_url"))
 
 
+@router.get("/desk/config")
+def get_desk_config(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
+    """Desk payment policy + which gateways are actually usable (v5q).
+
+    `*_configured` are derived from ENV, not from the settings rows, so the admin screen can say
+    "PhonePe is selected but has no credentials on this server" instead of silently 503-ing the
+    receptionist at the moment a guest is waiting."""
+    cfg = get_desk_pay_config(db)
+    cfg["phonepe_configured"] = phonepe_client.is_configured()
+    cfg["razorpay_configured"] = bool(get_razorpay_client())
+    return cfg
+
+
+@router.put("/desk/config", dependencies=[Depends(require_admin)])
+def update_desk_config(data: dict, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Change desk payment policy — including which gateway raises UPI QRs — without a redeploy.
+
+    Refuses to select a gateway this server has no credentials for. That check is the whole point
+    of the endpoint existing rather than the owner editing app_settings by hand: switching to a
+    gateway that cannot authenticate breaks desk collection at the counter, and the error would
+    surface hours later to a receptionist rather than now to the person making the change."""
+    gateway = data.get(DESK_PAY_GATEWAY_KEY)
+    if gateway is not None:
+        gateway = str(gateway).strip().lower()
+        if gateway not in ("razorpay", "phonepe"):
+            raise HTTPException(status_code=400, detail="gateway must be 'razorpay' or 'phonepe'")
+        if gateway == "phonepe" and not phonepe_client.is_configured():
+            raise HTTPException(status_code=409,
+                                detail="PhonePe is not configured on this server (PHONEPE_CLIENT_ID / "
+                                       "PHONEPE_CLIENT_SECRET / PHONEPE_CLIENT_VERSION)")
+        if gateway == "razorpay" and not get_razorpay_client():
+            raise HTTPException(status_code=409, detail="Razorpay is not configured on this server")
+        data[DESK_PAY_GATEWAY_KEY] = gateway
+
+    applied = {}
+    for key, value in data.items():
+        if key in DESK_PAY_EDITABLE_KEYS:
+            set_setting(db, key, value, user=user)
+            applied[key] = value
+    if not applied:
+        raise HTTPException(status_code=400, detail="No editable desk-payment settings in the request")
+    db.commit()
+    write_audit(db, user, "payment.desk_config_update", "app_settings", None, after=applied,
+                client="web", commit=True)
+    return get_desk_config(db=db, user=user)
+
+
 @router.post("/desk/link")
 def desk_link(data: DeskCollectRequest, db: Session = Depends(get_db),
               user=Depends(require_reception_or_admin)):
@@ -1115,7 +1387,8 @@ def payment_status(payment_id: int, db: Session = Depends(get_db),
     payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
-    if payment.status == "created" and (payment.qr_code_id or payment.payment_link_id):
+    if payment.status == "created" and (payment.qr_code_id or payment.payment_link_id
+                                        or payment.gateway == "phonepe"):
         _try_live_reconcile(db, payment)
         payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
     folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
@@ -1136,11 +1409,24 @@ def payment_status(payment_id: int, db: Session = Depends(get_db),
 @router.get("/{payment_id}/qr.png")
 def payment_qr_png(payment_id: int, db: Session = Depends(get_db),
                    user=Depends(require_reception_or_admin)):
-    """Serve the QR image bytes for a UPI-QR desk collection (prompt 19). Proxies Razorpay's
-    hosted QR image so the desktop can reuse its authed byte-download channel (no direct CDN hit)."""
+    """Serve the QR image bytes for a UPI-QR desk collection (prompt 19).
+
+    Two sources, one URL, so the desk never learns which gateway raised the charge:
+      * PhonePe (v5q) hands back a `upi://pay?...` intent, which we render here with segno — the
+        same library the 2FA enrolment and guest-portal QRs already use. Local render means no
+        third-party fetch while a guest waits at the counter.
+      * Razorpay hosts a PNG, which we proxy so the desktop can reuse its authed byte-download
+        channel (no direct CDN hit from the desk).
+    """
     payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
     if not payment:
         raise HTTPException(status_code=404, detail="Payment not found")
+    if payment.upi_intent:
+        import io as _io
+        import segno
+        buf = _io.BytesIO()
+        segno.make(payment.upi_intent, error="m").save(buf, kind="png", scale=8, border=3)
+        return Response(content=buf.getvalue(), media_type="image/png")
     if not payment.qr_image_url:
         raise HTTPException(status_code=404, detail="No QR image for this payment")
     try:
@@ -1227,9 +1513,10 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
     # lists anything posted after the invoice under its own heading.
     post_to_folio = bool(folio)
 
-    if payment.gateway == "razorpay":
-        # Gateway path: helper validates again, calls Razorpay, sets refund_* and COMMITS.
-        ok, refund_id, message = process_razorpay_refund(db, payment.payment_id, amount, data.reason)
+    if payment.gateway in ("razorpay", "phonepe"):
+        # Gateway path: the helper validates again, calls whichever gateway took the money,
+        # sets refund_* and COMMITS.
+        ok, refund_id, message = process_gateway_refund(db, payment.payment_id, amount, data.reason)
         if not ok:
             raise HTTPException(status_code=502, detail=message)
     else:
@@ -1272,7 +1559,7 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
                     client="desktop", commit=True)
     except Exception as e:
         db.rollback()
-        if payment.gateway == "razorpay":
+        if payment.gateway in ("razorpay", "phonepe"):
             # Money already moved at the gateway (helper committed) — don't 500 and
             # mislead the operator; surface the bookkeeping failure instead.
             logger.critical(f"❌ Refund folio/audit posting failed AFTER gateway refund "
