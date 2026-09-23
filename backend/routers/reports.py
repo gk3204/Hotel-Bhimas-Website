@@ -1067,9 +1067,23 @@ def checkout_summary_data(db, day):
     return {"day": str(day), "rows": rows, "totals": totals}
 
 
+def _charge_room_label(db, charge, booking_id, _cache, _room_cache):
+    """The room a room-service charge belongs to.
+
+    v5n: `folio_charges.room_id` records the ordering room, so a three-room family's food is
+    attributed room by room instead of all landing on whichever room came first on the booking.
+    Charges posted before v5n carry no room, so those still fall back to the stay's first room."""
+    rid = getattr(charge, "room_id", None)
+    if rid:
+        if rid not in _room_cache:
+            _room_cache[rid] = db.query(Room.room_number).filter(Room.room_id == rid).scalar() or "—"
+        return _room_cache[rid]
+    return _booking_room_label(db, booking_id, _cache)
+
+
 def _booking_room_label(db, booking_id, _cache):
-    """The room label for a booking (its first assigned room; joined lazily + cached). Room-service
-    charges are posted to the folio, not a specific room, so a stay's room is the natural grouping."""
+    """The room label for a booking (its first assigned room; joined lazily + cached). Used for
+    charges that name no room of their own (anything posted before v5n)."""
     if booking_id not in _cache:
         row = (db.query(Room.room_number).join(BookingItem, BookingItem.room_id == Room.room_id)
                .filter(BookingItem.booking_id == booking_id).order_by(Room.room_number).first())
@@ -1078,18 +1092,19 @@ def _booking_room_label(db, booking_id, _cache):
 
 
 def room_service_by_room_data(db, dfrom, dto):
-    """Room-service sales grouped BY ROOM, product-wise within each room. Charges are attributed to
-    the stay's room (first assigned room for a multi-room booking). Reuses `_room_service_filters`."""
+    """Room-service sales grouped BY ROOM, product-wise within each room. v5n: attributed to the
+    room that actually ordered (folio_charges.room_id); pre-v5n charges fall back to the stay's first
+    room. Reuses `_room_service_filters`."""
     from models import Folio
     q = (db.query(FolioCharge, Booking, MenuItem)
          .join(Folio, Folio.id == FolioCharge.folio_id)
          .join(Booking, Booking.booking_id == Folio.booking_id)
          .outerjoin(MenuItem, MenuItem.id == FolioCharge.menu_item_id)
          .filter(*_room_service_filters(dfrom=dfrom, dto=dto)))
-    cache, groups, gcache = {}, {}, {}
+    cache, groups, gcache, rcache = {}, {}, {}, {}
     for fc, b, mi in q.all():
         # Group by (room, booking) so a room used by two stays on the same day stays separate.
-        room = _booking_room_label(db, b.booking_id, cache)
+        room = _charge_room_label(db, fc, b.booking_id, cache, rcache)
         key = (room, b.booking_id)
         if b.booking_id not in gcache:
             gcache[b.booking_id] = (db.query(Guest.name)

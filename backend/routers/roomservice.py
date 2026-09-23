@@ -126,7 +126,7 @@ def create_order(data: DeskRoomServiceOrder, db: Session = Depends(get_db),
     delivery."""
     try:
         r = room_service.create_desk_order(db, data.booking_id, data.items, data.note, user,
-                                           client_ref=data.client_ref)
+                                           client_ref=data.client_ref, room_id=data.room_id)
         write_audit(db, user, "room_service.order", "guest_request", r.id,
                     after={"kot_no": r.kot_no, "booking_id": r.booking_id,
                            "amount": float(r.amount or 0),

@@ -158,6 +158,9 @@ def post_to_folio(db: Session, r: GuestRequest, user):
             # payable, which is what the folio and the GST summary work from.
             qty=qty, unit_price=unit, amount=line_total(unit, qty, ln.get("gst_percent")),
             gst_percent=ln.get("gst_percent"), posted_by=_resolve_user_id(db, user),
+            # v5n: which room ate it. Room NIGHTS were always attributable (booking_item_id); extras
+            # were booking-level only, so a three-room family's food all read as room 1 on the bill.
+            room_id=r.room_id,
             # v3 item 4 — the durable charge->dish link the product-wise sales report groups
             # on. This is the ONLY place it is ever set: both the tablet's "deliver" and the
             # portal's "complete" reach the folio through here, so they cannot drift.
@@ -287,10 +290,15 @@ def in_house_rooms(db: Session) -> list:
 
 
 def create_desk_order(db: Session, booking_id: int, items, note, user,
-                      client_ref=None) -> GuestRequest:
+                      client_ref=None, room_id=None) -> GuestRequest:
     """Staff take an order on the tablet / desk. Same row shape as a portal order, so it
     lands on the same board — but it starts `acknowledged` (staff already have it) and gets
-    its KOT number immediately so the kitchen docket can print."""
+    its KOT number immediately so the kitchen docket can print.
+
+    v5n: `room_id` is the room that actually ordered. A multi-room booking used to send every order
+    to whichever room happened to be first on the booking, so a docket for room 303 printed "301"
+    and the sales-by-room report agreed with it. An id that is not one of THIS stay's rooms is
+    refused rather than quietly redirected."""
     if client_ref:
         dup = db.query(GuestRequest).filter(GuestRequest.client_ref == client_ref).first()
         if dup:
@@ -302,7 +310,15 @@ def create_desk_order(db: Session, booking_id: int, items, note, user,
     if booking.status != "checked_in":
         raise HTTPException(status_code=409, detail="That guest is not checked in")
 
-    room_id = next((bi.room_id for bi in booking.booking_items if bi.room_id), None)
+    stay_rooms = [bi.room_id for bi in booking.booking_items if bi.room_id]
+    if room_id is not None:
+        if int(room_id) not in stay_rooms:
+            raise HTTPException(status_code=400,
+                                detail="That room is not part of this stay — pick the ordering room again.")
+        room_id = int(room_id)
+    else:
+        # No room named (an older desk build): fall back to the stay's first room, as before.
+        room_id = next(iter(stay_rooms), None)
     snapshot, total = snapshot_items(db, items)
 
     r = GuestRequest(

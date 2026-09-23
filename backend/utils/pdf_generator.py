@@ -756,22 +756,28 @@ def generate_registration_slip_pdf(slip_data):
             styles["Normal"]))
         elements.append(Spacer(1, 0.08 * inch))
     if len(guests) > 1:
-        elements.append(Paragraph("<b>Guests in the room</b>", styles["Normal"]))
+        # v5n: a Room column — one booking can be several rooms, and "who slept where" is the
+        # question this record exists to answer. An occupant with no ID reads "not required" rather
+        # than a bare dash, because under the per-room / lead-only ID rule that is a normal state
+        # rather than a missing document.
+        elements.append(Paragraph("<b>Guests</b>", styles["Normal"]))
         elements.append(Spacer(1, 0.06 * inch))
-        g_rows = [["#", "Name", "ID Type", "ID Number", "ID on file"]]
+        g_rows = [["#", "Name", "Room", "ID Type", "ID Number", "ID on file"]]
         for i, g in enumerate(guests, start=1):
+            _has_id = bool(g.get("id_number_masked"))
             g_rows.append([
                 str(i),
                 (g.get("name") or "") + ("  (primary)" if g.get("is_primary") else ""),
+                g.get("room_number") or "—",
                 (g.get("id_type") or "").replace("_", " ").title() or "—",
-                g.get("id_number_masked") or "—",
+                g.get("id_number_masked") or "not required",
                 # Front and back are captured as two flatbed passes (migration 026); the slip
                 # says which sides are actually on file, so a missing reverse is visible.
                 ("Front+Back" if g.get("has_scan") and g.get("has_scan_back")
                  else "Back" if g.get("has_scan_back")
-                 else "Front" if g.get("has_scan") else "—"),
+                 else "Front" if g.get("has_scan") else ("—" if _has_id else "n/a")),
             ])
-        g_table = Table(g_rows, colWidths=[24, 190, 90, 100, 60])
+        g_table = Table(g_rows, colWidths=[22, 160, 50, 84, 96, 60])
         g_table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f5f5f5")),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
@@ -1565,5 +1571,82 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
                                   fontSize=8, textColor=colors.grey, alignment=1, spaceBefore=18)
     elements.append(Paragraph("Hotel Bhimas — internal management report.", footer_style))
 
+    doc.build(elements)
+    return file_path
+
+
+def generate_portal_qr_card_pdf(card):
+    """v5n: the in-room card for ONE room — big room number, the portal QR, and the wifi code.
+
+    Why a card and not just a WhatsApp: the in-room portal link can only be messaged to a phone, and
+    a three-room family books on one number, so rooms 2..N had no way to reach their own portal at
+    all. Each room now has its own session (routers/portal._get_or_create_session keyed on the room),
+    and this is what the desk prints and leaves in the room.
+
+    card: {room_number, guest_name, link, qr_png (bytes), wifi_ssid, wifi_code, booking_id}
+    Returns the generated file path (temp dir).
+    """
+    import io as _io
+    import tempfile
+
+    room = str(card.get("room_number") or "-")
+    file_path = os.path.join(tempfile.gettempdir(),
+                            f"portal_card_{card.get('booking_id', 0)}_{room}.pdf")
+    doc = SimpleDocTemplate(file_path, pagesize=A4, rightMargin=36, leftMargin=36,
+                            topMargin=36, bottomMargin=36)
+    styles = getSampleStyleSheet()
+    elements = []
+
+    elements.append(Paragraph(
+        "<b>HOTEL BHIMAS</b> — 42, G Car Street, Tirupati - 517501", styles["Normal"]))
+    elements.append(Spacer(1, 0.15 * inch))
+    elements.append(Paragraph(
+        f"Room {room}",
+        ParagraphStyle(name="QrRoom", parent=styles["Title"], fontSize=34, spaceAfter=2)))
+    elements.append(Paragraph(
+        "Scan for room service, WiFi, wake-up calls, a cab and check-out",
+        ParagraphStyle(name="QrSub", parent=styles["Normal"], fontSize=11, alignment=1,
+                       textColor=colors.HexColor("#555555"))))
+    elements.append(Spacer(1, 0.2 * inch))
+
+    qr = card.get("qr_png")
+    if qr:
+        # reportlab's Image flowable takes a path or a file-like object — an ImageReader is not one.
+        img = Image(_io.BytesIO(qr), width=3.2 * inch, height=3.2 * inch)
+        img.hAlign = "CENTER"
+        elements.append(img)
+    elements.append(Spacer(1, 0.12 * inch))
+    elements.append(Paragraph(
+        card.get("link") or "",
+        ParagraphStyle(name="QrLink", parent=styles["Normal"], fontSize=8, alignment=1,
+                       textColor=colors.HexColor("#777777"))))
+    elements.append(Spacer(1, 0.25 * inch))
+
+    rows = []
+    if card.get("wifi_ssid") or card.get("wifi_code"):
+        rows.append(["WiFi network", card.get("wifi_ssid") or "-",
+                     "WiFi code", card.get("wifi_code") or "-"])
+    if card.get("guest_name"):
+        rows.append(["Guest", card["guest_name"], "Room", room])
+    if rows:
+        t = Table(rows, colWidths=[90, 170, 80, 140])
+        t.setStyle(TableStyle([
+            ("BACKGROUND", (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
+            ("BACKGROUND", (2, 0), (2, -1), colors.HexColor("#f5f5f5")),
+            ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+            ("FONTNAME", (2, 0), (2, -1), "Helvetica-Bold"),
+            ("FONTSIZE", (0, 0), (-1, -1), 10),
+            ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#cccccc")),
+            ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+            ("TOPPADDING", (0, 0), (-1, -1), 6),
+            ("BOTTOMPADDING", (0, 0), (-1, -1), 6),
+        ]))
+        elements.append(t)
+
+    elements.append(Spacer(1, 0.2 * inch))
+    elements.append(Paragraph(
+        "This code is for this room only. Please leave the card in the room.",
+        ParagraphStyle(name="QrFoot", parent=styles["Normal"], fontSize=8, alignment=1,
+                       textColor=colors.grey)))
     doc.build(elements)
     return file_path

@@ -477,12 +477,21 @@ def _record_extend_request(db, guest, booking_id, provider_id=None):
         dup = db.query(GuestRequest).filter(GuestRequest.client_ref == client_ref).first()
         if dup is not None:
             return dup
-    room_id = (db.query(BookingItem.room_id)
-               .filter(BookingItem.booking_id == booking_id, BookingItem.room_id.isnot(None))
-               .order_by(BookingItem.booking_item_id).limit(1).scalar())
+    # v5n: the request row carries ONE room (the board shows a room per row), but a group booking
+    # may be several — so name them all in the note, or the desk re-encodes one card and stops.
+    rooms = [r for (r,) in db.query(BookingItem.room_id)
+             .filter(BookingItem.booking_id == booking_id, BookingItem.room_id.isnot(None))
+             .order_by(BookingItem.booking_item_id).all()]
+    room_id = rooms[0] if rooms else None
+    note = EXTEND_REQUEST_NOTE
+    if len(rooms) > 1:
+        from models import Room as _Room
+        nums = [n for (n,) in db.query(_Room.room_number).filter(_Room.room_id.in_(rooms)).all() if n]
+        if nums:
+            note += f" This stay is {len(rooms)} rooms: {', '.join(sorted(nums))} — re-encode each one."
     r = GuestRequest(booking_id=booking_id, room_id=room_id,
                      guest_id=guest.guest_id if guest else None,
-                     type="extend", status="requested", note=EXTEND_REQUEST_NOTE,
+                     type="extend", status="requested", note=note,
                      source="whatsapp", client_ref=client_ref)
     db.add(r)
     db.commit()

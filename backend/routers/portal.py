@@ -28,6 +28,7 @@ from decimal import Decimal
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
@@ -73,11 +74,30 @@ def _room_number(db: Session, room_id) -> str | None:
     return r.room_number if r else None
 
 
-def _get_or_create_session(db: Session, booking: Booking, user=None) -> GuestPortalSession:
-    """One active portal session per booking. TTL = the stay's checkout moment (+ a day's grace)."""
-    s = db.query(GuestPortalSession).filter(
+def _get_or_create_session(db: Session, booking: Booking, user=None, room_id=None) -> GuestPortalSession:
+    """One active portal session per ROOM of a booking. TTL = the stay's checkout moment (+ a day's
+    grace).
+
+    v5n: a session used to be per BOOKING, pinned to `booking_items[0]`, so a three-room family
+    shared one QR, one wifi voucher (derived from the token) and one room number — and every room
+    service / wake-up / cab request they raised came through tagged as room 1. Keying on the room
+    gives each room its own QR card to put in the room, its own voucher, and correct attribution.
+    `room_id=None` keeps the old behaviour (the stay's first room), which is what the auto-send at
+    check-in and any older desk build ask for.
+    """
+    wanted = int(room_id) if room_id else None
+    if wanted is not None:
+        stay_rooms = [bi.room_id for bi in booking.booking_items if bi.room_id]
+        if wanted not in stay_rooms:
+            raise HTTPException(status_code=400, detail="That room is not part of this stay")
+    q = db.query(GuestPortalSession).filter(
         GuestPortalSession.booking_id == booking.booking_id,
-        GuestPortalSession.status == "active").first()
+        GuestPortalSession.status == "active")
+    if wanted is not None:
+        s = q.filter(GuestPortalSession.room_id == wanted).first()
+    else:
+        # Unspecified: reuse whatever active session exists (pre-v5n stays have exactly one).
+        s = q.order_by(GuestPortalSession.id).first()
     if s:
         return s
     from routers.reception import booking_checkout_moment
@@ -85,10 +105,11 @@ def _get_or_create_session(db: Session, booking: Booking, user=None) -> GuestPor
         expires = booking_checkout_moment(booking) + timedelta(hours=24)
     except Exception:
         expires = datetime.utcnow() + timedelta(days=3)
-    room_id = None
-    bi = booking.booking_items[0] if booking.booking_items else None
-    if bi:
-        room_id = bi.room_id
+    room_id = wanted
+    if room_id is None:
+        bi = booking.booking_items[0] if booking.booking_items else None
+        if bi:
+            room_id = bi.room_id
     s = GuestPortalSession(
         token=secrets.token_urlsafe(24), booking_id=booking.booking_id,
         room_id=room_id, guest_id=booking.guest_id, status="active",
@@ -228,57 +249,109 @@ def mint_session(data: PortalSessionRequest, db: Session = Depends(get_db),
         raise HTTPException(status_code=404, detail="Booking not found")
     if booking.status != "checked_in":
         raise HTTPException(status_code=409, detail="Only a checked-in stay has an in-room portal")
-    s = _get_or_create_session(db, booking, user)
+    s = _get_or_create_session(db, booking, user, room_id=data.room_id)
     return {"token": s.token, "link": _portal_url(s.token),
+            "room_id": s.room_id,
             "room_number": _room_number(db, s.room_id),
+            "wifi_code": _wifi_code(s),
             "expires_at": str(s.expires_at) if s.expires_at else None}
 
 
+def _qr_png(link: str, scale: int = 6) -> bytes:
+    import segno
+    buf = io.BytesIO()
+    segno.make(link, error="m").save(buf, kind="png", scale=scale, border=3)
+    return buf.getvalue()
+
+
 @router.get("/session/{booking_id}/qr.png")
-def session_qr(booking_id: int, db: Session = Depends(get_db),
+def session_qr(booking_id: int, room_id: int | None = Query(None), db: Session = Depends(get_db),
                user=Depends(require_reception_or_admin)):
-    """PNG QR of the guest portal link for this booking (generated locally with segno)."""
+    """PNG QR of the guest portal link (generated locally with segno). v5n: `room_id` picks WHICH
+    room's portal — each room of a multi-room stay has its own token, so its own QR."""
     booking = db.query(Booking).filter(Booking.booking_id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     if booking.status != "checked_in":
         raise HTTPException(status_code=409, detail="Only a checked-in stay has an in-room portal")
-    s = _get_or_create_session(db, booking, user)
+    s = _get_or_create_session(db, booking, user, room_id=room_id)
     try:
-        import segno
-        buf = io.BytesIO()
-        segno.make(_portal_url(s.token), error="m").save(buf, kind="png", scale=6, border=3)
-        return Response(content=buf.getvalue(), media_type="image/png")
+        return Response(content=_qr_png(_portal_url(s.token)), media_type="image/png")
     except Exception as e:
         logger.error(f"portal QR generation failed: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail="Failed to render the QR")
 
 
-@router.post("/session/{booking_id}/send-link")
-def send_session_link(booking_id: int, db: Session = Depends(get_db),
-                      user=Depends(require_reception_or_admin)):
-    """Best-effort: WhatsApp the portal link to the guest (stub-logged until WHATSAPP_* is set)."""
+@router.get("/session/{booking_id}/qr-card.pdf")
+def session_qr_card(booking_id: int, room_id: int | None = Query(None), db: Session = Depends(get_db),
+                    user=Depends(require_reception_or_admin)):
+    """v5n: a printable card for ONE room — room number, QR and wifi code.
+
+    This is how rooms 2..N of a group booking get their portal at all: the link can only be
+    WhatsApped to a phone, and a three-room family books on one number. The card goes in the room."""
     booking = db.query(Booking).filter(Booking.booking_id == booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
     if booking.status != "checked_in":
         raise HTTPException(status_code=409, detail="Only a checked-in stay has an in-room portal")
-    s = _get_or_create_session(db, booking, user)
+    s = _get_or_create_session(db, booking, user, room_id=room_id)
     guest = db.query(Guest).filter(Guest.guest_id == booking.guest_id).first()
+    from utils.pdf_generator import generate_portal_qr_card_pdf
+    cfg = app_settings.get_portal_config(db)
+    path = generate_portal_qr_card_pdf({
+        "room_number": _room_number(db, s.room_id) or "-",
+        "guest_name": guest.name if guest else "",
+        "link": _portal_url(s.token),
+        "qr_png": _qr_png(_portal_url(s.token), scale=10),
+        "wifi_ssid": cfg.get("wifi_ssid"),
+        "wifi_code": _wifi_code(s),
+        "booking_id": booking.booking_id,
+    })
+    return FileResponse(path, media_type="application/pdf",
+                        filename=f"portal-room-{_room_number(db, s.room_id) or booking_id}.pdf")
+
+
+@router.post("/session/{booking_id}/send-link")
+def send_session_link(booking_id: int, room_id: int | None = Query(None),
+                      db: Session = Depends(get_db),
+                      user=Depends(require_reception_or_admin)):
+    """Best-effort: WhatsApp the portal link to the guest (stub-logged until WHATSAPP_* is set).
+    v5n: `room_id` sends THAT room's link, to that room's own number when one was captured."""
+    booking = db.query(Booking).filter(Booking.booking_id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    if booking.status != "checked_in":
+        raise HTTPException(status_code=409, detail="Only a checked-in stay has an in-room portal")
+    s = _get_or_create_session(db, booking, user, room_id=room_id)
+    guest = db.query(Guest).filter(Guest.guest_id == booking.guest_id).first()
+    # v5n: send to THAT ROOM's own number when the desk captured one at check-in
+    # (booking_guests.phone), else to the number the booking was made with. A group that gave one
+    # number still gets one message; rooms with their own number each get their own link.
+    from models import BookingGuest
+    to = None
+    if s.room_id:
+        to = (db.query(BookingGuest.phone)
+                .filter(BookingGuest.booking_id == booking.booking_id,
+                        BookingGuest.room_id == s.room_id,
+                        BookingGuest.phone.isnot(None))
+                .order_by(BookingGuest.is_primary.desc(), BookingGuest.id).limit(1).scalar())
+    to = (to or "").strip() or (guest.phone if guest else None)
     sent = False
-    if guest and guest.phone:
+    if to:
         try:
             from utils import whatsapp_service as wa
-            row = wa.send_template(db, guest.phone, "portal_link",
-                                   {"guest_name": guest.name or "Guest",
+            row = wa.send_template(db, to, "portal_link",
+                                   {"guest_name": guest.name if guest else "Guest",
                                     "room_number": _room_number(db, s.room_id) or "-",
                                     "link": _portal_url(s.token)},
-                                   guest_id=guest.guest_id, booking_id=booking.booking_id,
+                                   guest_id=guest.guest_id if guest else None,
+                                   booking_id=booking.booking_id,
                                    client_ref=f"portal_link:{s.token}", respect_optout=False)
             sent = row is not None
         except Exception as e:
             logger.error(f"portal link send failed: {e}")
-    return {"sent": sent, "link": _portal_url(s.token)}
+    return {"sent": sent, "link": _portal_url(s.token), "to": to,
+            "room_number": _room_number(db, s.room_id)}
 
 
 @router.get("/requests")

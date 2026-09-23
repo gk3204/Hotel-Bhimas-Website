@@ -978,8 +978,16 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # v4b7: record which stays were sold as a room's ALTERNATE type. `room_type_id` is
         # left alone deliberately — it is what was booked and priced, and availability groups
         # on it. This column is what makes the practice reportable afterwards.
+        #
+        # v5n: match on the ROOM, after the split above. `alt_sales` captured the PARENT item, but a
+        # quantity>1 item has by now become one row per room — so tagging the captured object marked
+        # whichever room ended up on the parent row (usually a correctly-typed one) and left the
+        # actual alternate room untagged. The owner's alternate-sale report named the wrong room.
+        db.flush()
+        _rows_by_room = {i.room_id: i for i in booking.booking_items if i.room_id}
         for _item, _room in alt_sales:
-            _item.sold_as_room_type_id = _room.room_type_id
+            target = _rows_by_room.get(_room.room_id, _item)
+            target.sold_as_room_type_id = _room.room_type_id
 
         # ---- KYC (masked; the raw ID number is never stored) ----
         # ID types are an admin-editable list (v3 item 2). Every occupant's type is checked,
@@ -1310,11 +1318,14 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                     and app_settings.get_whatsapp_config(db).get("portal_link_enabled", True):
                 from routers.portal import _get_or_create_session, _portal_url, _room_number
                 from utils import whatsapp_service as _wa
+                # v5n: one message to the number the booking was made with, naming every room it
+                # covers. Each room has its OWN portal session and QR card (printed at the desk from
+                # the Portal QR overlay) — WhatsApp can only reach a phone, and a group books on one.
                 _sess = _get_or_create_session(db, booking, user)
                 _wa.send_template(
                     db, booking.guest.phone, "portal_link",
                     {"guest_name": booking.guest.name or "Guest",
-                     "room_number": _room_number(db, _sess.room_id) or (_room_nums or "-"),
+                     "room_number": (_room_nums or _room_number(db, _sess.room_id) or "-"),
                      "link": _portal_url(_sess.token)},
                     guest_id=booking.guest_id, booking_id=booking.booking_id,
                     client_ref=f"portal_link:{_sess.token}", respect_optout=False)
@@ -2234,7 +2245,10 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             if not item.room_id:
                 continue
             room = db.query(Room).filter(Room.room_id == item.room_id).first()
-            if not room:
+            # v5n: a key-lock room has a metal key and nothing to encode — skip it, exactly as
+            # check-in (_checkin_response) and /extend-hours already do. Without this a mixed
+            # card/key multi-room stay showed the desk a card task it could never satisfy.
+            if not room or room.lock_type == "key":
                 continue
             try:
                 card_payloads.append(_encode_payload(db, item, room, valid_from, valid_to))
@@ -3094,6 +3108,7 @@ def list_booking_guests(booking_id: int, db: Session = Depends(get_db),
     return {"booking_id": booking_id, "guests": [{
         "id": g.id, "name": g.name, "id_type": g.id_type,
         "id_number_masked": g.id_number_masked, "is_primary": g.is_primary,
+        "room_id": g.room_id, "phone": g.phone,          # v5n: which room, and its own contact
         "has_scan": bool(g.id_scan_ref),
         "has_scan_back": bool(g.id_scan_back_ref),
         # Archived = pulled into the offline weekly archive and deleted from object storage.
@@ -3297,13 +3312,20 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
     # falling back to the lead Guest when no roster exists.
     guest_rows = (db.query(BookingGuest).filter(BookingGuest.booking_id == booking_id)
                   .order_by(BookingGuest.is_primary.desc(), BookingGuest.id).all())
+    # v5n: each occupant's ROOM, so a group booking's slip records who slept where (the whole point
+    # of the roster when three rooms are on one booking, and the first thing a police query asks).
+    _room_nums = {r.room_id: r.room_number for r in
+                  db.query(Room).filter(Room.room_id.in_([i.room_id for i in booking.booking_items
+                                                          if i.room_id] or [0])).all()}
     guests = [{"name": g.name, "id_type": g.id_type, "id_number_masked": g.id_number_masked,
                "has_scan": bool(g.id_scan_ref), "has_scan_back": bool(g.id_scan_back_ref),
-               "is_primary": g.is_primary} for g in guest_rows]
+               "is_primary": g.is_primary,
+               "room_number": _room_nums.get(g.room_id)} for g in guest_rows]
     if not guests and booking.guest:
         guests = [{"name": booking.guest.name, "id_type": booking.guest.id_type,
                    "id_number_masked": booking.guest.id_number_masked, "has_scan": False,
-                   "has_scan_back": False, "is_primary": True}]
+                   "has_scan_back": False, "is_primary": True,
+                   "room_number": rooms[0] if rooms else None}]
 
     slip_data = {
         "booking_id": booking.booking_id,

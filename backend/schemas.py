@@ -1469,6 +1469,10 @@ class DeskRoomServiceOrder(BaseModel):
     """Staff take a room-service order on the tablet / desk (TBC-4). Prices are NEVER taken
     from the client — the server re-reads the menu, exactly as it does for a guest order."""
     booking_id: int = Field(..., gt=0)
+    # v5n: WHICH room ordered. A booking can be several rooms, and the room decides which KOT the
+    # kitchen prints and which room the charge is attributed to. Omitted = the stay's first room
+    # (what every order did before this field existed).
+    room_id: Optional[int] = Field(None, gt=0)
     items: List[RoomServiceLine] = Field(..., min_length=1)
     note: Optional[str] = Field(None, max_length=300)
     client_ref: Optional[str] = Field(None, max_length=80)
@@ -1556,6 +1560,9 @@ class MenuAvailabilityUpdate(BaseModel):
 class PortalSessionRequest(BaseModel):
     """Desk mints (or re-fetches) the in-room QR session for a checked-in booking."""
     booking_id: int = Field(..., gt=0)
+    # v5n: which room's portal. A booking can be several rooms and each one needs its own QR card,
+    # wifi voucher and request attribution. Omitted = the stay's first room (pre-v5n behaviour).
+    room_id: Optional[int] = Field(None, gt=0)
 
 
 class PortalConfigUpdate(BaseModel):
