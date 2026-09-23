@@ -146,6 +146,7 @@ def get_frontdesk_config(db: Session = Depends(get_db)):
 def set_frontdesk_config(id_scope: str | None = Body(None),
                          scans_required: bool | None = Body(None),
                          no_show_from_date: str | None = Body(None),
+                         blocked_guest_phones: str | None = Body(None),
                          db: Session = Depends(get_db),
                          user=Depends(require_admin)):
     from datetime import datetime as _dt
@@ -167,8 +168,45 @@ def set_frontdesk_config(id_scope: str | None = Body(None),
             except ValueError:
                 raise HTTPException(status_code=422, detail="no_show_from_date must be YYYY-MM-DD")
         app_settings.set_setting(db, app_settings.NO_SHOW_FROM_DATE_KEY, raw, user=user)
+    if blocked_guest_phones is not None:
+        # Stored as the admin typed it (free text, comma/semicolon separated); normalised on read by
+        # utils.phone.blocked_numbers, so "+91 124 462 8747" and "1244628747" block the same line.
+        from utils.phone import BLOCKED_PHONES_KEY
+        app_settings.set_setting(db, BLOCKED_PHONES_KEY, (blocked_guest_phones or "").strip(), user=user)
     db.commit()
     after = app_settings.get_frontdesk_config(db)
     write_audit(db, user, "settings.frontdesk_config_update", "app_settings", None,
+                before=before, after=after, client="web", commit=True)
+    return after
+
+
+# --- OTA intake policy (v5r) -----------------------------------------------------------------
+# Whether a voucher becomes a booking on its own, and whether that includes multi-room vouchers.
+# Reception can read it (the drafts screen explains why a draft is held); only an admin may change it.
+
+@router.get("/ota-config", dependencies=[Depends(require_reception_or_admin)])
+def get_ota_config(db: Session = Depends(get_db)):
+    return app_settings.get_ota_config(db)
+
+
+@router.put("/ota-config")
+def set_ota_config(auto_confirm_mode: str | None = Body(None),
+                   max_variance_percent: float | None = Body(None),
+                   db: Session = Depends(get_db),
+                   user=Depends(require_admin)):
+    before = app_settings.get_ota_config(db)
+    if auto_confirm_mode is not None:
+        mode = (auto_confirm_mode or "").strip().lower()
+        if mode not in app_settings.OTA_AUTO_CONFIRM_MODES:
+            raise HTTPException(status_code=422,
+                                detail="auto_confirm_mode must be one of: "
+                                       + ", ".join(app_settings.OTA_AUTO_CONFIRM_MODES))
+        app_settings.set_setting(db, app_settings.OTA_AUTO_CONFIRM_MODE_KEY, mode, user=user)
+    if max_variance_percent is not None:
+        pct = max(0.0, min(100.0, float(max_variance_percent)))
+        app_settings.set_setting(db, app_settings.OTA_AUTO_CONFIRM_VARIANCE_KEY, f"{pct:g}", user=user)
+    db.commit()
+    after = app_settings.get_ota_config(db)
+    write_audit(db, user, "settings.ota_config_update", "app_settings", None,
                 before=before, after=after, client="web", commit=True)
     return after

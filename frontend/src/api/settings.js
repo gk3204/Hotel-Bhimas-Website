@@ -70,3 +70,14 @@ export const updateFrontdeskConfig = (patch) =>
     headers: authHeaders(),
     body: JSON.stringify(patch),
   }).then(handle);
+
+// v5r — OTA intake policy: auto-confirm vouchers or hold them for review
+export const getOtaConfig = () =>
+  fetch(`${BASE_URL}/settings/ota-config`, { headers: authHeaders() }).then(handle);
+
+export const updateOtaConfig = (patch) =>
+  fetch(`${BASE_URL}/settings/ota-config`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify(patch),
+  }).then(handle);

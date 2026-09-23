@@ -21,7 +21,7 @@ import { getWhatsappConfig, updateWhatsappConfig } from "../../api/whatsapp";
 import { getReviewConfig, updateReviewConfig } from "../../api/reviews";
 import { getConfig as getFraudConfig, updateFraudConfig } from "../../api/fraud";
 import { getOverstayConfig, updateOverstayConfig, getReportsConfig, updateReportsConfig } from "../../api/reports";
-import { getFrontdeskConfig, updateFrontdeskConfig } from "../../api/settings";
+import { getFrontdeskConfig, updateFrontdeskConfig, getOtaConfig, updateOtaConfig } from "../../api/settings";
 
 const PRIORITIES = ["urgent", "high", "normal", "low"];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -139,9 +139,38 @@ export const SETTINGS_GROUPS = [
       { key: "scans_required", type: "toggle", label: "Require front + back ID scans",
         hint: "Applies only to the guests who must show an ID. Off = the ID number alone is accepted.",
         wide: true },
+      { key: "blocked_guest_phones", type: "textarea", label: "Numbers that may never be a guest contact", wide: true,
+        hint: "The OTAs' own call-centre and relay numbers. Comma or semicolon separated; paste them as " +
+              "they appear on the voucher (+91 124 462 8747 and 1244628747 are treated as the same). " +
+              "Check-in refuses these, so the desk has to ask the guest for their own number." },
       { key: "no_show_from_date", type: "text", label: "Mark no-shows from (YYYY-MM-DD)",
         hint: "The nightly sweep ignores stays whose check-out date is earlier than this — so bookings " +
               "from before go-live are never touched. Blank = every stay is considered." },
+    ],
+  },
+  {
+    key: "ota",
+    label: "OTA intake",
+    title: "OTA vouchers — confirm automatically or by hand",
+    description:
+      "MakeMyTrip / Goibibo / Yatra vouchers arrive by email and become drafts. This decides which of " +
+      "them turn into bookings on their own. Anything held waits on Admin → OTA → Email drafts with the " +
+      "reason shown on the row.",
+    load: getOtaConfig,
+    save: updateOtaConfig,
+    fields: [
+      { key: "auto_confirm_mode", type: "select", label: "Create bookings automatically", wide: true,
+        hint: "Multi-room vouchers are where the email parsers are least reliable — the room count and " +
+              "the commission both come from free text — so by default those wait for you.",
+        options: [
+          { value: "single_only", label: "Single-room only (recommended)" },
+          { value: "all", label: "All vouchers, including multi-room" },
+          { value: "off", label: "None — I confirm every voucher by hand" },
+        ] },
+      { key: "max_variance_percent", type: "number", min: 0, max: 100, step: "1",
+        label: "Hold when the voucher total differs by more than (%)",
+        hint: "Compares the voucher's own total against what the PMS prices those rooms at. A gap means " +
+              "the room count, room type or rate was misread. 0 turns the check off." },
     ],
   },
   {

@@ -499,7 +499,9 @@ const DraftsTab = ({ showToast }) => {
     setConfirmFor(d);
     setCform({
       room_type_id: pickRoomType(d.room_type_hint),
-      quantity: 1,
+      // v5r: default to the room count the voucher itself stated. It used to default to 1 whatever the
+      // email said, so a 2-room reservation was confirmed as one room and the other stayed on sale.
+      quantity: d.rooms || 1,
       guest_name: d.guest_name || "",
       phone: d.phone || "",
       email: d.email || "",
@@ -599,6 +601,7 @@ const DraftsTab = ({ showToast }) => {
                 <th className="px-5 py-3 font-semibold">OTA ID</th>
                 <th className="px-5 py-3 font-semibold">Guest</th>
                 <th className="px-5 py-3 font-semibold">Stay</th>
+                <th className="px-5 py-3 font-semibold text-center">Rooms</th>
                 <th className="px-5 py-3 font-semibold text-right">Amount</th>
                 <th className="px-5 py-3 font-semibold text-center">Status</th>
                 <th className="px-5 py-3 font-semibold text-right">Actions</th>
@@ -612,10 +615,22 @@ const DraftsTab = ({ showToast }) => {
                   <td className="px-5 py-3 text-slate-400">{d.ota_booking_id || "—"}</td>
                   <td className="px-5 py-3 text-slate-300">{d.guest_name || "—"}</td>
                   <td className="px-5 py-3 text-slate-400 whitespace-nowrap">{d.check_in || "?"} → {d.check_out || "?"}</td>
+                  {/* v5r: the room count read off the voucher — a multi-room booking must not be
+                      confirmed as one room, and by default those wait here for a human. */}
+                  <td className="px-5 py-3 text-center">
+                    {d.rooms > 1
+                      ? <span className="px-2 py-0.5 rounded-full text-xs font-bold bg-amber-500/20 text-amber-300 border border-amber-500/40">{d.rooms} rooms</span>
+                      : <span className="text-slate-500">{d.rooms || "—"}</span>}
+                  </td>
                   <td className="px-5 py-3 text-right text-slate-300">{fmt(d.amount)}</td>
                   <td className="px-5 py-3 text-center">
                     <span className={`px-3 py-1 rounded-full text-xs font-bold border ${statusChip(d.status)}`}>{d.status}</span>
                     {d.linked_booking_id && <div className="text-xs text-slate-500 mt-1">#{d.linked_booking_id}</div>}
+                    {/* v5r: why this one is still sitting here. Auto-confirm failures used to be
+                        invisible outside the server log. */}
+                    {d.status === "pending" && d.last_error && (
+                      <div className="text-[11px] text-amber-300/90 mt-1 max-w-xs whitespace-normal text-left">{d.last_error}</div>
+                    )}
                   </td>
                   <td className="px-5 py-3 text-right whitespace-nowrap">
                     {d.status === "pending" && d.kind === "confirmation" && (

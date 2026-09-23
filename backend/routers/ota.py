@@ -30,13 +30,9 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/ota", tags=["OTA"])
 
 
-def _ota_placeholder_phone(ota_id: str | None) -> str:
-    """Go-MMT and most OTAs MASK the guest phone — it is not in the voucher at all — so confirming
-    a draft can't require one. Stand in with the last 10 digits of the OTA booking id (unique per
-    booking, so guest records don't merge into one), zero-padded. The desk updates it with the
-    guest's real number at check-in."""
-    digits = re.sub(r"\D", "", ota_id or "")
-    return (digits[-10:] if len(digits) >= 10 else digits.rjust(10, "0")) or "0000000000"
+# v5r: the placeholder rule lives in utils/phone so that services/ota_service can use the SAME one.
+# It could not before — it called this private copy and raised NameError on every masked-phone voucher.
+from utils.phone import ota_placeholder as _ota_placeholder_phone   # noqa: E402  (kept as a local name)
 
 
 def get_db():

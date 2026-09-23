@@ -25,6 +25,12 @@ from email.header import decode_header, make_header
 from sqlalchemy import text
 
 from models import Booking, OtaChannel, OtaSettlement, OtaDraftBooking, RoomType
+# v5r: the placeholder helper. This import is the whole bug fix — the auto-confirm path below called
+# `_ota_placeholder_phone` without ever defining or importing it, so every voucher whose phone the OTA
+# masks (which is all of them on Go-MMT/Yatra/Goibibo) raised NameError inside a broad `except` and was
+# logged as a harmless "skipped draft". Production ran for weeks with 143 pending drafts and not one OTA
+# booking created.
+from utils.phone import ota_placeholder as _ota_placeholder_phone
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +217,16 @@ def apply_ota_fields(db, booking, source, ota_booking_id=None, commission_percen
     # email carried no commission (e.g. a desk-typed OTA booking).
     if commission_amount is not None:
         pct = round(float(commission_amount) / gross * 100, 2) if gross else 0.0
+        # v5r: a commission of more than the whole room rate means the voucher and the booking disagree
+        # about how many rooms this is — the figure is a 2-room commission sitting on a 1-room gross.
+        # Cap the derived % at 100 so no report shows "183% commission", and say so loudly: the booking
+        # is created (the guest is at the desk) but the money needs a human.
+        if pct > 100:
+            logger.warning(
+                "OTA %s booking %s: commission Rs %s exceeds gross Rs %s (%.0f%%) — the voucher is "
+                "probably for more rooms than were booked. Check the room count.",
+                source, ota_booking_id, commission_amount, gross, pct)
+            pct = 100.0
     else:
         pct = commission_percent_override
         if pct is None:
@@ -223,6 +239,12 @@ def apply_ota_fields(db, booking, source, ota_booking_id=None, commission_percen
     # reconciliation matches the settlement), else gross - commission as before.
     if net_payout is not None:
         booking.ota_net_payout = round(float(net_payout), 2)
+        if gross and float(net_payout) > gross:
+            # Same cause as the commission cap above: a multi-room payout against a one-room booking.
+            logger.warning(
+                "OTA %s booking %s: net payout Rs %s exceeds gross Rs %s — voucher vs booked rooms "
+                "mismatch; the payout reconciliation will flag this.",
+                source, ota_booking_id, net_payout, gross)
     else:
         comm = float(commission_amount) if commission_amount is not None else gross * pct / 100
         booking.ota_net_payout = round(gross - comm, 2)
@@ -601,6 +623,13 @@ def _first(patterns, text, flags=re.IGNORECASE):
     return None
 
 
+def _keep_parsed_phone(phone) -> bool:
+    """Whether a phone scraped from a voucher body is worth storing (v5r). A helpline or relay number
+    is not a guest contact; `is_valid_mobile` also rejects the zero-padded and repeated-digit shapes."""
+    from utils.phone import is_valid_mobile
+    return bool(phone) and is_valid_mobile(phone)
+
+
 def _parse_common(text: str) -> dict:
     """Label-driven field extraction shared by all OTA parsers. OTAs vary in wording, so each
     field tries a few common labels. Missing fields stay None (draft is still created for manual
@@ -638,12 +667,17 @@ def _parse_common(text: str) -> dict:
     return {
         "ota_booking_id": booking_id,
         "guest_name": (guest.strip() if guest else None),
-        "phone": phone,
+        # v5r: an OTA voucher's "phone" is very often the CHANNEL's own call centre, printed in the mail
+        # body — keeping it made every OTA guest share one contact number, which merges their guest
+        # records and sends every WhatsApp to MakeMyTrip. Keep it only when it looks like a real mobile;
+        # otherwise leave it for the placeholder path and let the desk ask the guest at check-in.
+        "phone": (phone if _keep_parsed_phone(phone) else None),
         "email": email_addr,
         "check_in": _parse_date_loose(checkin) if checkin else None,
         "check_out": _parse_date_loose(checkout) if checkout else None,
         "room_type_hint": (room.strip() if room else None),
         "amount": amount_val,
+        "rooms": _room_count(text),
     }
 
 
@@ -678,6 +712,31 @@ def _commission_net(text: str) -> dict:
     if net is not None:
         out["net_payout"] = net
     return out
+
+
+def _room_count(text: str) -> int | None:
+    """How many ROOMS the voucher is for (v5r).
+
+    The count was always in the email and always thrown away: Go-MMT prints "TOTAL NO OF ROOMS 2" and
+    a "2 x Double Deluxe Ac" line, and the parser used the former only as a stop token for the guest
+    name and captured only the room NAME from the latter. Everything downstream then assumed one room,
+    so the rest of a multi-room reservation stayed on sale in the PMS.
+
+    Deliberately conservative: an implausible count (0, or more than 10 rooms on one voucher) is treated
+    as "not parsed" so the desk decides rather than the PMS booking 40 rooms off a bad regex.
+    """
+    raw = _first([
+        r"total\s*(?:no\.?|number)\s*of\s*rooms?[\s:*|]*(\d{1,2})",
+        r"(?:no\.?|number)\s*of\s*rooms?[\s:*|]*(\d{1,2})",
+        r"rooms?\s*(?:count|booked)[\s:*|]*(\d{1,2})",
+        r"(\d{1,2})\s*rooms?\s*(?:booked|reserved)\b",
+        # "2 x Double Deluxe Ac" — the same line the room-type hint is read from.
+        r"(\d{1,2})[ \t]*[xX][ \t]+[A-Za-z]",
+    ], text)
+    if not raw or not raw.isdigit():
+        return None
+    n = int(raw)
+    return n if 1 <= n <= 10 else None
 
 
 def _occupancy(text: str) -> dict:
@@ -898,6 +957,10 @@ def _upsert_draft(db, fields: dict) -> tuple[OtaDraftBooking, bool]:
     d.check_in = fields.get("check_in")
     d.check_out = fields.get("check_out")
     d.room_type_hint = fields.get("room_type_hint")
+    # v5r: the voucher's room count, when the parser found one. Kept separate from `adults` because a
+    # 2-room voucher for a family of 4 is not the same thing as 4 adults in one room.
+    if fields.get("rooms"):
+        d.rooms = int(fields["rooms"])
     d.adults = int(fields.get("adults") or 1)
     d.children = int(fields.get("children") or 0)
     d.amount = fields.get("amount")
@@ -938,8 +1001,42 @@ def _pick_room_type_id(db, hint):
     return best.room_type_id
 
 
+def _quote_rooms_total(db, room_type_id, rooms: int, check_in, check_out, channel_code) -> float | None:
+    """What the PMS would charge for `rooms` of this type over the stay, GST-inclusive — the figure to
+    compare a voucher total against. Uses the same rate engine the booking itself will use, so the two
+    cannot disagree for any reason other than a bad parse."""
+    from utils.rate_engine import quote_stay
+    rt = db.query(RoomType).filter(RoomType.room_type_id == room_type_id).first()
+    if not rt or not check_in or not check_out:
+        return None
+    q = quote_stay(db, rt, check_in, check_out, channel=channel_code, quantity=max(1, int(rooms)))
+    base = float(q["base"])
+    gst = float(rt.gst_percent or 0)
+    return round(base * (1 + gst / 100), 2)
+
+
 def _auto_confirm_enabled() -> bool:
+    """The env master switch. The admin-editable policy (off / single_only / all) is read per draft in
+    `auto_confirm_draft` — this only exists so a deployment can turn the whole thing off."""
     return os.getenv("OTA_AUTO_CONFIRM_ENABLED", "true").strip().lower() not in ("false", "0", "no")
+
+
+def _hold_draft(db, d, reason: str):
+    """Leave a draft PENDING and say why, on the row itself.
+
+    Auto-confirm failures used to go only to the log, and one of them — a NameError on every
+    masked-phone voucher — sat there for weeks while the desk had no idea why 143 drafts were pending.
+    The reason now travels to the drafts screen.
+    """
+    try:
+        d.last_error = (reason or "")[:500]
+        db.flush()
+    except Exception:
+        logger.debug("could not record the hold reason on draft %s", getattr(d, "id", "?"))
+    logger.warning("OTA auto-confirm held draft %s (%s/%s): %s",
+                   getattr(d, "id", "?"), getattr(d, "channel_code", "?"),
+                   getattr(d, "ota_booking_id", "?"), reason)
+    return None
 
 
 def auto_confirm_draft(db, d, user=None):
@@ -954,8 +1051,20 @@ def auto_confirm_draft(db, d, user=None):
         return None
     if d.kind != "confirmation" or d.status != "pending" or d.linked_booking_id:
         return None
+
+    # v5r: the owner chooses whether vouchers become bookings on their own, and whether that includes
+    # multi-room ones (Settings -> OTA intake).
+    from utils import settings as _st
+    cfg = _st.get_ota_config(db)
+    rooms_wanted = int(d.rooms or 1)
+    if cfg["auto_confirm_mode"] == "off":
+        return _hold_draft(db, d, "Auto-confirm is switched off — confirm from the drafts screen.")
+    if rooms_wanted > 1 and cfg["auto_confirm_mode"] != "all":
+        return _hold_draft(db, d, f"Voucher is for {rooms_wanted} rooms — set to confirm multi-room "
+                                  f"bookings by hand. Check the rooms and the money, then confirm.")
+
     if not (d.guest_name and d.check_in and d.check_out):
-        return None
+        return _hold_draft(db, d, "The email did not give a guest name and both dates — complete them here.")
 
     # Already booked under this OTA id? Link + confirm, don't create a second one.
     if d.ota_booking_id:
@@ -975,7 +1084,28 @@ def auto_confirm_draft(db, d, user=None):
 
     room_type_id = _pick_room_type_id(db, d.room_type_hint)
     if not room_type_id:
-        return None
+        return _hold_draft(db, d, f"No PMS room type matches \"{d.room_type_hint or '(none given)'}\" — "
+                                  f"pick one here.")
+
+    # v5r: does the voucher's own total agree with what the PMS prices these rooms at? A mismatch means
+    # the parse is wrong somewhere (room count, room type or rate), and a booking whose money disagrees
+    # with the channel is worse than one the desk has to confirm by hand.
+    variance_note = None
+    if d.amount and cfg["max_variance_percent"] > 0:
+        try:
+            quoted = _quote_rooms_total(db, room_type_id, rooms_wanted, d.check_in, d.check_out,
+                                        d.channel_code)
+            voucher = float(d.amount)
+            if quoted and voucher > 0:
+                gap = abs(quoted - voucher) / voucher * 100
+                if gap > cfg["max_variance_percent"]:
+                    return _hold_draft(
+                        db, d,
+                        f"Voucher says Rs {voucher:,.0f} but {rooms_wanted} x this room type prices at "
+                        f"Rs {quoted:,.0f} ({gap:.0f}% out) — check the room count / type before confirming.")
+                variance_note = f"voucher Rs {voucher:,.0f} vs priced Rs {quoted:,.0f}"
+        except Exception as e:      # pricing is advisory here; never block the booking on it
+            logger.debug(f"OTA variance check skipped for draft {d.id}: {e}")
 
     # Persist the draft as PENDING before attempting the booking. create_desk_booking rolls the
     # session back on any failure, which would otherwise discard the just-upserted draft and rob the
@@ -987,7 +1117,7 @@ def auto_confirm_draft(db, d, user=None):
         from routers.reception import create_desk_booking
         commission_pct = float(d.commission_percent) if d.commission_percent is not None else None
         booking_req = DeskBookingCreate(
-            rooms=[BookingItemCreate(room_type_id=room_type_id, quantity=1)],
+            rooms=[BookingItemCreate(room_type_id=room_type_id, quantity=rooms_wanted)],
             guest_name=d.guest_name,
             phone=(d.phone or _ota_placeholder_phone(d.ota_booking_id)),
             email=(d.email or None),
@@ -1007,20 +1137,34 @@ def auto_confirm_draft(db, d, user=None):
         result = create_desk_booking(booking_req, db=db, user=None)
     except Exception as e:
         # No availability, pricing gap, mapping miss — leave it PENDING for the desk. Never abort the poll.
-        logger.info(f"OTA auto-confirm skipped draft {d.id} ({d.channel_code}/{d.ota_booking_id}): {e}")
         try:
             db.rollback()
         except Exception:
             pass
+        # Re-read the draft: the rollback above detached the one we were handed.
+        try:
+            d = db.query(OtaDraftBooking).filter(OtaDraftBooking.id == d.id).first() or d
+        except Exception:
+            pass
+        detail = str(e)
+        if "capacity" in detail.lower() or "no " in detail.lower()[:4]:
+            detail += "  (room already sold in the PMS?)"
+        _hold_draft(db, d, f"Could not create the booking: {detail}")
+        try:
+            db.commit()
+        except Exception:
+            db.rollback()
         return None
 
     d.status = "confirmed"
     d.linked_booking_id = result["booking_id"]
+    d.last_error = None
     try:
         from utils.audit import write_audit
         write_audit(db, None, "ota.auto_confirm", "ota_draft_booking", d.id,
                     after={"booking_id": result["booking_id"], "channel": d.channel_code,
-                           "ota_booking_id": d.ota_booking_id, "room_type_id": room_type_id},
+                           "ota_booking_id": d.ota_booking_id, "room_type_id": room_type_id,
+                           "rooms": rooms_wanted, "price_check": variance_note},
                     client="ota_poller")
     except Exception:
         logger.exception("OTA auto-confirm audit failed")
@@ -1267,6 +1411,10 @@ def serialize_draft(d: OtaDraftBooking, db=None) -> dict:
         "check_in": str(d.check_in) if d.check_in else None,
         "check_out": str(d.check_out) if d.check_out else None,
         "room_type_hint": d.room_type_hint,
+        # v5r: the parsed room count and why a draft is still pending — both shown on the drafts screen
+        # so a held voucher explains itself instead of looking like an unexplained backlog.
+        "rooms": int(d.rooms) if d.rooms else None,
+        "last_error": d.last_error,
         "adults": int(d.adults or 1),
         "children": int(d.children or 0),
         "amount": amount,

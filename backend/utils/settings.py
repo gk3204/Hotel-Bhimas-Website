@@ -106,6 +106,11 @@ DESK_PAY_VPA_ENABLED_KEY = "desk_pay_vpa_enabled"             # own-bank UPI VPA
 # A DB setting rather than env alone so the owner can switch back mid-shift without a redeploy.
 DESK_PAY_GATEWAY_KEY = "desk_pay_gateway"
 
+# OTA auto-confirm policy (v5r; seeded in migration 046). The owner asked for the choice between
+# confirming vouchers automatically and by hand, separately for single- and multi-room bookings.
+OTA_AUTO_CONFIRM_MODE_KEY = "ota_auto_confirm_mode"              # off | single_only | all
+OTA_AUTO_CONFIRM_VARIANCE_KEY = "ota_auto_confirm_max_variance_percent"
+
 # Front-desk policy (v5n; seeded in migration 045). How much KYC the desk must capture before a
 # check-in can complete, and the date from which an unarrived booking becomes an automatic no-show.
 CHECKIN_ID_SCOPE_KEY = "checkin_id_scope"              # lead | per_room | all_adults
@@ -258,6 +263,8 @@ _DEFAULTS = {
     WIFI_VOUCHER_MODE_KEY: "auto",
     CHECKIN_ID_SCOPE_KEY: "per_room",
     CHECKIN_SCANS_REQUIRED_KEY: "true",
+    OTA_AUTO_CONFIRM_MODE_KEY: "single_only",
+    OTA_AUTO_CONFIRM_VARIANCE_KEY: "5",
 }
 
 
@@ -309,6 +316,30 @@ def get_cash_config(db) -> dict:
 
 
 ID_SCOPES = ("lead", "per_room", "all_adults")
+OTA_AUTO_CONFIRM_MODES = ("off", "single_only", "all")
+
+
+def get_ota_config(db) -> dict:
+    """v5r OTA intake policy.
+
+    `auto_confirm_mode`:
+      off          — every voucher waits on the drafts screen;
+      single_only  — a one-room voucher becomes a booking by itself (the default): multi-room vouchers
+                     wait, because the room count and the commission/payout figures on those are exactly
+                     where the email parsers are least trustworthy;
+      all          — multi-room vouchers are created automatically too, using the parsed room count.
+
+    `max_variance_percent` — when the voucher states a total and the PMS prices the same rooms more than
+    this far from it, the draft is held for the desk instead of creating a booking whose money disagrees
+    with the channel. 0 disables the check.
+    """
+    mode = (get_setting(db, OTA_AUTO_CONFIRM_MODE_KEY, "single_only") or "single_only").strip().lower()
+    if mode not in OTA_AUTO_CONFIRM_MODES:
+        mode = "single_only"
+    return {
+        "auto_confirm_mode": mode,
+        "max_variance_percent": _as_float(get_setting(db, OTA_AUTO_CONFIRM_VARIANCE_KEY, "5"), 5.0),
+    }
 
 
 def get_frontdesk_config(db) -> dict:
@@ -338,10 +369,13 @@ def get_frontdesk_config(db) -> dict:
             cutoff = datetime.strptime(raw_date[:10], "%Y-%m-%d").date()
         except ValueError:
             logger.warning(f"no_show_from_date is not a date ({raw_date!r}); ignoring the cutoff")
+    from utils.phone import BLOCKED_PHONES_KEY
     return {
         "id_scope": scope,
         "scans_required": _as_bool(get_setting(db, CHECKIN_SCANS_REQUIRED_KEY, "true")),
         "no_show_from_date": cutoff.isoformat() if cutoff else None,
+        # v5r: numbers that may never be stored as a guest contact (the OTAs' own lines).
+        "blocked_guest_phones": (get_setting(db, BLOCKED_PHONES_KEY, "") or "").strip(),
     }
 
 

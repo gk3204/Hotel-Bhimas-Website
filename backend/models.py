@@ -1028,6 +1028,12 @@ class OtaDraftBooking(Base):
     net_payout = Column(Numeric(10, 2), nullable=True)         # ACTUAL "Payable to Property" read from the voucher
     message_id = Column(String(200), nullable=True, index=True)  # email Message-ID, for IMAP-level dedupe
     raw_source = Column(String, nullable=True)             # raw email text snippet (audit / manual fallback)
+    # v5r: how many ROOMS the voucher is for. Without this every OTA booking was created as one room
+    # (quantity was hard-coded), so the rest of a 2-room reservation stayed on sale in the PMS.
+    rooms = Column(Integer, nullable=True)
+    # v5r: why this draft is still pending. Auto-confirm failures used to go only to the log — and one
+    # of them (a NameError) silently stopped EVERY masked-phone voucher from ever becoming a booking.
+    last_error = Column(String, nullable=True)
     linked_booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=True)  # set on confirm
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
 

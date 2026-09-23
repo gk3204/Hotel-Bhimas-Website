@@ -60,15 +60,14 @@ def provider_status() -> dict:
 
 
 def normalize_number(phone) -> str | None:
-    """E.164 digits only (Meta wants no '+'). Bare 10-digit India numbers get a 91 prefix."""
-    if not phone:
-        return None
-    digits = "".join(ch for ch in str(phone) if ch.isdigit())
-    if not digits:
-        return None
-    if len(digits) == 10:  # local India mobile
-        digits = "91" + digits
-    return digits
+    """E.164 digits only (Meta wants no '+'). Bare 10-digit India numbers get a 91 prefix.
+
+    v5r: the rule moved to utils/phone.normalize so that the check-in rules (which compare numbers
+    room by room) and the messaging layer cannot disagree about whether two spellings are one number.
+    Kept as a name here because a dozen call sites import it.
+    """
+    from utils.phone import normalize
+    return normalize(phone)
 
 
 # ---------------------------------------------------------------------------
