@@ -21,6 +21,7 @@ import { getWhatsappConfig, updateWhatsappConfig } from "../../api/whatsapp";
 import { getReviewConfig, updateReviewConfig } from "../../api/reviews";
 import { getConfig as getFraudConfig, updateFraudConfig } from "../../api/fraud";
 import { getOverstayConfig, updateOverstayConfig, getReportsConfig, updateReportsConfig } from "../../api/reports";
+import { getFrontdeskConfig, updateFrontdeskConfig } from "../../api/settings";
 
 const PRIORITIES = ["urgent", "high", "normal", "low"];
 const cap = (s) => s.charAt(0).toUpperCase() + s.slice(1);
@@ -115,6 +116,32 @@ export const SETTINGS_GROUPS = [
       { key: "night_audit_hour", type: "number", min: 0, max: 23, label: "Night-audit hour (IST)",
         hint: "The hour the day-close + accounting email run. Takes effect after the next backend restart." },
       { key: "night_audit_enabled", type: "toggle", label: "Run the nightly day-close automatically" },
+    ],
+  },
+  {
+    key: "frontdesk",
+    label: "Front desk",
+    title: "Check-in ID rule & no-shows",
+    description:
+      "How much identification the desk must capture before a check-in can complete, and the date from " +
+      "which an unarrived booking becomes a no-show on its own.",
+    load: getFrontdeskConfig,
+    save: updateFrontdeskConfig,
+    fields: [
+      { key: "id_scope", type: "select", label: "Whose ID proof is mandatory", wide: true,
+        hint: "Everyone beyond this is optional — name only, no ID, no scan. 'One per room' does not " +
+              "rely on the booked adult count, which the website collects only once per booking.",
+        options: [
+          { value: "per_room", label: "One guest per room (recommended)" },
+          { value: "lead", label: "Lead guest only" },
+          { value: "all_adults", label: "Every adult on the booking" },
+        ] },
+      { key: "scans_required", type: "toggle", label: "Require front + back ID scans",
+        hint: "Applies only to the guests who must show an ID. Off = the ID number alone is accepted.",
+        wide: true },
+      { key: "no_show_from_date", type: "text", label: "Mark no-shows from (YYYY-MM-DD)",
+        hint: "The nightly sweep ignores stays whose check-out date is earlier than this — so bookings " +
+              "from before go-live are never touched. Blank = every stay is considered." },
     ],
   },
   {

@@ -218,6 +218,10 @@ class BookingGuest(Base):
     id_scan_mime = Column(String(40), nullable=True)       # content type, for the decrypt-on-read stream
     id_scan_back_ref = Column(String(120), nullable=True)  # reverse of the ID (same encrypted store)
     id_scan_back_mime = Column(String(40), nullable=True)
+    # v5n: which room this occupant is in (a booking can be several rooms), and that room's own
+    # contact number — the in-room portal link goes to this number rather than to the payer's.
+    room_id = Column(Integer, ForeignKey("rooms.room_id"), nullable=True, index=True)
+    phone = Column(String(20), nullable=True)
     # Set once the scan has been pulled into the weekly offline archive and deleted from object
     # storage (migration 040). NULL = still retrievable online. The *_ref above stays populated —
     # it is what locates the file inside the archive zip.
@@ -420,6 +424,9 @@ class FolioCharge(Base):
     booking_item_id = Column(Integer, ForeignKey("booking_items.booking_item_id"),
                              nullable=True, index=True)
     posting_reason = Column(String(20), nullable=True)   # checkin | extend | overstay
+    # v5n: which room an extra belongs to (room service, laundry). Room NIGHTS are attributable
+    # through booking_item_id; everything else used to be booking-level only.
+    room_id = Column(Integer, ForeignKey("rooms.room_id"), nullable=True, index=True)
     # --- Corporate split billing (prompt 18 slice 7, additive) ---
     # THIS is the split folio: one folio, each line routed to whoever pays it.
     bill_to = Column(String(10), nullable=False, default="guest", index=True)  # guest | company
@@ -469,6 +476,8 @@ class StayEvent(Base):
     charge_amount = Column(Numeric(10, 2), nullable=False, default=0)
     charge_basis = Column(String(16), nullable=False, default="free")  # free|fixed|percent|full_night|exempt_comp|override|voided
     rule_json = Column(String, nullable=True)
+    # v5n: fees are charged per ROOM, so an event names the room it applies to.
+    room_id = Column(Integer, ForeignKey("rooms.room_id"), nullable=True)
     approval = Column(String(12), nullable=False, default="none")     # none | admin | owner_otp
     approved_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     folio_charge_id = Column(Integer, ForeignKey("folio_charges.id"), nullable=True)

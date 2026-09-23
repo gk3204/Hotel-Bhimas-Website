@@ -59,3 +59,14 @@ export const setArrivalRules = (rules) =>
     headers: authHeaders(),
     body: JSON.stringify({ rules }),
   }).then(handle);
+
+// v5n — front-desk policy: how much KYC the desk must capture, and the no-show go-live cutoff
+export const getFrontdeskConfig = () =>
+  fetch(`${BASE_URL}/settings/frontdesk-config`, { headers: authHeaders() }).then(handle);
+
+export const updateFrontdeskConfig = (patch) =>
+  fetch(`${BASE_URL}/settings/frontdesk-config`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify(patch),
+  }).then(handle);

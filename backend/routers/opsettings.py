@@ -130,3 +130,45 @@ def set_arrival_rules(rules: dict = Body(..., embed=True),
     write_audit(db, user, "settings.arrival_rules_update", "app_settings", None,
                 before=before, after=clean, client="web", commit=True)
     return {"rules": clean}
+
+
+# --- Front-desk policy (v5n) ----------------------------------------------------------------
+# How much KYC the desk must capture, and the go-live cutoff for automatic no-shows. GET is
+# reception-or-admin because the DESK enforces the same rule in its wizard (it also receives this
+# block on every board poll); PUT is admin-only and audited.
+
+@router.get("/frontdesk-config", dependencies=[Depends(require_reception_or_admin)])
+def get_frontdesk_config(db: Session = Depends(get_db)):
+    return app_settings.get_frontdesk_config(db)
+
+
+@router.put("/frontdesk-config")
+def set_frontdesk_config(id_scope: str | None = Body(None),
+                         scans_required: bool | None = Body(None),
+                         no_show_from_date: str | None = Body(None),
+                         db: Session = Depends(get_db),
+                         user=Depends(require_admin)):
+    from datetime import datetime as _dt
+    before = app_settings.get_frontdesk_config(db)
+    if id_scope is not None:
+        scope = (id_scope or "").strip().lower()
+        if scope not in app_settings.ID_SCOPES:
+            raise HTTPException(status_code=422,
+                                detail="id_scope must be one of: " + ", ".join(app_settings.ID_SCOPES))
+        app_settings.set_setting(db, app_settings.CHECKIN_ID_SCOPE_KEY, scope, user=user)
+    if scans_required is not None:
+        app_settings.set_setting(db, app_settings.CHECKIN_SCANS_REQUIRED_KEY,
+                                 "true" if scans_required else "false", user=user)
+    if no_show_from_date is not None:
+        raw = (no_show_from_date or "").strip()
+        if raw:
+            try:
+                raw = _dt.strptime(raw[:10], "%Y-%m-%d").date().isoformat()
+            except ValueError:
+                raise HTTPException(status_code=422, detail="no_show_from_date must be YYYY-MM-DD")
+        app_settings.set_setting(db, app_settings.NO_SHOW_FROM_DATE_KEY, raw, user=user)
+    db.commit()
+    after = app_settings.get_frontdesk_config(db)
+    write_audit(db, user, "settings.frontdesk_config_update", "app_settings", None,
+                before=before, after=after, client="web", commit=True)
+    return after

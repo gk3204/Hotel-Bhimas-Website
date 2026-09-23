@@ -106,6 +106,12 @@ DESK_PAY_VPA_ENABLED_KEY = "desk_pay_vpa_enabled"             # own-bank UPI VPA
 # A DB setting rather than env alone so the owner can switch back mid-shift without a redeploy.
 DESK_PAY_GATEWAY_KEY = "desk_pay_gateway"
 
+# Front-desk policy (v5n; seeded in migration 045). How much KYC the desk must capture before a
+# check-in can complete, and the date from which an unarrived booking becomes an automatic no-show.
+CHECKIN_ID_SCOPE_KEY = "checkin_id_scope"              # lead | per_room | all_adults
+CHECKIN_SCANS_REQUIRED_KEY = "checkin_scans_required"  # front+back scans for whoever must show an ID
+NO_SHOW_FROM_DATE_KEY = "no_show_from_date"            # ISO date; the sweep ignores stays that ended earlier
+
 # Google review auto-reply config keys + defaults (prompt 20; seeded in migration 018).
 # GBP OAuth + Claude SECRETS live in ENV (GBP_*, ANTHROPIC_API_KEY), not here — these are the
 # admin-editable business toggles: which ratings auto-post, the delay window, LLM on/off, cadence.
@@ -250,6 +256,8 @@ _DEFAULTS = {
     PORTAL_CONTACTLESS_CHECKOUT_ENABLED_KEY: "true",
     WIFI_SSID_KEY: "HotelBhimas-Guest",
     WIFI_VOUCHER_MODE_KEY: "auto",
+    CHECKIN_ID_SCOPE_KEY: "per_room",
+    CHECKIN_SCANS_REQUIRED_KEY: "true",
 }
 
 
@@ -298,6 +306,49 @@ def get_cash_config(db) -> dict:
         "variance_threshold": round(threshold, 2),
         "variance_alert_enabled": _as_bool(get_setting(db, CASH_VARIANCE_ALERT_KEY, "true")),
     }
+
+
+ID_SCOPES = ("lead", "per_room", "all_adults")
+
+
+def get_frontdesk_config(db) -> dict:
+    """v5n front-desk policy.
+
+    `id_scope` decides how many guests must be identified before a check-in may complete:
+      lead       — the guest the booking is in, and nobody else;
+      per_room   — one responsible guest for EACH room being assigned (the property's default);
+      all_adults — one per adult the booking was made for (the pre-v5n behaviour).
+    Whoever must show an ID must also have both sides scanned while `scans_required` is on.
+    Everyone beyond the required count is optional: name only, no ID, no scan.
+
+    `per_room` deliberately ignores bookings.adults — the website asks for a single occupancy
+    number per booking, so a three-room reservation routinely arrives with adults = 1.
+
+    `no_show_from_date` is the go-live cutoff for the AUTOMATIC sweep (utils/night_audit); a desk
+    or admin can still mark any stay a no-show by hand. None = no cutoff (sweep everything), which
+    is only the case on a database that predates migration 045.
+    """
+    scope = (get_setting(db, CHECKIN_ID_SCOPE_KEY, "per_room") or "per_room").strip().lower()
+    if scope not in ID_SCOPES:
+        scope = "per_room"
+    raw_date = (get_setting(db, NO_SHOW_FROM_DATE_KEY) or "").strip()
+    cutoff = None
+    if raw_date:
+        try:
+            cutoff = datetime.strptime(raw_date[:10], "%Y-%m-%d").date()
+        except ValueError:
+            logger.warning(f"no_show_from_date is not a date ({raw_date!r}); ignoring the cutoff")
+    return {
+        "id_scope": scope,
+        "scans_required": _as_bool(get_setting(db, CHECKIN_SCANS_REQUIRED_KEY, "true")),
+        "no_show_from_date": cutoff.isoformat() if cutoff else None,
+    }
+
+
+def no_show_cutoff(db):
+    """The go-live cutoff as a `date`, or None when the sweep should consider every stay."""
+    raw = get_frontdesk_config(db)["no_show_from_date"]
+    return datetime.strptime(raw, "%Y-%m-%d").date() if raw else None
 
 
 def get_housekeeping_config(db) -> dict:

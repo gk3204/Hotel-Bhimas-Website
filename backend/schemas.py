@@ -322,12 +322,17 @@ class GuestKycEntry(BaseModel):
     id_scan_back_mime: Optional[str] = Field(None, max_length=40)
     is_primary: bool = False
     is_minor: bool = False   # a child — recorded by name, ID optional
+    # v5n: which room this occupant is in, and that room's own contact number. The `per_room` ID
+    # rule needs the room to confirm one identified guest per assigned room; the phone lets the desk
+    # send that room its own in-room portal link instead of everything going to the payer.
+    room_id: Optional[int] = Field(None, gt=0)
+    phone: Optional[str] = Field(None, min_length=7, max_length=20)
 
-    @model_validator(mode="after")
-    def _adult_needs_id(self):
-        if not self.is_minor and (not self.id_type or not self.id_number):
-            raise ValueError("An adult guest needs an ID type and number")
-        return self
+    # v5n: an ID is no longer demanded of every adult HERE. How many guests must be identified is a
+    # property policy (`checkin_id_scope`: lead / per_room / all_adults) that only the endpoint can
+    # evaluate — it needs the database and the rooms being assigned. Validating it in the schema
+    # raised a 422 before the endpoint ever ran, which made a lead-only roster impossible whatever
+    # the setting said. The LEAD's own ID stays mandatory via CheckinRequest.id_type / id_number.
 
     @model_validator(mode="after")
     def _scan_fields_are_wellformed(self):

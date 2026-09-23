@@ -911,27 +911,67 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # old single-guest behaviour. ID numbers masked here; scans were uploaded encrypted beforehand.
         db.query(BookingGuest).filter(BookingGuest.booking_id == booking.booking_id).delete()
         roster = list(data.additional_guests or [])
-        # Mandatory IDs: every ADULT (non-minor) must have an ID; children are recorded by name.
-        # Require an ID on file for at least the booked adult count. (Empty roster ⇒ the lead is the
-        # one adult with an ID, so old single-adult bookings are unaffected.)
-        adults_with_id = sum(1 for g in roster if not g.is_minor and g.id_number) if roster else 1
-        if adults_with_id < int(booking.adults or 1):
-            raise HTTPException(
-                status_code=400,
-                detail=f"This booking is for {booking.adults} adult(s) — capture an ID for every adult "
-                       f"(only {adults_with_id} on file). Children can be added without an ID.")
 
-        # Mandatory ID SCAN (front + back) for every adult — the ID number alone is no longer enough,
-        # the scanned document must be on file. Only enforced when the desk sends a roster (the current
-        # desk always does); the legacy empty-roster path is left untouched for backward compatibility.
-        if roster:
-            adults_with_scans = sum(1 for g in roster
-                                    if not g.is_minor and g.id_scan_ref and g.id_scan_back_ref)
-            if adults_with_scans < int(booking.adults or 1):
+        # ---- v5n: HOW MANY guests must be identified is a property policy, not a constant ----
+        # `checkin_id_scope`:
+        #   lead       — the guest the booking is in, nobody else;
+        #   per_room    — one responsible guest for EACH room being assigned (the default here:
+        #                 a three-room group hands over three IDs, one per room key);
+        #   all_adults  — one per adult the booking was made for (the pre-v5n rule).
+        # Everyone beyond the required count is optional: name only, no ID, no scan — which is what
+        # makes a 2 a.m. family of six checkable-in at the speed the desk actually works.
+        # `per_room` deliberately ignores booking.adults: the website collects ONE occupancy number
+        # per booking, so a three-room reservation routinely arrives saying adults = 1.
+        fd_cfg = app_settings.get_frontdesk_config(db)
+        id_scope = fd_cfg["id_scope"]
+        scans_required = fd_cfg["scans_required"]
+        room_ids_being_assigned = list(rooms_by_id.keys())
+        if id_scope == "per_room":
+            required_ids = len(room_ids_being_assigned)
+        elif id_scope == "all_adults":
+            required_ids = int(booking.adults or 1)
+        else:
+            required_ids = 1
+
+        identified = [g for g in roster if not g.is_minor and g.id_number]
+        # The lead's ID always arrives on the request itself (schema-mandatory), so an empty roster
+        # still means exactly one identified guest.
+        identified_count = len(identified) if roster else 1
+
+        # With `per_room` the IDs must be spread ACROSS the rooms, and naming the rooms still short of
+        # one is the only message the desk can act on — so this runs BEFORE the bare count check
+        # (which for per_room would only be able to say "1 of 3"). Three IDs all filed against room
+        # 301 satisfies a count while leaving two rooms with nobody accountable for them.
+        if id_scope == "per_room" and roster:
+            rooms_with_id = {g.room_id for g in identified if g.room_id}
+            missing = [rid for rid in room_ids_being_assigned if rid not in rooms_with_id]
+            if missing:
+                labels = ", ".join(sorted(rooms_by_id[rid].room_number for rid in missing))
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Scan the front AND back of every adult's ID before check-in — this booking is "
-                           f"for {booking.adults} adult(s) but only {adults_with_scans} have both scans on file.")
+                    detail=f"No guest ID captured for room(s) {labels} — each room needs one "
+                           f"identified guest.")
+
+        if identified_count < required_ids:
+            if id_scope == "per_room":
+                detail = (f"This booking is {required_ids} room(s) — capture one guest's ID per room "
+                          f"(only {identified_count} on file).")
+            elif id_scope == "all_adults":
+                detail = (f"This booking is for {booking.adults} adult(s) — capture an ID for every adult "
+                          f"(only {identified_count} on file). Children can be added without an ID.")
+            else:
+                detail = "Capture the lead guest's ID before check-in."
+            raise HTTPException(status_code=400, detail=detail)
+
+        # The scanned document must be on file for whoever had to show an ID (the number alone is not
+        # a record). Guests who were never required to identify themselves are not asked for scans.
+        if roster and scans_required:
+            with_scans = sum(1 for g in identified if g.id_scan_ref and g.id_scan_back_ref)
+            if with_scans < required_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Scan the front AND back of the ID for every guest who must show one — "
+                           f"{required_ids} needed, {with_scans} with both scans on file.")
 
         # Every scan ref must belong to THIS booking, and no two occupants may share one.
         # The refs come back to us on this payload, and nothing tied them to the booking they were
@@ -957,6 +997,10 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
 
         if roster:
             for g in roster:
+                # v5n: room_id ties the occupant to the room they are actually in (a booking can be
+                # several rooms), and phone is that room's own contact for its portal link. A room id
+                # the desk did not just assign is dropped rather than trusted.
+                g_room = g.room_id if g.room_id in rooms_by_id else None
                 db.add(BookingGuest(
                     booking_id=booking.booking_id,
                     name=(g.name or "").strip() or (booking.guest.name if booking.guest else ""),
@@ -968,6 +1012,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                     id_scan_back_mime=g.id_scan_back_mime,
                     is_primary=g.is_primary,
                     is_minor=g.is_minor,
+                    room_id=g_room,
+                    phone=(g.phone or "").strip() or None,
                 ))
         else:
             db.add(BookingGuest(
@@ -976,6 +1022,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 id_type=lead_id_type,
                 id_number_masked=booking.guest.id_number_masked,
                 is_primary=True,
+                room_id=next(iter(rooms_by_id), None),
             ))
 
         # OTA bookings arrive with a masked/placeholder phone and no email — capture the real
@@ -1118,6 +1165,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                                for _i, _r in alt_sales],
                            "alt_type_otp_id": data.owner_otp_id if alt_sales else None,
                            # v5m: how the arrival rules were applied (the report reads stay_events).
+                           "kyc": {"id_scope": id_scope, "required_ids": required_ids,
+                                   "identified": identified_count, "scans_required": scans_required},
                            "arrival": {"kind": arrival["kind"], "deviation_minutes": arrival["deviation_minutes"],
                                        "quoted": fee_quoted, "applied": fee_applied,
                                        "basis": arrival["basis"], "approval": arrival_approval,
@@ -2815,7 +2864,11 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         })
 
     return {"date": str(today), "arrivals": arrivals, "upcoming": upcoming, "inhouse": inhouse,
-            "vacant_rooms": vacant_rooms, "rooms": rooms_hk}
+            "vacant_rooms": vacant_rooms, "rooms": rooms_hk,
+            # v5n: the front-desk policy the wizard must enforce (how many IDs, scans or not). Sent
+            # with the board rather than as a separate call so the desk always has it, keeps it in the
+            # offline board cache, and can never drift from what the server will accept.
+            "policy": app_settings.get_frontdesk_config(db)}
 
 
 @router.get("/notifications")
