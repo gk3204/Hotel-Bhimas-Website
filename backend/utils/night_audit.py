@@ -18,7 +18,7 @@ import logging
 from datetime import date, datetime, timedelta
 
 from models import Booking, CashShift, DayCloseSummary, Folio
-from sqlalchemy import func
+from sqlalchemy import func, text
 from utils.settings import (get_reports_config, set_setting, BUSINESS_DATE_KEY)
 
 logger = logging.getLogger(__name__)
@@ -125,12 +125,25 @@ def mark_no_shows(db, today=None, generated_by="scheduler") -> list:
     """v5m: a `confirmed` booking whose booked check-OUT date is over never arrived — mark it a
     no-show. Never earlier: a badly-late guest may still check in on any booked date (the
     arrival rules decide the stay clock). Money is untouched; `no_show` is not a reserved
-    status, so the inventory is released. Idempotent. Returns the booking ids marked."""
+    status, so the inventory is released. Idempotent. Returns the booking ids marked.
+
+    v5n: only stays whose check-out date falls on or after `no_show_from_date` (the go-live cutoff
+    in Settings → Front desk) are considered. Without it the first run of this sweep reaches back
+    through the property's whole booking history — on 2026-09-22 it marked 51 pre-go-live website
+    bookings in one pass and stamped them all with that morning's timestamp, which is what the
+    owner's daily digest and the arrival-exceptions report then reported. A desk or admin can still
+    mark any individual stay a no-show by hand; this cutoff governs the AUTOMATIC sweep only.
+    """
     from models import Booking
     from routers.booking_lifecycle import mark_no_show
+    from utils.settings import no_show_cutoff
     today = today or date.today()
     marked = []
-    rows = db.query(Booking).filter(Booking.status == "confirmed", Booking.check_out < today).all()
+    q = db.query(Booking).filter(Booking.status == "confirmed", Booking.check_out < today)
+    cutoff = no_show_cutoff(db)
+    if cutoff is not None:
+        q = q.filter(Booking.check_out >= cutoff)
+    rows = q.all()
     for b in rows:
         mark_no_show(db, b, None, reason=f"check-out date {b.check_out} passed without arrival",
                      client=generated_by, automatic=True)
@@ -141,9 +154,51 @@ def mark_no_shows(db, today=None, generated_by="scheduler") -> list:
     return marked
 
 
+# One audit per property per tick, whatever the worker count. The scheduler is started in EVERY
+# uvicorn worker (main.py) and the container runs 2, so on 2026-09-22 the 03:00 audit ran twice and
+# wrote two audit rows for each of the 51 no-shows it marked. The lock lives on its OWN connection:
+# the audit commits several times mid-run, and a session-level advisory lock belongs to the physical
+# connection that took it — returning that connection to the pool at a commit is exactly how the OTA
+# poll lost its lock in v5m.
+_AUDIT_LOCK_KEY = 0x004E0A11
+
+
 def run_night_audit(db, business_date=None, user=None, generated_by="scheduler"):
     """Full night-audit sweep for one business date. Idempotent — safe to re-run. Returns a
-    summary dict {business_date, folios_posted, snapshot}."""
+    summary dict {business_date, folios_posted, snapshot}. A concurrent run (a second worker, or a
+    manual run while the scheduler fires) returns {"skipped": "locked"} rather than duplicating the
+    work."""
+    lock_conn = None
+    locked = False
+    try:
+        lock_conn = db.get_bind().connect()
+        locked = bool(lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"),
+                                        {"k": _AUDIT_LOCK_KEY}).scalar())
+    except Exception as e:
+        logger.warning(f"night-audit: advisory-lock check failed ({e}); proceeding without it")
+    if lock_conn is not None and not locked:
+        try:
+            lock_conn.close()
+        except Exception:
+            pass
+        logger.info("night-audit: another run holds the lock, skipping")
+        return {"skipped": "locked", "business_date": str(_target_date(db, business_date))}
+    try:
+        return _run_night_audit_locked(db, business_date=business_date, user=user,
+                                       generated_by=generated_by)
+    finally:
+        if lock_conn is not None:
+            try:
+                lock_conn.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _AUDIT_LOCK_KEY})
+            except Exception as e:
+                logger.warning(f"night-audit: advisory-unlock failed: {e}")
+            try:
+                lock_conn.close()
+            except Exception:
+                pass
+
+
+def _run_night_audit_locked(db, business_date=None, user=None, generated_by="scheduler"):
     target = _target_date(db, business_date)
     logger.info(f"🌙 Night audit / day-close for {target} (by {generated_by})")
 
