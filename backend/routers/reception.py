@@ -1042,6 +1042,105 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                     detail=f"No guest ID captured for room(s) {labels} — each room needs one "
                            f"identified guest.")
 
+        # ---- v5r: the guest's OWN number, and one per room -------------------------------------
+        # Two rules the owner asked for, both about the same failure: a stay whose only contact number
+        # belongs to somebody else.
+        #
+        #   (a) An OTA booking arrives carrying the CHANNEL's number — either the synthetic placeholder
+        #       stamped from the booking id (Go-MMT and friends mask the guest entirely) or the OTA's own
+        #       call centre, scraped out of the voucher body. Every WhatsApp the PMS sends would go
+        #       there, and because guests are matched on phone, two OTA guests on one number merge into
+        #       a single profile — one blacklist then blocks them all.
+        #   (b) On a multi-room booking each room needs its own reachable number. The booking's number
+        #       counts for at most ONE room: "all three rooms are on the payer's mobile" leaves two
+        #       rooms with no way to be told their food is coming.
+        from utils import phone as _ph
+
+        is_ota_booking = ota_service.is_ota_source(booking.booking_source, db)
+        lead_phone = (data.phone or "").strip()
+        stored_phone = (booking.guest.phone if booking.guest else None)
+
+        def _refuse_channel_number(value, where):
+            """Common checks for any number offered as a guest contact."""
+            if _ph.is_blocked(db, value):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{where} is on the blocked list (an OTA / call-centre number) — "
+                           f"ask the guest for their own mobile.")
+            if not _ph.is_valid_mobile(value):
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"{where} ({_ph.describe(value)}) is not a mobile number — "
+                           f"enter a 10-digit mobile.")
+
+        if is_ota_booking:
+            # The desk must replace what the channel sent; nothing else identifies the guest.
+            if not lead_phone:
+                raise HTTPException(
+                    status_code=400,
+                    detail="This booking came from an OTA, which hides the guest's number — "
+                           "capture the guest's own mobile before checking in.")
+            # Order matters: the blocked list and the plain "that is not a mobile" reasons are more
+            # specific than "that is a placeholder", and `is_ota_placeholder` would otherwise swallow
+            # both (it treats anything that is not a valid mobile as a placeholder). The desk being told
+            # the actual reason is the difference between fixing it and arguing with the screen.
+            if _ph.is_blocked(db, lead_phone):
+                raise HTTPException(
+                    status_code=400,
+                    detail="That number is on the blocked list (an OTA / call-centre number) — "
+                           "ask the guest for their own mobile.")
+            if booking.ota_booking_id and _ph.same_number(
+                    lead_phone, _ph.ota_placeholder(booking.ota_booking_id)):
+                raise HTTPException(
+                    status_code=400,
+                    detail="That is the placeholder the OTA booking id generated, not a phone number — "
+                           "ask the guest for their own mobile.")
+            if stored_phone and _ph.same_number(lead_phone, stored_phone):
+                raise HTTPException(
+                    status_code=400,
+                    detail="That is the number the OTA sent with the booking, which reaches the channel "
+                           "and not the guest — capture the guest's own mobile.")
+            _refuse_channel_number(lead_phone, "The guest phone")
+        elif lead_phone:
+            _refuse_channel_number(lead_phone, "The guest phone")
+
+        # Per-room numbers. Enforced whenever the roster is room-mapped (i.e. the `per_room` rule, which
+        # is what makes "one responsible guest per room" meaningful) and there is more than one room.
+        if id_scope == "per_room" and roster and len(room_ids_being_assigned) > 1:
+            effective_lead = lead_phone or stored_phone
+            seen: dict[str, int] = {}          # normalised number -> the room that first used it
+            missing_phone = []
+            for rid in room_ids_being_assigned:
+                row = next((g for g in identified if g.room_id == rid and (g.phone or "").strip()), None)
+                if row is None:
+                    missing_phone.append(rid)
+                    continue
+                _refuse_channel_number(row.phone, f"Room {rooms_by_id[rid].room_number}'s phone")
+                key = _ph.normalize(row.phone)
+                if key in seen:
+                    both = ", ".join(sorted({rooms_by_id[seen[key]].room_number,
+                                             rooms_by_id[rid].room_number}))
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Rooms {both} were given the same number — each room needs its own "
+                               f"contact so the right guest can be reached.")
+                seen[key] = rid
+            if missing_phone:
+                labels = ", ".join(sorted(rooms_by_id[rid].room_number for rid in missing_phone))
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"No phone captured for room(s) {labels} — on a {len(room_ids_being_assigned)}-room "
+                           f"booking each room needs its own contact number.")
+            # The booking's own number may stand in for exactly one room.
+            if effective_lead:
+                lead_key = _ph.normalize(effective_lead)
+                on_lead = [rid for key, rid in seen.items() if key == lead_key]
+                if len(on_lead) > 1:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="The booking's own number can cover only one room — the other rooms need "
+                               "their own guests' numbers.")
+
         if identified_count < required_ids:
             if id_scope == "per_room":
                 detail = (f"This booking is {required_ids} room(s) — capture one guest's ID per room "
@@ -2892,6 +2991,9 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "check_in_time": str(b.check_in_time) if b.check_in_time else None,
             "check_out": str(b.check_out),
             "booking_source": b.booking_source,
+            # v5r: the desk needs the channel reference to recognise (and refuse) the placeholder phone
+            # that was stamped from it at check-in.
+            "ota_booking_id": b.ota_booking_id,
             "grand_total": float(b.grand_total or 0),
             "paid_total": paid,
             "folio_id": folio_id,
