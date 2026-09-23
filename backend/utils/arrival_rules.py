@@ -157,8 +157,13 @@ def rule_for(rules: dict, kind: str, source: str | None) -> dict:
 # ------------------------------------------------------------------ evaluation
 
 def charge_for(rule: dict, night_rate: float, units: float = 1.0) -> tuple[float, str]:
-    """(amount, basis) for one application of a rule. `night_rate` is the stay's one-night
-    GST-inclusive rate (all rooms)."""
+    """(amount, basis) for one application of a rule.
+
+    `night_rate` is one night of the rooms BEING CHARGED, GST-inclusive — so a percent rule already
+    scales with how many rooms are involved. `units` is how many rooms a FIXED amount applies to:
+    a ₹300 early-check-in fee on a three-room group that all arrived early is ₹900, and ₹300 when
+    only one of the three came early (v5n — the owner's rule: charge the room that actually did it).
+    """
     ch = rule.get("charge") or {}
     mode = ch.get("mode", "free")
     if mode == "fixed":
@@ -178,7 +183,7 @@ def needs_approval(rule: dict, quoted: float, applied: float | None) -> bool:
 
 
 def evaluate_early(rules: dict, source: str, expected_at: datetime, now: datetime,
-                   night_rate: float, comp: bool) -> dict:
+                   night_rate: float, comp: bool, rooms: int = 1) -> dict:
     """Early check-in: how early, what it costs, whether an extra night is needed."""
     rule = rule_for(rules, "early_checkin", source)
     dev = int((expected_at - now).total_seconds() // 60) if expected_at else 0   # minutes early (+)
@@ -196,7 +201,7 @@ def evaluate_early(rules: dict, source: str, expected_at: datetime, now: datetim
     if dev > rule["full_night_after_minutes"]:
         out.update(full_night=True, charge=round(float(night_rate), 2), basis="full_night")
         return out
-    amt, basis = charge_for(rule, night_rate)
+    amt, basis = charge_for(rule, night_rate, units=max(1, int(rooms)))
     out.update(charge=amt, basis=basis)
     return out
 
@@ -214,7 +219,7 @@ def evaluate_late_arrival(rules: dict, source: str, expected_at: datetime, now: 
 
 
 def evaluate_extension(rules: dict, source: str, current_checkout: datetime, hours: int,
-                       night_rate: float, comp: bool) -> dict:
+                       night_rate: float, comp: bool, rooms: int = 1) -> dict:
     """Hourly extension: new checkout moment, cost, or a refusal beyond the bound."""
     rule = rule_for(rules, "hourly_extension", source)
     hours = int(hours)
@@ -242,7 +247,8 @@ def evaluate_extension(rules: dict, source: str, current_checkout: datetime, hou
         out["refused"] = (f"beyond {rule['full_night_after_minutes'] // 60} h counts as a night — "
                           "extend the stay by a night instead")
         return out
-    amt, basis = charge_for(rule, night_rate)          # one fee per extension, not per hour
+    # One fee per extension, not per hour — but per ROOM staying late (v5n).
+    amt, basis = charge_for(rule, night_rate, units=max(1, int(rooms)))
     out.update(charge=amt, basis=basis)
     return out
 
@@ -277,8 +283,14 @@ def stay_events_report(db, date_from, date_to, kind: str | None = None) -> dict:
                         "hourly_extension": {"count": 0, "charged": 0.0}}
     users = {}
     for ev, b, g in q.order_by(StayEvent.created_at).all():
-        rooms = [r.room_number for r, in db.query(Room).join(BookingItem, BookingItem.room_id == Room.room_id)
-                 .filter(BookingItem.booking_id == b.booking_id).with_entities(Room).all()]
+        # v5n: an event belongs to ONE room when the fee was charged per room, so name that room
+        # rather than the whole stay — "which room did we charge?" is the question this report answers.
+        if ev.room_id:
+            one = db.query(Room.room_number).filter(Room.room_id == ev.room_id).scalar()
+            rooms = [one] if one else []
+        else:
+            rooms = [r.room_number for r, in db.query(Room).join(BookingItem, BookingItem.room_id == Room.room_id)
+                     .filter(BookingItem.booking_id == b.booking_id).with_entities(Room).all()]
         approver = None
         if ev.approved_by:
             if ev.approved_by not in users:
@@ -302,6 +314,7 @@ def stay_events_report(db, date_from, date_to, kind: str | None = None) -> dict:
             "actual_at": ev.actual_at.strftime("%d-%m %H:%M") if ev.actual_at else None,
             "deviation_minutes": ev.deviation_minutes, "hours": ev.hours,
             "charge": amt, "quoted": rule.get("quoted"),
+            "rooms_charged": rule.get("rooms_charged"), "total_rooms": rule.get("total_rooms"),
             "basis": ev.charge_basis, "basis_label": BASIS_LABELS.get(ev.charge_basis, ev.charge_basis),
             "approval": ev.approval, "approved_by": approver, "reason": rule.get("reason"),
             "voided": ev.charge_basis == "voided",

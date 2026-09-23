@@ -379,6 +379,11 @@ class CheckinRequest(BaseModel):
     arrival_fee_reason: Optional[str] = Field(None, max_length=200)
     arrival_otp_id: Optional[int] = Field(None, gt=0)
     arrival_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+    # v5n: WHICH rooms arrived early, as physical room ids (the rooms being assigned above). A 3-room
+    # group where only one room turned up early is charged for that room alone. Room ids rather than
+    # booking-item ids because one item can be several rooms (quantity > 1) — an item id cannot say
+    # "two of these three". Omitted / empty = the whole stay arrived early.
+    early_room_ids: Optional[list[int]] = Field(None, max_length=20)
     client_ref: Optional[str] = Field(None, max_length=64)
 
 
@@ -388,6 +393,9 @@ class ExtendHoursRequest(BaseModel):
     `already` branch instead of extending twice."""
     booking_id: int = Field(..., gt=0)
     hours: int = Field(..., ge=1, le=24)
+    # v5n: which rooms are staying late, as physical room ids; the fee is charged per room.
+    # Omitted = every room of the stay.
+    room_ids: Optional[list[int]] = Field(None, max_length=20)
     until: Optional[datetime] = None
     applied_amount: Optional[float] = Field(None, ge=0)
     reason: Optional[str] = Field(None, max_length=200)
@@ -412,6 +420,7 @@ class CheckinQuoteRequest(BaseModel):
     """v5m dry-run of the arrival rules for the check-in wizard (no writes)."""
     booking_id: int = Field(..., gt=0)
     arrival_fee_applied: Optional[float] = Field(None, ge=0)
+    early_room_ids: Optional[list[int]] = Field(None, max_length=20)
 
 
 class CardIssueRequest(BaseModel):

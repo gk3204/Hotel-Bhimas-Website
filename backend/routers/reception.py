@@ -531,26 +531,89 @@ def expected_arrival(booking: Booking, db=None) -> datetime:
     return datetime.combine(booking.check_in, booking.check_in_time or time(hour=12))
 
 
-def _night_rate(db, booking: Booking) -> float:
-    """One night of this stay (all rooms) through the rate engine, GST-inclusive — the base a
-    percent-mode fee is taken from. Falls back to the booked per-night average when the engine
-    has no rate (e.g. a room type with no rate plan)."""
+def _fee_selection(db, booking: Booking, room_ids=None, room_to_item=None) -> list:
+    """The ROOMS a fee applies to, as [(booking_item, room_id or None), ...] — one entry per room.
+
+    v5n: a fee belongs to a room, not to a booking ("only one of the three rooms arrived early, so
+    charge that room"). The selector is a physical room id rather than a booking-item id because one
+    item can be several rooms (quantity 3), and an item id cannot say "two of these three".
+
+    Resolution, in order: the item the room is already assigned to (exact — this is the state after
+    check-in splits a quantity>1 item into one row per room); else the assignment map the caller was
+    handed on the request (exact, and the only thing available before the split); else the room's TYPE
+    (rooms of one type share a rate, so this prices correctly even on a mixed-type stay).
+    `room_ids` empty / None = every room of the stay, expanded by quantity, so a fee is never
+    silently zero.
+    """
     items = list(booking.booking_items)
+    if not room_ids:
+        out = []
+        for it in items:
+            for _ in range(max(1, int(it.quantity or 1))):
+                out.append((it, it.room_id))
+        return out
+
+    by_id = {it.booking_item_id: it for it in items}
+    wanted, out, used = [int(r) for r in room_ids], [], {}
+    for rid in wanted:
+        item = next((it for it in items if it.room_id == rid), None)
+        if item is None and room_to_item:
+            item = by_id.get(room_to_item.get(rid))
+        if item is None:
+            room = db.query(Room).filter(Room.room_id == rid).first()
+            if room is not None:
+                for it in items:
+                    if it.room_type_id in (room.room_type_id, room.alt_room_type_id) \
+                            and used.get(it.booking_item_id, 0) < max(1, int(it.quantity or 1)):
+                        item = it
+                        break
+        if item is None:
+            continue
+        used[item.booking_item_id] = used.get(item.booking_item_id, 0) + 1
+        out.append((item, rid))
+    if not out:   # nothing resolved (a stale id): fall back to the whole stay rather than charging 0
+        return _fee_selection(db, booking)
+    return out
+
+
+def _night_rate(db, booking: Booking, selection=None) -> float:
+    """One night of the selected ROOMS through the rate engine, GST-inclusive — the base a
+    percent-mode fee is taken from, so a percent fee scales with how many rooms are charged.
+    `selection` is what _fee_selection returned; None = the whole stay. Falls back to the booked
+    per-night average when the engine has no rate (e.g. a room type with no rate plan)."""
+    if selection is None:
+        selection = _fee_selection(db, booking)
+    counts = {}
+    for item, _rid in selection:
+        counts[item.booking_item_id] = counts.get(item.booking_item_id, 0) + 1
+    items = {i.booking_item_id: i for i in booking.booking_items}
     try:
-        quotes = room_posting._quote_nights(db, booking, items, [booking.check_in])
-        rate = round(sum(n["rate"] for pn in quotes.values() for n in pn), 2)
+        quotes = room_posting._quote_nights(db, booking, list(items.values()), [booking.check_in])
+        rate = 0.0
+        for iid, n in counts.items():
+            item = items.get(iid)
+            qty = max(1, int(item.quantity or 1)) if item else 1
+            per_item = sum(x["rate"] for x in quotes.get(iid, []))
+            rate += per_item / qty * n       # the item's nightly rate covers `qty` rooms
+        rate = round(rate, 2)
         if rate > 0:
             return rate
     except Exception as e:  # pragma: no cover - defensive
         logger.warning(f"night rate quote failed for booking {booking.booking_id}: {e}")
     nights = max(1, (booking.check_out - booking.check_in).days)
-    return round(float(booking.total_amount or 0) / nights, 2)
+    total_rooms = sum(max(1, int(i.quantity or 1)) for i in booking.booking_items) or 1
+    return round(float(booking.total_amount or 0) / nights * (len(selection) / total_rooms), 2)
+
+
+def _item_gst_percent(db, item) -> float | None:
+    """The GST slab of one booking item's room type. Per item, not per booking: a stay mixing a
+    Suite with a Double must tax each room's fee at its own room type's rate."""
+    rt = db.query(RoomType).filter(RoomType.room_type_id == item.room_type_id).first() if item else None
+    return float(rt.gst_percent) if rt and rt.gst_percent is not None else None
 
 
 def _room_gst_percent(db, booking: Booking) -> float | None:
-    item = next(iter(booking.booking_items), None)
-    rt = db.query(RoomType).filter(RoomType.room_type_id == item.room_type_id).first() if item else None
-    return float(rt.gst_percent) if rt and rt.gst_percent is not None else None
+    return _item_gst_percent(db, next(iter(booking.booking_items), None))
 
 
 def _fmt_dev(minutes: int) -> str:
@@ -559,7 +622,8 @@ def _fmt_dev(minutes: int) -> str:
 
 
 def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
-                       applied: float | None = None, rules: dict | None = None) -> dict:
+                       applied: float | None = None, rules: dict | None = None,
+                       room_ids=None, room_to_item=None) -> dict:
     """Evaluate the arrival rules for a check-in happening `now` (pure; no writes).
 
     Returns everything the wizard shows and check_in acts on: kind (early / late / on_time),
@@ -589,9 +653,18 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
     elif not is_ota and today > booking.check_out:
         out["lapsed"] = f"Stay window lapsed on {booking.check_out:%d-%m-%Y}"
 
+    # v5n: which rooms this arrival is for. The desk ticks the rooms whose guests actually turned
+    # up early; everything below (percent base, fixed multiplier, extra nights, fee lines) follows
+    # that selection rather than the whole booking.
+    selection = _fee_selection(db, booking, room_ids, room_to_item)
+    rooms_charged = len(selection)
+    total_rooms = sum(max(1, int(i.quantity or 1)) for i in booking.booking_items) or 1
+    out_rooms = {"rooms_charged": rooms_charged, "total_rooms": total_rooms,
+                 "charged_room_ids": [rid for _i, rid in selection if rid]}
+
     if now < expected:
-        rate = _night_rate(db, booking)
-        ev = arrival_rules.evaluate_early(rules, src, expected, now, rate, comp)
+        rate = _night_rate(db, booking, selection)
+        ev = arrival_rules.evaluate_early(rules, src, expected, now, rate, comp, rooms=rooms_charged)
         out.update(kind="early", deviation_minutes=ev["deviation_minutes"], rule=ev["rule"],
                    quoted=ev["charge"], basis=ev["basis"], full_night=ev["full_night"],
                    approval=ev["approval"], night_rate=rate)
@@ -630,6 +703,7 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
     else:
         out["checkout_at"] = out["stay_start"] + timedelta(days=nights + out["extra_nights"])
 
+    out.update(out_rooms)
     dev = _fmt_dev(out["deviation_minutes"])
     co = out["checkout_at"]
     if out["kind"] == "early":
@@ -665,6 +739,8 @@ def _arrival_public(ev: dict) -> dict:
         "expected_at": ev["expected_at"].isoformat() if ev.get("expected_at") else None,
         "quoted": ev["quoted"], "applied": ev["applied"], "basis": ev["basis"],
         "full_night": ev["full_night"], "days_early": ev["days_early"], "extra_nights": ev["extra_nights"],
+        "rooms_charged": ev.get("rooms_charged", 1), "total_rooms": ev.get("total_rooms", 1),
+        "charged_room_ids": ev.get("charged_room_ids", []),
         "approval": ev["approval"], "needs_approval": ev["needs_approval"],
         "editable": ev["kind"] == "early" and ev["basis"] not in ("exempt_comp", "free", "on_time"),
         "stay_start": ev["stay_start"].isoformat() if ev.get("stay_start") else None,
@@ -702,7 +778,8 @@ def checkin_quote(data: CheckinQuoteRequest, db: Session = Depends(get_db),
         Booking.booking_id == data.booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
-    ev = arrival_evaluation(db, booking, applied=data.arrival_fee_applied)
+    ev = arrival_evaluation(db, booking, applied=data.arrival_fee_applied,
+                            room_ids=data.early_room_ids)
     out = _arrival_public(ev)
     out["booking_id"] = booking.booking_id
     out["is_admin"] = user.get("role") == "admin"
@@ -771,7 +848,12 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # an early guest pays by rule; a day-early guest is an extra night IF a room is free.
         now = datetime.now()
         today = now.date()
-        arrival = arrival_evaluation(db, booking, now, applied=data.arrival_fee_applied)
+        # The assignment payload is the only map from room -> booking item before the quantity>1 split
+        # further down, so hand it to the evaluation: that is what lets "room 83 only" price room 83's
+        # own rate rather than an average of the stay.
+        _room_to_item = {rid: a.booking_item_id for a in data.assignments for rid in a.room_ids}
+        arrival = arrival_evaluation(db, booking, now, applied=data.arrival_fee_applied,
+                                     room_ids=data.early_room_ids, room_to_item=_room_to_item)
         if arrival["lapsed"]:
             raise HTTPException(status_code=400, detail=arrival["lapsed"])
         if arrival["days_early"] > 1:
@@ -1064,57 +1146,96 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         open_folio(FolioOpenRequest(booking_id=booking.booking_id), db, user)
         folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
 
-        # ---- v5m: early / late arrival — post the fee or the extra night, record the event ----
+        # ---- v5m/v5n: early / late arrival — fee or extra night PER ROOM, one event per room ----
+        # v5n: a fee is a room's fee, not a booking's. Only the rooms whose guests actually arrived
+        # early are charged (the desk ticks them), each line carries its OWN room type's GST slab, and
+        # each room gets its own stay_event — so the arrival-exceptions report names the room and
+        # voiding one room's fee leaves the others standing.
         arrival_charge_id = None
         if folio and arrival["kind"] in ("early", "late"):
             try:
-                gst = _room_gst_percent(db, booking)
                 exp = arrival["expected_at"]
+                # Re-resolve AFTER the split: every charged room now has its own booking-item row, so
+                # each fee line can carry that room's id and its own room type's GST slab.
+                selection = _fee_selection(db, booking, data.early_room_ids)
+                charged_items = [item for item, _rid in selection]
+                sel_rooms = [rooms_by_id.get(rid) if rid else None for _item, rid in selection]
+                basis = "override" if fee_changed else arrival["basis"]
+                events: list[tuple] = []          # (room, charge_id, amount)
+
                 if arrival["kind"] == "early" and arrival["extra_nights"] >= 1:
-                    # Whole extra night(s): priced through the rate engine (spread to the applied
-                    # amount when the desk changed it; nothing posted for a comp stay), then the
-                    # booking's check-in moves back so "room lines = nights in [check_in,
-                    # check_out)" still holds and tonight's inventory counts this stay.
+                    # Whole extra night(s) for the rooms that came early: priced through the rate
+                    # engine (spread to the applied amount when the desk changed it; nothing posted
+                    # for a comp stay). The booking's check-in only moves back when EVERY room came
+                    # early — otherwise the booked dates stand and the early night is an explicit
+                    # line, because the other rooms genuinely were not occupied that night.
                     d_from = booking.check_in - timedelta(days=arrival["extra_nights"])
                     room_posting.assert_nights_identifiable(db, folio.id)
                     posted = room_posting.post_room_nights(
                         db, booking, folio, d_from, booking.check_in, user=user,
                         posting_reason="early", price_mode=room_posting.PRICE_QUOTE,
-                        override_total=fee_applied if fee_changed else None, recompute=False)
+                        override_total=fee_applied if fee_changed else None, recompute=False,
+                        only_items=sorted({i.booking_item_id for i in charged_items}))
                     if posted["posted"]:
                         arrival_charge_id = posted["posted"][0]
                         for c in db.query(FolioCharge).filter(FolioCharge.id.in_(posted["posted"])).all():
+                            room = rooms_by_id.get(
+                                next((rid for item, rid in selection
+                                      if item.booking_item_id == c.booking_item_id), None))
                             c.description = f"Early check-in — {c.description}"
+                            c.room_id = room.room_id if room else None
+                            events.append((room, c.id, float(c.amount or 0)))
                     if not booking.original_check_in:
                         booking.original_check_in = booking.check_in
-                    booking.check_in = d_from
+                    if len(selection) == sum(max(1, int(i.quantity or 1))
+                                             for i in booking.booking_items):
+                        booking.check_in = d_from
                 elif arrival["kind"] == "early" and fee_applied > 0:
-                    charge = FolioCharge(
-                        folio_id=folio.id, type="room",
-                        description=(f"Early check-in fee — {_fmt_dev(arrival['deviation_minutes'])} "
-                                     f"before {exp:%H:%M}"),
-                        qty=1, unit_price=fee_applied, amount=fee_applied, gst_percent=gst,
-                        posted_by=_resolve_user_id(db, user), charge_date=today,
-                        posting_reason="early")
-                    db.add(charge)
-                    db.flush()
-                    arrival_charge_id = charge.id
-                basis = arrival["basis"]
-                if fee_changed:
-                    basis = "override"
-                db.add(StayEvent(
-                    booking_id=booking.booking_id, kind="early_checkin" if arrival["kind"] == "early" else "late_arrival",
-                    expected_at=exp, actual_at=now, deviation_minutes=arrival["deviation_minutes"],
-                    charge_amount=fee_applied if arrival["kind"] == "early" else 0,
-                    charge_basis=basis if arrival["kind"] == "early" else "free",
-                    rule_json=arrival_rules.rule_snapshot({**(arrival["rule"] or {}),
-                                                           "quoted": fee_quoted,
-                                                           "reason": data.arrival_fee_reason,
-                                                           "stay_start": arrival["stay_start"].isoformat()}),
-                    approval=arrival_approval,
-                    approved_by=_resolve_user_id(db, user) if arrival_approval != "none" else None,
-                    folio_charge_id=arrival_charge_id,
-                    created_by=_resolve_user_id(db, user)))
+                    # Split the applied fee across the charged rooms, the last room absorbing the
+                    # rounding remainder — the same paisa-exact rule the folio uses everywhere else.
+                    n = max(1, len(selection))
+                    per = round(fee_applied / n, 2)
+                    amounts = [per] * (n - 1) + [round(fee_applied - per * (n - 1), 2)]
+                    for (item, _rid), room, amount in zip(selection, sel_rooms, amounts):
+                        label = f" — Room {room.room_number}" if room else ""
+                        charge = FolioCharge(
+                            folio_id=folio.id, type="room",
+                            description=(f"Early check-in fee{label} — "
+                                         f"{_fmt_dev(arrival['deviation_minutes'])} before {exp:%H:%M}"),
+                            qty=1, unit_price=amount, amount=amount,
+                            gst_percent=_item_gst_percent(db, item),
+                            posted_by=_resolve_user_id(db, user), charge_date=today,
+                            posting_reason="early", room_id=room.room_id if room else None)
+                        db.add(charge)
+                        db.flush()
+                        arrival_charge_id = arrival_charge_id or charge.id
+                        events.append((room, charge.id, amount))
+
+                rule_snapshot = arrival_rules.rule_snapshot(
+                    {**(arrival["rule"] or {}), "quoted": fee_quoted,
+                     "reason": data.arrival_fee_reason,
+                     "rooms_charged": arrival.get("rooms_charged"),
+                     "total_rooms": arrival.get("total_rooms"),
+                     "stay_start": arrival["stay_start"].isoformat()})
+                kind = "early_checkin" if arrival["kind"] == "early" else "late_arrival"
+                uid = _resolve_user_id(db, user)
+                if not events:
+                    # Free / exempt / late arrival: no money, but the deviation is still the record.
+                    events = [(next((r for r in sel_rooms if r), None), None, 0.0)]
+                for room, charge_id, amount in events:
+                    db.add(StayEvent(
+                        booking_id=booking.booking_id, kind=kind,
+                        room_id=room.room_id if room else None,
+                        expected_at=exp, actual_at=now,
+                        deviation_minutes=arrival["deviation_minutes"],
+                        charge_amount=amount if arrival["kind"] == "early" else 0,
+                        # A late arrival is never charged, so its basis is simply "free".
+                        charge_basis=basis if arrival["kind"] == "early" else "free",
+                        rule_json=rule_snapshot,
+                        approval=arrival_approval,
+                        approved_by=uid if arrival_approval != "none" else None,
+                        folio_charge_id=charge_id,
+                        created_by=uid))
                 _recompute(db, folio)
                 db.commit()
             except HTTPException:
@@ -2195,9 +2316,15 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
 
         rules = arrival_rules.load_rules(db)
         comp = room_posting._is_comped(booking)
-        rate = _night_rate(db, booking)
+        # v5n: only the rooms staying late are charged (the desk ticks them); the percent base and the
+        # fixed multiplier both follow that selection.
+        selection = _fee_selection(db, booking, data.room_ids)
+        charged_items = [item for item, _rid in selection]
+        rooms_charged = len(selection)
+        total_rooms = sum(max(1, int(i.quantity or 1)) for i in booking.booking_items) or 1
+        rate = _night_rate(db, booking, selection)
         ev = arrival_rules.evaluate_extension(rules, booking.booking_source or "direct", current,
-                                              data.hours, rate, comp)
+                                              data.hours, rate, comp, rooms=rooms_charged)
         if ev["refused"]:
             raise HTTPException(status_code=400, detail=f"Cannot extend by {data.hours} h: {ev['refused']}")
         until = ev["until"]
@@ -2210,9 +2337,10 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
         needs_approval = (not ev["exempt"]) and arrival_rules.needs_approval(
             ev["rule"], quoted, data.applied_amount)
         is_admin = user.get("role") == "admin"
-        gst = _room_gst_percent(db, booking)
         balance_before = float(folio.balance or 0)
-        text = (f"Late checkout +{data.hours} h (until {until:%H:%M %d %b})"
+        rooms_note = ("" if rooms_charged >= total_rooms
+                      else f" · {rooms_charged} of {total_rooms} rooms")
+        text = (f"Late checkout +{data.hours} h (until {until:%H:%M %d %b}){rooms_note}"
                 + (" — complimentary" if ev["exempt"] else
                    (" — free" if quoted == 0 else f" — ₹{quoted:,.0f}")))
 
@@ -2222,6 +2350,8 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
                     "from": current.isoformat(), "until": until.isoformat(), "hours": data.hours,
                     "quoted_amount": quoted, "applied_amount": None, "basis": ev["basis"],
                     "exempt": ev["exempt"], "text": text, "refused": None,
+                    "rooms_charged": rooms_charged, "total_rooms": total_rooms,
+                    "charged_room_ids": [rid for _i, rid in selection if rid],
                     "rule": {k: v for k, v in ev["rule"].items() if k != "sources"},
                     "requires_reason": changed, "requires_owner_otp": bool(needs_approval and not is_admin),
                     "requires_admin": False,
@@ -2238,28 +2368,47 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
                 consume_otp(db, data.owner_otp_id, data.owner_otp_code, "extend_hours", user)
                 approval = "owner_otp"
 
+        # v5n: one fee line and one event PER ROOM staying late, each at that room's own GST slab.
+        uid = _resolve_user_id(db, user)
+        sel_rooms = [db.query(Room).filter(Room.room_id == rid).first() if rid else None
+                     for _item, rid in selection]
         charge_id = None
+        events = []
         if applied > 0 and not ev["exempt"]:
-            charge = FolioCharge(
-                folio_id=folio.id, type="room",
-                description=f"Late checkout +{data.hours} h (until {until:%H:%M %d %b})",
-                qty=1, unit_price=applied, amount=applied, gst_percent=gst,
-                posted_by=_resolve_user_id(db, user), charge_date=current.date(),
-                posting_reason="extend_hours")
-            db.add(charge)
-            db.flush()
-            charge_id = charge.id
+            n = max(1, len(selection))
+            per = round(applied / n, 2)
+            amounts = [per] * (n - 1) + [round(applied - per * (n - 1), 2)]
+            for (item, _rid), room, amount in zip(selection, sel_rooms, amounts):
+                label = f" — Room {room.room_number}" if room else ""
+                charge = FolioCharge(
+                    folio_id=folio.id, type="room",
+                    description=f"Late checkout +{data.hours} h{label} (until {until:%H:%M %d %b})",
+                    qty=1, unit_price=amount, amount=amount,
+                    gst_percent=_item_gst_percent(db, item),
+                    posted_by=uid, charge_date=current.date(),
+                    posting_reason="extend_hours", room_id=room.room_id if room else None)
+                db.add(charge)
+                db.flush()
+                charge_id = charge_id or charge.id
+                events.append((room, charge.id, amount))
             booking.grand_total = round(float(booking.grand_total or 0) + applied, 2)
             booking.total_amount = round(float(booking.total_amount or 0) + applied, 2)
-        db.add(StayEvent(
-            booking_id=booking.booking_id, kind="hourly_extension",
-            expected_at=current, actual_at=until, deviation_minutes=data.hours * 60, hours=data.hours,
-            charge_amount=applied if not ev["exempt"] else 0,
-            charge_basis="override" if changed else ev["basis"],
-            rule_json=arrival_rules.rule_snapshot({**ev["rule"], "quoted": quoted, "reason": data.reason}),
-            approval=approval,
-            approved_by=_resolve_user_id(db, user) if approval != "none" else None,
-            folio_charge_id=charge_id, created_by=_resolve_user_id(db, user)))
+        if not events:
+            events = [(next((r for r in sel_rooms if r), None), None, 0.0)]
+        snapshot = arrival_rules.rule_snapshot({**ev["rule"], "quoted": quoted, "reason": data.reason,
+                                                "rooms_charged": rooms_charged,
+                                                "total_rooms": total_rooms})
+        for room, cid, amount in events:
+            db.add(StayEvent(
+                booking_id=booking.booking_id, kind="hourly_extension",
+                room_id=room.room_id if room else None,
+                expected_at=current, actual_at=until, deviation_minutes=data.hours * 60,
+                hours=data.hours,
+                charge_amount=amount if not ev["exempt"] else 0,
+                charge_basis="override" if changed else ev["basis"],
+                rule_json=snapshot, approval=approval,
+                approved_by=uid if approval != "none" else None,
+                folio_charge_id=cid, created_by=uid))
 
         booking.checkout_extended_until = until
         booking.card_reencode_required = True
@@ -2276,6 +2425,7 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
                     before={"checkout_at": current.isoformat(), "folio_balance": balance_before},
                     after={"until": until.isoformat(), "hours": data.hours, "quoted_amount": quoted,
                            "applied_amount": applied, "basis": ev["basis"], "approval": approval,
+                           "rooms_charged": rooms_charged, "total_rooms": total_rooms,
                            "reason": data.reason, "folio_charge_id": charge_id,
                            "superseded_card_ids": superseded_ids,
                            "folio_balance": float(folio.balance or 0), "client_ref": data.client_ref},
@@ -2297,6 +2447,7 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
                 "from": current.isoformat(), "until": until.isoformat(), "hours": data.hours,
                 "quoted_amount": quoted, "applied_amount": applied, "basis": ev["basis"],
                 "exempt": ev["exempt"], "text": text, "refused": None,
+                "rooms_charged": rooms_charged, "total_rooms": total_rooms,
                 "requires_reason": changed, "requires_owner_otp": False, "requires_admin": False,
                 "folio_id": folio.id, "folio_balance_before": balance_before,
                 "folio_balance_after": float(folio.balance or 0),

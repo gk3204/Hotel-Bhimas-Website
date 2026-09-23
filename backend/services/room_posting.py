@@ -147,7 +147,8 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
                      price_mode: str = PRICE_QUOTE,
                      override_total: float | None = None,
                      recompute: bool = True,
-                     enforce_backfilled: bool = True) -> dict:
+                     enforce_backfilled: bool = True,
+                     only_items=None) -> dict:
     """Post one type='room' FolioCharge per (BookingItem, night) over [date_from, date_to).
 
     Idempotent per (booking_item_id, charge_date): a night already posted — **even a VOIDED
@@ -166,6 +167,10 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
     override_total spreads an agreed amount (e.g. a discounted extension) across the new
     nights with the same last-night-absorbs-the-remainder rule, so the folio still
     reconciles exactly.
+
+    only_items (v5n) restricts the posting to those booking-item ids — used when just SOME rooms of a
+    multi-room booking arrived a day early, so only those rooms get the extra night. Ignored ids are
+    dropped; an empty result falls back to every item rather than silently posting nothing.
 
     Does NOT commit, and does NOT move booking.check_out — the caller owns both.
     """
@@ -199,6 +204,10 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
     }
 
     items = list(booking.booking_items)
+    if only_items:
+        wanted = {int(i) for i in only_items}
+        chosen = [i for i in items if i.booking_item_id in wanted]
+        items = chosen or items
     posted, skipped, per_item = [], [], []
     total_posted = 0.0
 
