@@ -1032,7 +1032,10 @@ def _hold_draft(db, d, reason: str):
         d.last_error = (reason or "")[:500]
         db.flush()
     except Exception:
-        logger.debug("could not record the hold reason on draft %s", getattr(d, "id", "?"))
+        # Losing the reason is how draft #1429 came to sit pending with nothing to explain it, so this
+        # is an error, not a debug line: the drafts screen is now missing the only clue the desk gets.
+        logger.error("could not record the hold reason on draft %s (reason was: %s)",
+                     getattr(d, "id", "?"), reason, exc_info=True)
     logger.warning("OTA auto-confirm held draft %s (%s/%s): %s",
                    getattr(d, "id", "?"), getattr(d, "channel_code", "?"),
                    getattr(d, "ota_booking_id", "?"), reason)
@@ -1099,10 +1102,22 @@ def auto_confirm_draft(db, d, user=None):
             if quoted and voucher > 0:
                 gap = abs(quoted - voucher) / voucher * 100
                 if gap > cfg["max_variance_percent"]:
+                    # The count is often not stated in words the parser can read — Go-MMT and Goibibo
+                    # enumerate "Room 1 / Room 2" instead of "TOTAL NO OF ROOMS 2". The money says it
+                    # plainly though: on prod, 4,830 against a 2,415 single-room stay is exactly two
+                    # rooms. Say so, so the desk sets Quantity instead of working it out.
+                    hint = ""
+                    if rooms_wanted == 1:
+                        for n in range(2, 11):
+                            if abs(quoted * n - voucher) / voucher * 100 <= cfg["max_variance_percent"]:
+                                hint = (f" The total is exactly {n} x Rs {quoted:,.0f}, so this looks "
+                                        f"like a {n}-room voucher — confirm it with Quantity {n}.")
+                                break
                     return _hold_draft(
                         db, d,
                         f"Voucher says Rs {voucher:,.0f} but {rooms_wanted} x this room type prices at "
-                        f"Rs {quoted:,.0f} ({gap:.0f}% out) — check the room count / type before confirming.")
+                        f"Rs {quoted:,.0f} ({gap:.0f}% out) — check the room count / type before "
+                        f"confirming.{hint}")
                 variance_note = f"voucher Rs {voucher:,.0f} vs priced Rs {quoted:,.0f}"
         except Exception as e:      # pricing is advisory here; never block the booking on it
             logger.debug(f"OTA variance check skipped for draft {d.id}: {e}")
@@ -1147,6 +1162,26 @@ def auto_confirm_draft(db, d, user=None):
         except Exception:
             pass
         detail = str(e)
+        # create_desk_booking commits the booking and THEN runs follow-up work (audit, notify). If
+        # that follow-up raises, its own `except` rolls back a transaction the booking is no longer
+        # in and reports 500 — so the booking exists while the caller is told it failed. Two prod
+        # drafts (#1429, #1508) sat pending that way with live bookings #233 and #252. So before
+        # holding anything, ask whether the reservation is in fact already here.
+        try:
+            made = duplicate_ota_booking(db, d.ota_booking_id) if d.ota_booking_id else None
+        except Exception:
+            made = None
+        if made is not None:
+            d.status = "confirmed"
+            d.linked_booking_id = made.booking_id
+            d.last_error = None
+            logger.warning("OTA draft %s reported '%s' but booking %s exists under the same OTA id "
+                           "— linking instead of holding", d.id, detail, made.booking_id)
+            try:
+                db.commit()
+            except Exception:
+                db.rollback()
+            return made.booking_id
         if "capacity" in detail.lower() or "no " in detail.lower()[:4]:
             detail += "  (room already sold in the PMS?)"
         _hold_draft(db, d, f"Could not create the booking: {detail}")
