@@ -799,8 +799,9 @@ def _parse_go_mmt(text: str) -> dict:
     room = _first([r"\d+\s*[xX]\s*([A-Za-z0-9][A-Za-z0-9 /()&\-]*?room)\b",
                    # "1 x Four Bed Non-Ac" / "2 x Double Deluxe Ac" — the room type is the rest of that line
                    r"\d+[ \t]*[xX][ \t]+([A-Za-z][A-Za-z0-9 /()&\-]{2,60}?)[ \t]*(?:\r|\n|$)"], text)
-    if room and room.strip().lower() not in ("only", "room only"):
-        out["room_type_hint"] = re.sub(r"\s+", " ", room).strip()
+    cleaned = _clean_room_hint(room)
+    if cleaned:
+        out["room_type_hint"] = cleaned
 
     # Amount = "Property Gross Charges" (what the hotel invoices the guest), else the room grand
     # total. Currency may be ₹ / Rs / INR depending on how the HTML was flattened.
@@ -869,8 +870,7 @@ def parse_yatra(text: str) -> dict:
     room = between(r"room\s*name", r"type\s+of\s+room", r"number\s+of\s+rooms") \
         or between(r"type\s+of\s+room", r"number\s+of\s+rooms") \
         or between(r"room\s*type", r"cancelled\s+from", r"room\s*nights", r"number\s+of\s+rooms")
-    if room:
-        out["room_type_hint"] = room
+    out["room_type_hint"] = _clean_room_hint(room)
 
     # Amount = "(A) Hotel Gross Charges" (what the hotel invoices the guest), else room charges.
     _cur = r"[\s:*|]*(?:₹|rs\.?|inr)?\s*"
@@ -982,6 +982,56 @@ def _rt_words(s: str) -> list:
     return [w for w in re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split() if w]
 
 
+def _clean_room_hint(hint):
+    """A room-type hint, or None when the email only gave us a meal plan or a section heading.
+
+    "Room Only" is the MEAL PLAN, not a room type. The Go-MMT parser has always rejected it; the
+    Goibibo `between()` extraction did not, so production held vouchers whose hint was "Only",
+    "Only Inclusions" and "Only Cancellation Policy" — and a junk hint does not fail loudly, it
+    fuzzy-matches: a Rs 2,415 Goibibo stay was priced at Rs 8,820 against "Suite Room" and only the
+    variance guard stopped it becoming a booking.
+    """
+    h = re.sub(r"\s+", " ", hint or "").strip(" :-|*\t")
+    if not h:
+        return None
+    # flattened HTML glues the next section's heading onto the value
+    h = re.split(r"(?i)\b(inclusions?|cancellation\s+policy|room\s+nights?|meal\s+plan|"
+                 r"payment\s+details?|guest\s+details?|total\s+no)\b", h)[0].strip(" :-|*\t")
+    if re.fullmatch(r"(?i)(room\s*)?only", h) or len(h) < 3:
+        return None
+    return h
+
+
+def _room_type_by_price(db, d, rooms: int, tolerance: float):
+    """When the hint is unusable, let the MONEY name the room type: the one type whose priced stay
+    matches the voucher total within tolerance. Accepted only when exactly one type fits, so it
+    cannot guess — and a fuzzy name match that disagrees with the voucher by 265% (which is what
+    "Suite Room" did on prod) is never used at all. Prefers a type whose name is in the body.
+    """
+    if not (d.amount and d.check_in and d.check_out):
+        return None
+    voucher = float(d.amount)
+    if voucher <= 0:
+        return None
+    low = (d.raw_source or "").lower()
+    fits = []
+    for rt in db.query(RoomType).all():
+        try:
+            q = _quote_rooms_total(db, rt.room_type_id, rooms, d.check_in, d.check_out,
+                                   d.channel_code)
+        except Exception:
+            continue
+        if q and abs(q - voucher) / voucher * 100 <= tolerance:
+            named = bool(rt.name and len(rt.name) >= 4 and rt.name.lower() in low)
+            fits.append((named, rt.room_type_id))
+    named_fits = [rid for named, rid in fits if named]
+    if len(named_fits) == 1:
+        return named_fits[0]
+    if len(fits) == 1:
+        return fits[0][1]
+    return None
+
+
 def _pick_room_type_id(db, hint):
     """Map the OTA room wording (e.g. "Double Non AC Room") to an active PMS room type id, weighting
     the bed-size word most. Returns None when there are no active room types. Server-side twin of the
@@ -1085,7 +1135,16 @@ def auto_confirm_draft(db, d, user=None):
             db.flush()
             return existing.booking_id
 
-    room_type_id = _pick_room_type_id(db, d.room_type_hint)
+    hint = _clean_room_hint(d.room_type_hint)
+    room_type_id = _pick_room_type_id(db, hint) if hint else None
+    if not room_type_id:
+        # The hint was a meal plan or a heading. Let the voucher's own total decide, which is the
+        # one figure these emails always state correctly.
+        room_type_id = _room_type_by_price(db, d, rooms_wanted,
+                                           cfg["max_variance_percent"] or 5.0)
+        if room_type_id:
+            logger.warning("OTA draft %s: hint %r unusable; the voucher total identifies room type %s",
+                           d.id, d.room_type_hint, room_type_id)
     if not room_type_id:
         return _hold_draft(db, d, f"No PMS room type matches \"{d.room_type_hint or '(none given)'}\" — "
                                   f"pick one here.")
