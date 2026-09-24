@@ -90,10 +90,17 @@ def _allocate_invoice_seq(db: Session, fy: str) -> int:
 
 
 def _active_charges(db: Session, folio_id: int):
+    """Non-void lines of a folio, in POSTING order.
+
+    The order_by is not cosmetic: this feeds invoice creation and `_invoice_payload`, so without it
+    the printed GST invoice's line order came from whatever the executor returned and two prints of
+    the same invoice could differ. The on-screen folio has always ordered by id (see the detail
+    endpoint below), so screen and tax document could disagree as well.
+    """
     return db.query(FolioCharge).filter(
         FolioCharge.folio_id == folio_id,
         FolioCharge.void == False,  # noqa: E712
-    ).all()
+    ).order_by(FolioCharge.id).all()
 
 
 def _recompute(db: Session, folio: Folio):

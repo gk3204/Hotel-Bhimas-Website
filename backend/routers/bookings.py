@@ -374,7 +374,10 @@ def read_all_bookings(
     bookings = (
         query
         .options(joinedload(Booking.booking_items).joinedload(BookingItem.room_type))
-        .order_by(Booking.check_in.desc())
+        # v5s: booking_id breaks the tie. check_in is not unique — several stays share an arrival
+        # date — and OFFSET paging over a non-unique sort can show a row on two pages or skip it
+        # entirely, because the executor is free to order equal keys differently per query.
+        .order_by(Booking.check_in.desc(), Booking.booking_id.desc())
         .offset(skip)
         .limit(limit)
         .all()

@@ -31,6 +31,7 @@ from models import (Booking, BookingItem, CardIssuance, CashShift, FolioCharge,
                     FraudAlert, Guest, GuestRequest, MaintenanceTicket, MenuItem,
                     Payment, Room, RoomType, User, DayCloseSummary, PAYMENT_METHODS)
 from schemas import OverstayConfigUpdate, ReportsConfigUpdate
+from utils import ordering
 from utils.audit import write_audit
 from utils.auth_utils import require_admin
 from utils.settings import get_reports_config
@@ -457,7 +458,9 @@ def in_house_data(db):
             "booking_id": b.booking_id,
             "guest_name": guest.name if guest else None,
             "phone": guest.phone if guest else None,
-            "rooms": ", ".join(room_labels) if room_labels else "—",
+            # v5s: ascending room order — this list IS the fire/safety roll-call
+            # (compliance.evacuation renders these rows), so "303, 301" was not acceptable.
+            "rooms": ", ".join(ordering.room_labels(room_labels)) if room_labels else "—",
             "check_in": str(b.check_in), "check_out": str(b.check_out), "nights": nights,
             "balance": float(folio.balance or 0) if folio else None,
         })
@@ -1082,11 +1085,17 @@ def _charge_room_label(db, charge, booking_id, _cache, _room_cache):
 
 
 def _booking_room_label(db, booking_id, _cache):
-    """The room label for a booking (its first assigned room; joined lazily + cached). Used for
-    charges that name no room of their own (anything posted before v5n)."""
+    """The room label for a booking (its LOWEST-numbered assigned room; joined lazily + cached).
+    Used for charges that name no room of their own (anything posted before v5n).
+
+    v5s: this ordering decides which room a charge is reported against, and it used to be a TEXT
+    sort on a varchar label — so a stay in rooms 9 and 10 attributed its pre-v5n room-service to
+    room 10, because "10" < "9" as text. Numeric now.
+    """
     if booking_id not in _cache:
         row = (db.query(Room.room_number).join(BookingItem, BookingItem.room_id == Room.room_id)
-               .filter(BookingItem.booking_id == booking_id).order_by(Room.room_number).first())
+               .filter(BookingItem.booking_id == booking_id)
+               .order_by(*ordering.room_number_key(Room.room_number)).first())
         _cache[booking_id] = row[0] if row else "—"
     return _cache[booking_id]
 

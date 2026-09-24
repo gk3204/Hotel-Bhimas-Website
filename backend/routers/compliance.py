@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import AuditLog, Booking, BookingItem, Guest, GuestProfile, Room, User
 from utils.audit import write_audit
+from utils import ordering
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.settings import (COMPLIANCE_EDITABLE_KEYS, get_compliance_config, set_setting)
 from utils.tally_export import build_accounting_csv, build_tally_xml
@@ -82,13 +83,19 @@ def tally_export(from_: str = Query(None, alias="from"), to: str = Query(None),
 # ---------------------------------------------------------------------------
 
 def _rooms_for_booking(db, booking_id):
+    """A stay's rooms as one label, in room order.
+
+    v5s: the join returned rooms in whatever order it liked, so a two-room stay could print
+    "303, 301" on the police register and the Form C return. These are legal documents; the rooms
+    read in ascending order now.
+    """
     labels = []
     for it in db.query(BookingItem).filter(BookingItem.booking_id == booking_id).all():
         if it.room_id:
             r = db.query(Room).filter(Room.room_id == it.room_id).first()
             if r:
                 labels.append(r.room_number)
-    return ", ".join(labels) if labels else "—"
+    return ", ".join(ordering.room_labels(labels)) if labels else "—"
 
 
 def _register_bookings(db, dfrom, dto):

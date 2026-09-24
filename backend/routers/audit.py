@@ -69,7 +69,10 @@ def list_audit_logs(
         q = q.filter(AuditLog.client == client)
 
     total = q.count()
-    logs = q.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
+    # v5s: id breaks the tie — created_at repeats (a single action writes several rows in the
+    # same transaction), and paging on a non-unique key duplicates or skips rows.
+    logs = (q.order_by(AuditLog.created_at.desc(), AuditLog.log_id.desc())
+             .offset(offset).limit(limit).all())
 
     # Resolve actor display names in one query.
     ids = {lg.user_id for lg in logs if lg.user_id}
