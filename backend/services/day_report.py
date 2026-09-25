@@ -15,10 +15,23 @@ from sqlalchemy import func
 
 from models import (Booking, Guest, Room, BookingItem, MaintenanceTicket, HousekeepingTask,
                     GuestRequest, FraudAlert, Folio)
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
 _LIVE = ("confirmed", "checked_in", "checked_out")
+
+
+def _utc_day(col, day):
+    """Filter clauses selecting the rows of `col` that fall on the BUSINESS day `day`.
+
+    F-03: these columns are instants stored in UTC, while `day` is the hotel's date. `func.date(col)
+    == day` compared the two directly, so the owner's daily report counted from 05:30 IST to 05:29
+    the next morning - a night desk's takings landed on the wrong day, and the first 5.5 h of every
+    day went missing. Returns a tuple so call sites can splat it into an existing `.filter(...)`.
+    """
+    start, end = clock.business_day_bounds(day)
+    return (col >= start, col < end)
 
 
 def _safe(fn, default):
@@ -85,7 +98,7 @@ def compute_day_report(db, day=None) -> dict:
         from models import Payment
         rev = dict(db.query(Booking.booking_source, func.coalesce(func.sum(Payment.amount), 0))
                    .join(Booking, Booking.booking_id == Payment.booking_id)
-                   .filter(Payment.status == "paid", func.date(Payment.created_at) == day)
+                   .filter(Payment.status == "paid", *_utc_day(Payment.created_at, day))
                    .group_by(Booking.booking_source).all())
         sources = set(occ) | set(rev)
         occ_total = sum(int(v or 0) for v in occ.values()) or 0
@@ -128,7 +141,7 @@ def compute_day_report(db, day=None) -> dict:
             return {"id": t.id, "where": rn or t.area or "common", "issue": (t.issue or "")[:80],
                     "priority": t.priority, "status": t.status, "source": t.source}
         opened = [_fmt(t) for t in db.query(MaintenanceTicket)
-                  .filter(func.date(MaintenanceTicket.created_at) == day).all()]
+                  .filter(*_utc_day(MaintenanceTicket.created_at, day)).all()]
         closed = [_fmt(t) for t in db.query(MaintenanceTicket)
                   .filter(MaintenanceTicket.status.in_(("resolved", "verified", "closed")),
                           func.coalesce(func.date(MaintenanceTicket.verified_at),
@@ -169,9 +182,9 @@ def compute_day_report(db, day=None) -> dict:
     # ---- extras ----
     def _extras():
         new_bookings = int(db.query(func.count(Booking.booking_id))
-                           .filter(func.date(Booking.created_at) == day).scalar() or 0)
+                           .filter(*_utc_day(Booking.created_at, day)).scalar() or 0)
         cancellations = int(db.query(func.count(Booking.booking_id))
-                            .filter(func.date(Booking.cancelled_at) == day).scalar() or 0)
+                            .filter(*_utc_day(Booking.cancelled_at, day)).scalar() or 0)
         today = date.today()
         overstays = int(db.query(func.count(Booking.booking_id))
                         .filter(Booking.status == "checked_in", Booking.check_out < today).scalar() or 0)
@@ -189,7 +202,7 @@ def compute_day_report(db, day=None) -> dict:
         rep = stay_events_report(db, day, day)
         t = rep["totals"]
         no_shows = int(db.query(func.count(Booking.booking_id))
-                       .filter(Booking.status == "no_show", func.date(Booking.no_show_at) == day).scalar() or 0)
+                       .filter(Booking.status == "no_show", *_utc_day(Booking.no_show_at, day)).scalar() or 0)
         return {"early_checkins": t["early_checkin"]["count"], "early_charged": t["early_checkin"]["charged"],
                 "late_arrivals": t["late_arrival"]["count"],
                 "hourly_extensions": t["hourly_extension"]["count"], "extension_charged": t["hourly_extension"]["charged"],

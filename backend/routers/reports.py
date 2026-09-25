@@ -36,6 +36,7 @@ from utils.audit import write_audit
 from utils.auth_utils import require_admin
 from utils.settings import get_reports_config
 from services import ota_service
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -154,16 +155,28 @@ def occupancy_data(db, dfrom, dto, group_by="day"):
         return {"group_by": "room_type", "from": str(dfrom), "to": str(dto),
                 "total_rooms": total_rooms, "rows": rows}
     # per-day
+    #
+    # F-17: this printed 166.7% occupancy. Two things were wrong. It counted every live-status
+    # booking overlapping the night, so reservations nobody ever arrived for (F-16) kept consuming
+    # inventory for ever; and nothing capped the result, so an impossible number reached the owner
+    # with no explanation. For a night ALREADY PAST, count what actually happened - a stay is
+    # evidence of occupancy only if somebody checked in. For tonight and the future a reservation IS
+    # committed inventory, so keep counting those. `oversold` says plainly when demand genuinely
+    # exceeds the rooms, instead of letting the percentage say it illegibly.
+    today = clock.business_today()
     rows = []
     for night in _days(dfrom, dto):
+        statuses = ("checked_in", "checked_out") if night < today else _LIVE_STATUSES
         occ = (db.query(func.coalesce(func.sum(BookingItem.quantity), 0))
                .join(Booking, Booking.booking_id == BookingItem.booking_id)
-               .filter(Booking.status.in_(_LIVE_STATUSES),
+               .filter(Booking.status.in_(statuses),
                        Booking.check_in <= night, Booking.check_out > night)).scalar()
         occ = int(occ or 0)
-        pct = round(100.0 * occ / total_rooms, 1) if total_rooms else 0.0
-        rows.append({"date": str(night), "occupied": occ, "available": max(0, total_rooms - occ),
-                     "total_rooms": total_rooms, "occupancy_pct": pct})
+        pct = round(100.0 * min(occ, total_rooms) / total_rooms, 1) if total_rooms else 0.0
+        rows.append({"date": str(night), "occupied": min(occ, total_rooms),
+                     "available": max(0, total_rooms - occ),
+                     "total_rooms": total_rooms, "occupancy_pct": pct,
+                     "oversold": max(0, occ - total_rooms)})
     return {"group_by": "day", "from": str(dfrom), "to": str(dto),
             "total_rooms": total_rooms, "rows": rows}
 
@@ -174,14 +187,14 @@ def _charge_pairs(db, day):
     q = (db.query(FolioCharge.gst_percent, FolioCharge.amount)
          .filter(FolioCharge.void == False,  # noqa: E712
                  FolioCharge.type.notin_(("payment", "discount")),
-                 func.date(FolioCharge.posted_at) == day))
+                 clock.business_date_sql(FolioCharge.posted_at) == day))
     return [(g, a) for g, a in q.all()]
 
 
 def _sum_charges(db, day, types=None, exclude=None):
     q = (db.query(func.coalesce(func.sum(FolioCharge.amount), 0))
          .filter(FolioCharge.void == False,  # noqa: E712
-                 func.date(FolioCharge.posted_at) == day))
+                 clock.business_date_sql(FolioCharge.posted_at) == day))
     if types is not None:
         q = q.filter(FolioCharge.type.in_(types))
     if exclude is not None:
@@ -197,11 +210,11 @@ def _room_service_filters(day=None, dfrom=None, dto=None):
     conds = [FolioCharge.void == False,          # noqa: E712
              FolioCharge.menu_item_id.isnot(None)]
     if day is not None:
-        conds.append(func.date(FolioCharge.posted_at) == day)
+        conds.append(clock.business_date_sql(FolioCharge.posted_at) == day)
     if dfrom is not None:
-        conds.append(func.date(FolioCharge.posted_at) >= dfrom)
+        conds.append(clock.business_date_sql(FolioCharge.posted_at) >= dfrom)
     if dto is not None:
-        conds.append(func.date(FolioCharge.posted_at) <= dto)
+        conds.append(clock.business_date_sql(FolioCharge.posted_at) <= dto)
     return conds
 
 
@@ -277,12 +290,12 @@ def collections_summary(db, dfrom, dto):
     def _m(method):
         return float(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(
             Payment.status == "paid", Payment.method == method,
-            func.date(Payment.created_at) >= dfrom, func.date(Payment.created_at) <= dto).scalar() or 0)
+            clock.business_date_sql(Payment.created_at) >= dfrom, clock.business_date_sql(Payment.created_at) <= dto).scalar() or 0)
     cash, card, upi, bank = _m("cash"), _m("card"), _m("upi"), _m("bank")
     total = round(cash + card + upi + bank, 2)
     refunds = float(db.query(func.coalesce(func.sum(Payment.refund_amount), 0)).filter(
         Payment.refund_status == "completed",
-        func.date(Payment.created_at) >= dfrom, func.date(Payment.created_at) <= dto).scalar() or 0)
+        clock.business_date_sql(Payment.created_at) >= dfrom, clock.business_date_sql(Payment.created_at) <= dto).scalar() or 0)
     return {"cash": round(cash, 2), "card": round(card, 2), "upi": round(upi, 2),
             "bank": round(bank, 2), "total_collected": total, "refunds": round(refunds, 2)}
 
@@ -329,7 +342,7 @@ def room_service_by_date(db, dfrom, dto):
         # voided order therefore shows as 1 order with 0 gross — which is worth seeing.
         day_charges = (db.query(FolioCharge.id)
                        .filter(FolioCharge.menu_item_id.isnot(None),
-                               func.date(FolioCharge.posted_at) == day).subquery())
+                               clock.business_date_sql(FolioCharge.posted_at) == day).subquery())
         orders = int(db.query(func.count(GuestRequest.id))
                      .filter(GuestRequest.folio_charge_id.in_(db.query(day_charges.c.id)))
                      .scalar() or 0)
@@ -387,8 +400,8 @@ def shift_payments_data(db, dfrom, dto):
     """
     from routers.cash_shift import _serialize
     shifts = (db.query(CashShift)
-              .filter(func.date(CashShift.opened_at) >= dfrom,
-                      func.date(CashShift.opened_at) <= dto)
+              .filter(clock.business_date_sql(CashShift.opened_at) >= dfrom,
+                      clock.business_date_sql(CashShift.opened_at) <= dto)
               .order_by(CashShift.opened_at, CashShift.id).all())
     rows = []
     for s in shifts:
@@ -425,15 +438,31 @@ def gst_data(db, dfrom, dto):
 
 
 def arrivals_departures_data(db, dfrom, dto):
+    """Arrivals and departures per day, counted BOTH ways (F-17).
+
+    This counted bookings only, so a family taking three rooms was one arrival — and housekeeping and
+    the shift roster are planned off this number, where what matters is rooms. Both are reported now
+    rather than swapping one for the other: the desk thinks in guests arriving, housekeeping thinks in
+    rooms to turn around, and they are genuinely different questions.
+    """
+    def _count(date_col, day):
+        bookings = int(db.query(func.count(Booking.booking_id)).filter(
+            date_col == day, Booking.status.in_(_LIVE_STATUSES)).scalar() or 0)
+        rooms = int(db.query(func.coalesce(func.sum(BookingItem.quantity), 0))
+                    .join(Booking, Booking.booking_id == BookingItem.booking_id)
+                    .filter(date_col == day, Booking.status.in_(_LIVE_STATUSES)).scalar() or 0)
+        return bookings, rooms
+
     rows = []
     for day in _days(dfrom, dto):
-        arr = int(db.query(func.count(Booking.booking_id)).filter(
-            Booking.check_in == day, Booking.status.in_(_LIVE_STATUSES)).scalar() or 0)
-        dep = int(db.query(func.count(Booking.booking_id)).filter(
-            Booking.check_out == day, Booking.status.in_(_LIVE_STATUSES)).scalar() or 0)
-        rows.append({"date": str(day), "arrivals": arr, "departures": dep})
+        arr, arr_rooms = _count(Booking.check_in, day)
+        dep, dep_rooms = _count(Booking.check_out, day)
+        rows.append({"date": str(day), "arrivals": arr, "departures": dep,
+                     "arrival_rooms": arr_rooms, "departure_rooms": dep_rooms})
     totals = {"arrivals": sum(r["arrivals"] for r in rows),
-              "departures": sum(r["departures"] for r in rows)}
+              "departures": sum(r["departures"] for r in rows),
+              "arrival_rooms": sum(r["arrival_rooms"] for r in rows),
+              "departure_rooms": sum(r["departure_rooms"] for r in rows)}
     return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
 
 
@@ -456,7 +485,7 @@ def in_house_data(db):
         nights = max(1, (b.check_out - b.check_in).days)
         rows.append({
             "booking_id": b.booking_id,
-            "guest_name": guest.name if guest else None,
+            "guest_name": b.display_guest_name or None,
             "phone": guest.phone if guest else None,
             # v5s: ascending room order — this list IS the fire/safety roll-call
             # (compliance.evacuation renders these rows), so "303, 301" was not acceptable.
@@ -532,7 +561,7 @@ def cash_shift_data(db, dfrom, dto):
     """Shift/day reconciliation rows for shifts OPENED in the range (open + closed)."""
     from routers.cash_shift import _serialize
     shifts = (db.query(CashShift)
-              .filter(func.date(CashShift.opened_at) >= dfrom, func.date(CashShift.opened_at) <= dto)
+              .filter(clock.business_date_sql(CashShift.opened_at) >= dfrom, clock.business_date_sql(CashShift.opened_at) <= dto)
               .order_by(CashShift.opened_at.desc()).all())
     rows = []
     for s in shifts:
@@ -553,7 +582,7 @@ def cash_shift_data(db, dfrom, dto):
 def card_audit_data(db, dfrom, dto):
     """Card-issuance audit: every key card cut in the range."""
     q = (db.query(CardIssuance)
-         .filter(func.date(CardIssuance.issued_at) >= dfrom, func.date(CardIssuance.issued_at) <= dto)
+         .filter(clock.business_date_sql(CardIssuance.issued_at) >= dfrom, clock.business_date_sql(CardIssuance.issued_at) <= dto)
          .order_by(CardIssuance.issued_at.desc()))
     rows = []
     for c in q.all():
@@ -584,8 +613,10 @@ def staff_performance_data(db, dfrom, dto):
     """
     from models import StaffAttendance, StaffShift
 
-    start_dt = datetime.combine(dfrom, datetime.min.time())
-    end_dt = datetime.combine(dto, datetime.max.time())
+    # F-03: these filter created_at / posted_at / issued_at / closed_at, which are stored UTC, so
+    # the window has to be the UTC span of those BUSINESS days - not a naive local midnight, which
+    # moved every figure here by 5.5 h. Half-open, so `< end_dt` below stays correct.
+    start_dt, end_dt = clock.business_day_bounds(dfrom, dto)
     UPSELL_TYPES = ("food", "minibar", "laundry", "extra_bed")
 
     rows = {}
@@ -780,7 +811,7 @@ def occupancy_analysis_data(db, as_on):
             rt = rt_by_id.get(it.room_type_id)
             row = {
                 "room_no": r.room_number, "floor": int(r.floor or 0),
-                "guest": guest.name if guest else None,
+                "guest": b.display_guest_name or None,
                 "segment": seg, "source": b.booking_source or "direct",
                 "room_type": rt.name if rt else None,
                 "arrival": arr.isoformat() if arr else None,
@@ -858,7 +889,7 @@ def cashier_summary_data(db, day):
     Plus per-mode totals, a grand total, unsettled checkout bills, and nil-amount checkouts. Uses our
     invoice + payment ids for the bill/voucher references."""
     pays = (db.query(Payment).filter(Payment.status == "paid",
-                                     func.date(Payment.created_at) == day)
+                                     clock.business_date_sql(Payment.created_at) == day)
             .order_by(Payment.created_at).all())
     out = _cashier_summary_core(db, receipts=pays, refunds=pays, checkouts_day=day)
     return {"day": str(day), **out}
@@ -907,7 +938,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
         b, guest, folio, room = _ctx(p)
         return b, folio, {
             "date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
-            "room": room, "guest": guest.name if guest else None, "booking_id": p.booking_id,
+            "room": room, "guest": (b.display_guest_name if b else None), "booking_id": p.booking_id,
             "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
             # CR No = the card/UPI transaction reference (gateway txn id), blank for manual cash.
             # (client_ref is the desk's offline-outbox dedupe UUID — internal, not a cashier ref.)
@@ -923,7 +954,13 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
             # A receipt taken at/after the guest's checkout moment settles their bill; earlier
             # ones are advances. (Relaxed from "checked out the same day" so a bill settled the
             # morning after still files as a check-out bill on that day's/shift's summary.)
-            is_checkout = bool(b and b.checked_out_at and at and at >= b.checked_out_at)
+            # F-03: `at` is Payment.created_at (stored UTC); `checked_out_at` is the hotel's
+            # wall-clock checkout moment (local, because the 24 h stay clock and the card expiry
+            # are anchored to it). Comparing them raw made the payment look 5.5 h EARLIER than the
+            # checkout it settled, so this test was false for every normal checkout and the whole
+            # cashier summary filed settlements under ADVANCE.
+            is_checkout = bool(b and b.checked_out_at and at
+                               and clock.to_local(at) >= b.checked_out_at)
             mm = _mode(m)
             if is_checkout:
                 inv = _get_invoice(db, folio.id) if folio else None
@@ -974,7 +1011,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
         bal = round(float(f.balance or 0), 2) if f else 0.0
         inv = _get_invoice(db, f.id) if f else None
         rowc = {"bill_no": (inv.invoice_no if inv else f"F{f.id}" if f else "—"),
-                "room": room, "guest": guest.name if guest else None,
+                "room": room, "guest": (b.display_guest_name or None),
                 "booking_id": b.booking_id, "balance": bal}
         if bal != 0:
             unsettled.append(rowc)
@@ -1193,7 +1230,7 @@ def room_detail_data(db, dfrom, dto):
             fr = "; ".join(f"{a.type}({a.severity})" for a in frauds)
             rows.append({
                 "booking_id": b.booking_id, "room": r.room_number if r else "—",
-                "guest": guest.name if guest else None,
+                "guest": b.display_guest_name or None,
                 "check_in": b.checked_in_at.isoformat() if b.checked_in_at else None,
                 "check_out": b.checked_out_at.isoformat() if b.checked_out_at else None,
                 "cleaning_started": task.started_at.isoformat() if task and task.started_at else None,
@@ -1211,8 +1248,8 @@ def maintenance_detail_data(db, dfrom, dto):
     resolved/verified/closed; `inspected` = verified/closed (signed off)."""
     from models import TicketItem
     tickets = (db.query(MaintenanceTicket)
-               .filter(func.date(MaintenanceTicket.created_at) >= dfrom,
-                       func.date(MaintenanceTicket.created_at) <= dto)
+               .filter(clock.business_date_sql(MaintenanceTicket.created_at) >= dfrom,
+                       clock.business_date_sql(MaintenanceTicket.created_at) <= dto)
                .order_by(MaintenanceTicket.created_at).all())
     rows = []
     for t in tickets:
@@ -1412,9 +1449,11 @@ def arrival_exceptions_report(from_: str | None = Query(None, alias="from"), to:
     dfrom, dto = _range(from_, to)
     kind = kind if kind in ("early_checkin", "late_arrival", "hourly_extension") else None
     data = stay_events_report(db, dfrom, dto, kind)
+    _ns_start, _ns_end = clock.business_day_bounds(dfrom, dto)
     no_shows = db.query(func.count(Booking.booking_id)).filter(
-        Booking.status == "no_show", func.date(Booking.no_show_at) >= dfrom,
-        func.date(Booking.no_show_at) <= dto).scalar() or 0
+        Booking.status == "no_show",
+        # F-03: no_show_at is an instant (UTC); the report is by business day.
+        Booking.no_show_at >= _ns_start, Booking.no_show_at < _ns_end).scalar() or 0
     data["no_shows"] = int(no_shows)
     cols = ["Date", "Booking", "Guest", "Room", "Source", "Kind", "Expected", "Actual", "Deviation",
             "Hours", "Charge", "Basis", "Approved by"]
@@ -1810,7 +1849,7 @@ def owner_dashboard(db: Session = Depends(get_db)):
     for b in (db.query(Booking).filter(Booking.check_in == today, Booking.status == "confirmed")
               .order_by(Booking.check_in_time).all()):
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
-        pending.append({"booking_id": b.booking_id, "guest_name": guest.name if guest else None,
+        pending.append({"booking_id": b.booking_id, "guest_name": b.display_guest_name or None,
                         "check_in_time": str(b.check_in_time) if b.check_in_time else None,
                         "check_out": str(b.check_out)})
 
@@ -1836,7 +1875,7 @@ def owner_dashboard(db: Session = Depends(get_db)):
         if not st["overdue"]:
             continue
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
-        overdue.append({"booking_id": b.booking_id, "guest_name": guest.name if guest else None,
+        overdue.append({"booking_id": b.booking_id, "guest_name": b.display_guest_name or None,
                         "check_out": str(b.check_out), "due_at": st["due_at"],
                         "nights_overdue": st["nights_overdue"],
                         "auto_charged_nights": st["auto_nights"],
@@ -1896,11 +1935,11 @@ def weekly_trends(db: Session = Depends(get_db)):
     void_total = float(db.query(func.coalesce(func.sum(FolioCharge.amount), 0)).filter(
         FolioCharge.void == True,  # noqa: E712
         FolioCharge.reversal_of_id.is_(None),
-        func.date(FolioCharge.posted_at) >= wstart,
-        func.date(FolioCharge.posted_at) <= today).scalar() or 0)
+        clock.business_date_sql(FolioCharge.posted_at) >= wstart,
+        clock.business_date_sql(FolioCharge.posted_at) <= today).scalar() or 0)
     refund_total = float(db.query(func.coalesce(func.sum(Payment.refund_amount), 0)).filter(
         Payment.refund_status == "completed",
-        func.date(Payment.created_at) >= wstart, func.date(Payment.created_at) <= today).scalar() or 0)
+        clock.business_date_sql(Payment.created_at) >= wstart, clock.business_date_sql(Payment.created_at) <= today).scalar() or 0)
 
     # Open maintenance tickets by age bucket.
     buckets = {"0-2d": 0, "3-7d": 0, "8-30d": 0, "30d+": 0}

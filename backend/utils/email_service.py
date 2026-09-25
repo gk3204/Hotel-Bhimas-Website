@@ -18,6 +18,18 @@ ENQUIRY_MAIL_FROM = os.getenv("ENQUIRY_MAIL_FROM", "hotelbhimas.enquiry@gmail.co
 enquiry_mailjet = Client(auth=(ENQUIRY_MAILJET_API_KEY, ENQUIRY_MAILJET_API_SECRET), version='v3.1')
 
 
+def _safe_mode() -> bool:
+    """F-06: True when this process must not e-mail a real person.
+
+    Mailjet has no test-recipient allowlist - unlike WhatsApp, where a local slip during the QA run
+    was caught only because the .env carries Meta's test number. A script run on a development PC
+    loads backend/.env and can therefore mail real guests from the hotel's own address. Set
+    SAFE_MODE=true whenever running anything locally.
+    """
+    import os
+    return (os.getenv("SAFE_MODE", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def send_booking_email(booking_data, pdf_path):
     """Send booking confirmation email via Mailjet"""
 
@@ -224,6 +236,9 @@ Email: hotelbhimas@gmail.com
             ]
         }
 
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending email %s", data)
+            return False
         result = mailjet.send.create(data=data)
 
         if result.status_code == 200:
@@ -302,6 +317,9 @@ def send_enquiry_email(name: str, email: str, phone: str, message: str):
             ]
         }
 
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending enquiry email")
+            return False
         result = enquiry_mailjet.send.create(data=data)
 
         if result.status_code == 200:
@@ -534,6 +552,9 @@ Hotel Bhimas
             ]
         }
 
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending email %s", data)
+            return False
         result = mailjet.send.create(data=data)
 
         if result.status_code == 200:
@@ -688,6 +709,9 @@ GSTIN: 37AAACK9397F1Z3
             ]
         }
 
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending email %s", data)
+            return False
         result = mailjet.send.create(data=data)
 
         if result.status_code == 200:
@@ -806,6 +830,9 @@ GSTIN: 37AAACK9397F1Z3
                 },
             ]
         }
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending email %s", data)
+            return False
         result = mailjet.send.create(data=data)
         if result.status_code == 200:
             logger.info(f"✅ Company invoice email sent: {invoice_no}")
@@ -860,6 +887,9 @@ def send_notification_email(to_email, subject, body, to_name=None, hotel_name="H
         ]
     }
     try:
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending email %s", data)
+            return False
         result = mailjet.send.create(data=data)
         if result.status_code == 200:
             logger.info(f"✅ Notification email sent to {to_email}")
@@ -918,6 +948,9 @@ def send_prearrival_link_email(guest_email, guest_name, link, hotel_name="Hotel 
         ]
     }
     try:
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending email %s", data)
+            return False
         result = mailjet.send.create(data=data)
         if result.status_code == 200:
             logger.info(f"✅ Pre-arrival link email sent to {guest_email}")
@@ -956,6 +989,9 @@ def send_owner_report_email(to_email, subject, html_body, pdf_path, filename="re
             "HTMLPart": html_body or "<p>Your Hotel Bhimas report is attached.</p>",
             "Attachments": attachments,
         }]}
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending email %s", data)
+            return False
         result = mailjet.send.create(data=data)
         if result.status_code == 200:
             return True
@@ -996,6 +1032,9 @@ def send_report_email(to_emails, subject, html_body, attachments):
             "HTMLPart": html_body or "<p>Your Hotel Bhimas reports are attached.</p>",
             "Attachments": atts,
         }]}
+        if _safe_mode():
+            logger.warning("SAFE_MODE: not sending email %s", data)
+            return False
         result = mailjet.send.create(data=data)
         if result.status_code == 200:
             return True

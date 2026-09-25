@@ -45,6 +45,7 @@ from routers.crm import check_guest_gate, match_guest, accrue_loyalty_on_checkou
 from scripts.expire_booking_jobs import expire_pending_bookings
 from services import company_service, ota_service, room_posting
 from utils.owner_otp import consume_otp
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +267,9 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
 
         booking = Booking(
             guest_id=guest.guest_id,
+            # F-01: the booking's OWN name, captured now. `guests.name` may be refreshed by a later
+            # booking on the same phone; this must not move with it.
+            guest_name=(data.guest_name or "").strip() or (guest.name if guest else None),
             check_in=data.check_in,
             check_in_time=data.check_in_time,
             check_out=data.check_out,
@@ -334,7 +338,7 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             booking.comp_mode = data.comp_mode
             booking.comp_reason = data.comp_reason.strip()
             booking.comp_by = _resolve_user_id(db, user)
-            booking.comp_at = datetime.now()
+            booking.comp_at = clock.now_utc()      # F-03: an instant, stored UTC
             booking.comp_otp_id = data.owner_otp_id
 
         for d in items_data:
@@ -842,7 +846,7 @@ def _checkin_response(db: Session, booking: Booking, folio: Folio | None, alread
         "booking_id": booking.booking_id,
         "status": booking.status,
         "already_checked_in": already,
-        "guest_name": booking.guest.name if booking.guest else None,
+        "guest_name": booking.display_guest_name,
         "checked_in_at": booking.checked_in_at.isoformat() if booking.checked_in_at else None,
         "folio_id": folio.id if folio else None,
         "folio_balance": float(folio.balance or 0) if folio else None,
@@ -1234,7 +1238,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 g_room = g.room_id if g.room_id in rooms_by_id else None
                 db.add(BookingGuest(
                     booking_id=booking.booking_id,
-                    name=(g.name or "").strip() or (booking.guest.name if booking.guest else ""),
+                    name=(g.name or "").strip() or booking.display_guest_name,
                     id_type=validate_category(db, "id_type", g.id_type) if g.id_type else None,
                     id_number_masked=("****" + g.id_number[-4:]) if g.id_number else None,
                     id_scan_ref=g.id_scan_ref,
@@ -1249,7 +1253,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         else:
             db.add(BookingGuest(
                 booking_id=booking.booking_id,
-                name=booking.guest.name if booking.guest else "",
+                name=booking.display_guest_name,
                 id_type=lead_id_type,
                 id_number_masked=booking.guest.id_number_masked,
                 is_primary=True,
@@ -1263,6 +1267,25 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 booking.guest.phone = data.phone.strip()
             if data.email:
                 booking.guest.email = str(data.email).strip()
+
+        # F-07: the guest's address, for the police register. The register reads
+        # `guest_profiles.address` (routers/compliance.py), which only the CRM screen ever wrote, so
+        # a walk-in - most of the register - filed a dash. Taken from the check-in request, or from
+        # whichever KYC row is the primary guest. Best-effort: a check-in must not fail over it.
+        _addr = (data.address or "").strip() or next(
+            ((g.address or "").strip() for g in (data.additional_guests or [])
+             if g.is_primary and getattr(g, "address", None)), "")
+        if _addr:
+            try:
+                from models import GuestProfile
+                prof = db.query(GuestProfile).filter(
+                    GuestProfile.guest_id == booking.guest_id).first()
+                if prof is None:
+                    prof = GuestProfile(guest_id=booking.guest_id)
+                    db.add(prof)
+                prof.address = _addr[:300]
+            except Exception as e:                      # pragma: no cover - defensive
+                logger.warning(f"could not store guest address at check-in: {e}")
 
         booking.status = "checked_in"
         booking.checked_in_at = now
@@ -1448,7 +1471,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # Best-effort WhatsApp welcome / room-ready (prompt 15).
         _room_nums = ", ".join(r.room_number for r in rooms_by_id.values())
         _wa_notify(db, "wa_room_ready_enabled", booking.guest, "room_ready",
-                   {"guest_name": booking.guest.name, "room_label": _room_nums},
+                   {"guest_name": booking.display_guest_name, "room_label": _room_nums},
                    booking_id=booking.booking_id, client_ref=f"room_ready:{booking.booking_id}")
 
         # Auto-send the in-room portal link to the guest on check-in (self-service: room service,
@@ -1465,7 +1488,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 _sess = _get_or_create_session(db, booking, user)
                 _wa.send_template(
                     db, booking.guest.phone, "portal_link",
-                    {"guest_name": booking.guest.name or "Guest",
+                    {"guest_name": booking.display_guest_name or "Guest",
                      "room_number": (_room_nums or _room_number(db, _sess.room_id) or "-"),
                      "link": _portal_url(_sess.token)},
                     guest_id=booking.guest_id, booking_id=booking.booking_id,
@@ -1575,7 +1598,7 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         before = {"booking_status": booking.status, "folio_balance": balance}
 
         folio.status = "settled"
-        folio.settled_at = datetime.now()
+        folio.settled_at = clock.now_utc()         # F-03: an instant, stored UTC
         booking.status = "checked_out"
         booking.checked_out_at = datetime.now()
 
@@ -1604,7 +1627,7 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         matched = [c for c in cards if (c.card_uid or "").lower() in uid_set] if uid_set else []
         if erased_uids and not matched:
             matched = cards
-        now_ts = datetime.now()
+        now_ts = clock.now_utc()                   # F-03: erased_at is an instant, stored UTC
         uid_by_id = {c.id: c for c in matched}
         for c in cards:
             if c.id in uid_by_id:
@@ -3025,7 +3048,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         return {
             "booking_id": b.booking_id,
             "guest_id": b.guest_id,
-            "guest_name": b.guest.name if b.guest else None,
+            "guest_name": b.display_guest_name or None,
             "phone": b.guest.phone if b.guest else None,
             # Website bookings carry a real email; surfaced so the desk pre-fills it at check-in.
             "email": b.guest.email if b.guest else None,
@@ -3110,7 +3133,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         inhouse.append({
             "booking_id": b.booking_id,
             "guest_id": b.guest_id,
-            "guest_name": b.guest.name if b.guest else None,
+            "guest_name": b.display_guest_name or None,
             "phone": b.guest.phone if b.guest else None,
             # Website bookings carry a real email; surfaced so the desk pre-fills it at check-in.
             "email": b.guest.email if b.guest else None,
@@ -3489,14 +3512,14 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
                "is_primary": g.is_primary,
                "room_number": _room_nums.get(g.room_id)} for g in guest_rows]
     if not guests and booking.guest:
-        guests = [{"name": booking.guest.name, "id_type": booking.guest.id_type,
+        guests = [{"name": booking.display_guest_name, "id_type": booking.guest.id_type,
                    "id_number_masked": booking.guest.id_number_masked, "has_scan": False,
                    "has_scan_back": False, "is_primary": True,
                    "room_number": rooms[0] if rooms else None}]
 
     slip_data = {
         "booking_id": booking.booking_id,
-        "guest_name": booking.guest.name if booking.guest else "",
+        "guest_name": booking.display_guest_name,
         "phone": booking.guest.phone if booking.guest else "",
         "email": booking.guest.email if booking.guest else None,
         "id_type": booking.guest.id_type if booking.guest else None,

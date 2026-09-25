@@ -36,6 +36,7 @@ from utils.audit import write_audit, _resolve_user_id
 from utils.settings import (get_cash_config, set_setting, validate_category,
                             CASH_CYCLE_KEY, CASH_VARIANCE_THRESHOLD_KEY, CASH_VARIANCE_ALERT_KEY)
 from utils.pdf_generator import generate_shift_report_pdf
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,9 @@ def _method_window(shift: CashShift):
     """Condition matching payments that belong to a shift but predate the v3 change that
     started stamping shift_id for non-cash. Only rows with NO shift_id are matched, so a
     payment is never counted twice; an open shift's window runs to 'now'."""
-    end = shift.closed_at or datetime.now()
+    # F-03: compared against Payment.created_at, which is UTC — so this must be UTC too.
+    # `closed_at` is already utcnow().
+    end = shift.closed_at or clock.now_utc()
     return (Payment.shift_id.is_(None),
             Payment.created_at >= shift.opened_at,
             Payment.created_at < end)

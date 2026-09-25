@@ -84,7 +84,7 @@ def _breach(ticket: MaintenanceTicket, now: datetime | None = None) -> dict:
 
 def _complaint_dict(db: Session, t: MaintenanceTicket, with_trail: bool = False) -> dict:
     booking = db.query(Booking).filter(Booking.booking_id == t.booking_id).first() if t.booking_id else None
-    guest_name = booking.guest.name if booking and booking.guest else None
+    guest_name = booking.display_guest_name if booking else None
     room = db.query(Room).filter(Room.room_id == t.room_id).first() if t.room_id else None
     b = _breach(t)
     data = {

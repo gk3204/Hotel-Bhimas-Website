@@ -14,6 +14,7 @@ Nothing here raises into event hooks: the IMAP poller is best-effort and swallow
 Parsers are exposed as pure functions (`parse_email_bytes`) so they can be unit-tested against
 `.eml` fixtures without a live mailbox.
 """
+import json
 import os
 import re
 import email
@@ -31,6 +32,7 @@ from models import Booking, OtaChannel, OtaSettlement, OtaDraftBooking, RoomType
 # logged as a harmless "skipped draft". Production ran for weeks with 143 pending drafts and not one OTA
 # booking created.
 from utils.phone import ota_placeholder as _ota_placeholder_phone
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -678,6 +680,8 @@ def _parse_common(text: str) -> dict:
         "room_type_hint": (room.strip() if room else None),
         "amount": amount_val,
         "rooms": _room_count(text),
+        # F-18: the per-room breakdown, only when the voucher names more than one type.
+        "room_lines": _room_breakup(text),
     }
 
 
@@ -745,6 +749,42 @@ def _room_count(text: str) -> int | None:
         return None
     n = int(raw)
     return n if 1 <= n <= 10 else None
+
+
+def _room_breakup(text: str) -> list | None:
+    """The voucher's own per-room breakdown, as [{"hint": <type name>, "rooms": n}, ...] (F-18).
+
+    Go-MMT prints a "Room wise Payment Breakup" table whose every block is headed with the room's
+    TYPE and its index — `Double Deluxe Non-Ac (Room 1)`, `Four Bed Non-Ac (Room 1)`. That heading is
+    the only place a voucher states what each individual room is, and it is unambiguous, so it is the
+    right thing to parse.
+
+    Why this matters: a draft could hold ONE `room_type_hint` and a count, so a voucher like
+    NH73163518841498 (1 Four Bed + 1 Double Deluxe + 2 Triple Bed) could not be represented at all.
+    Confirming it the only way the form allowed billed Rs 7,350 against a voucher of Rs 6,300.
+
+    Returns None when the table is absent or names only one type — the single-type path is unchanged
+    and the existing `room_type_hint` still drives it. Lines keep the voucher's own order, and
+    repeated types are merged with their count.
+    """
+    heads = re.findall(r"^[ 	]*([A-Za-z][A-Za-z0-9 /()&'\-]{2,60}?)\s*\(\s*Room\s+(\d+)\s*\)\s*$",
+                       text, re.IGNORECASE | re.MULTILINE)
+    if not heads:
+        return None
+    lines, seen = [], {}
+    for raw_name, _idx in heads:
+        name = _clean_room_hint(raw_name) or raw_name.strip()
+        if not name:
+            continue
+        if name in seen:
+            seen[name]["rooms"] += 1
+        else:
+            seen[name] = {"hint": name, "rooms": 1}
+            lines.append(seen[name])
+    # One type is what the ordinary path already handles; only speak up when the voucher is mixed.
+    if len(lines) <= 1:
+        return None
+    return lines
 
 
 def _occupancy(text: str) -> dict:
@@ -969,6 +1009,12 @@ def _upsert_draft(db, fields: dict) -> tuple[OtaDraftBooking, bool]:
     # 2-room voucher for a family of 4 is not the same thing as 4 adults in one room.
     if fields.get("rooms"):
         d.rooms = int(fields["rooms"])
+    # F-18: a mixed-type voucher's room lines, kept as JSON. `rooms` above stays the TOTAL, so
+    # everything downstream that reads it is unaffected.
+    if fields.get("room_lines"):
+        d.room_lines = json.dumps(fields["room_lines"])
+        if not d.rooms:
+            d.rooms = sum(int(l.get("rooms") or 1) for l in fields["room_lines"])
     d.adults = int(fields.get("adults") or 1)
     d.children = int(fields.get("children") or 0)
     d.amount = fields.get("amount")
@@ -1350,7 +1396,7 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
             # so leave that one flagged for the desk to handle. No Razorpay refund — the OTA refunds.
             if b.status == "confirmed":
                 b.status = "cancelled"
-                b.cancelled_at = datetime.now()
+                b.cancelled_at = clock.now_utc()   # F-03: an instant, stored UTC
                 b.cancel_reason = f"OTA cancellation ({channel}) {fields['ota_booking_id']}"
                 cancelled_booking_id = b.booking_id
                 try:
@@ -1493,6 +1539,20 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
             "errors": errors, "skipped_past": skipped_past, "drafts": drafts}
 
 
+def _load_room_lines(d) -> list | None:
+    """The draft's stored room lines, or None. Never raises on bad JSON — a draft that cannot be
+    parsed must still be visible and dismissable on the screen."""
+    raw = getattr(d, "room_lines", None)
+    if not raw:
+        return None
+    try:
+        lines = json.loads(raw)
+        return lines if isinstance(lines, list) and lines else None
+    except Exception:
+        logger.warning("draft %s has unreadable room_lines", getattr(d, "id", "?"))
+        return None
+
+
 def serialize_draft(d: OtaDraftBooking, db=None) -> dict:
     # A cancellation email carries no gross, so d.amount is None — show the ORIGINAL stay value from
     # the booking it flagged, so the row isn't a bare "—".
@@ -1516,6 +1576,9 @@ def serialize_draft(d: OtaDraftBooking, db=None) -> dict:
         # v5r: the parsed room count and why a draft is still pending — both shown on the drafts screen
         # so a held voucher explains itself instead of looking like an unexplained backlog.
         "rooms": int(d.rooms) if d.rooms else None,
+        # F-18: present only when the voucher mixes room types, so the drafts screen can offer
+        # one PMS room-type picker per line instead of a single one for the whole booking.
+        "room_lines": _load_room_lines(d),
         "last_error": d.last_error,
         "adults": int(d.adults or 1),
         "children": int(d.children or 0),

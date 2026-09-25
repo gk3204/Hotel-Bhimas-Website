@@ -301,7 +301,7 @@ def _folio_detail(db: Session, folio: Folio):
         "company_balance": company_balance,
         "guest_balance": round(float(folio.balance or 0) - company_balance, 2),
         "opened_at": str(folio.opened_at) if folio.opened_at else None,
-        "guest_name": booking.guest.name if booking and booking.guest else None,
+        "guest_name": booking.display_guest_name if booking else None,
         "phone": booking.guest.phone if booking and booking.guest else None,
         "email": booking.guest.email if booking and booking.guest else None,
         # v3 item 7: the room number is the first thing the desk looks for when a guest
@@ -408,7 +408,7 @@ def list_folios(db: Session = Depends(get_db), user=Depends(require_reception_or
         rooms = _room_numbers(booking)
         data.append({
             "booking_id": booking.booking_id,
-            "guest_name": booking.guest.name if booking.guest else None,
+            "guest_name": booking.display_guest_name,
             "phone": booking.guest.phone if booking.guest else None,
             "check_in": str(booking.check_in),
             "check_out": str(booking.check_out),
@@ -1079,7 +1079,9 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
                       "status": einvoice.status}
                      if einvoice and einvoice.status in ("generated", "stub") else None),
         "guest": {
-            "name": guest.name if guest else "N/A",
+            # F-01: the name THIS stay was booked in. Reading the live guest record meant an
+            # invoice already issued could reprint under a different person's name.
+            "name": (booking.display_guest_name if booking else "") or "N/A",
             "phone": guest.phone if guest else "N/A",
             "email": guest.email if guest else None,
         },
@@ -1161,14 +1163,14 @@ def _einvoice_input(db: Session, folio: Folio, invoice: Invoice) -> dict:
         "sgst_total": float(invoice.sgst_total or 0),
         "grand_total": float(invoice.grand_total or 0),
         "gst_breakup": gst_breakup,
-        "guest_name": guest.name if guest else "",
+        "guest_name": (booking.display_guest_name if booking else ""),
         "seller_gstin": os.getenv("GST_EINVOICE_GSTIN", "37AAACK9397F1Z3"),
         # v5m: the invoice's own buyer snapshot wins over the (possibly later-edited) profile.
-        "buyer": ({"gstin": invoice.buyer_gstin, "name": invoice.buyer_name or (guest.name if guest else ""),
+        "buyer": ({"gstin": invoice.buyer_gstin, "name": invoice.buyer_name or (booking.display_guest_name if booking else ""),
                    "address": invoice.buyer_address, "state_code": invoice.buyer_state_code}
                   if invoice.buyer_gstin else
                   {"gstin": (profile.gstin if profile and profile.gstin else "URP"),
-                   "name": guest.name if guest else "",
+                   "name": (booking.display_guest_name if booking else ""),
                    "address": profile.address if profile else None,
                    "state_code": (profile.gst_state_code or profile.gstin[:2]) if profile and profile.gstin else None}),
     }

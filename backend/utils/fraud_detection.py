@@ -27,6 +27,7 @@ from sqlalchemy import func
 
 from models import (Booking, BookingItem, CardIssuance, FraudAlert, Guest,
                     Payment, Room)
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -336,12 +337,12 @@ def compute_daily_digest(db, day=None) -> dict:
     def _sum(*conds):
         return float(db.query(func.coalesce(func.sum(Payment.amount), 0)).filter(*conds).scalar() or 0)
 
-    revenue = _sum(Payment.status == "paid", func.date(Payment.created_at) == day)
+    revenue = _sum(Payment.status == "paid", clock.business_date_sql(Payment.created_at) == day)
     cash_in = _sum(Payment.status == "paid", Payment.method == "cash",
-                   func.date(Payment.created_at) == day)
+                   clock.business_date_sql(Payment.created_at) == day)
     cash_refunds = float(db.query(func.coalesce(func.sum(Payment.refund_amount), 0)).filter(
         Payment.refund_mode == "cash", Payment.refund_status == "completed",
-        func.date(Payment.created_at) == day).scalar() or 0)
+        clock.business_date_sql(Payment.created_at) == day).scalar() or 0)
 
     arrivals = db.query(func.count(Booking.booking_id)).filter(Booking.check_in == day).scalar() or 0
     departures = db.query(func.count(Booking.booking_id)).filter(Booking.check_out == day).scalar() or 0

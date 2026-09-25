@@ -498,6 +498,14 @@ const DraftsTab = ({ showToast }) => {
   const openConfirm = (d) => {
     setConfirmFor(d);
     setCform({
+      // F-18: a voucher whose rooms are DIFFERENT types (1 Four Bed + 1 Double Deluxe + 2 Triple
+      // Bed) cannot be one type x quantity. The backend parses the voucher's own "Room wise Payment
+      // Breakup" into room_lines; each gets its own picker, pre-matched by the same fuzzy rule.
+      room_lines: (d.room_lines || []).map((l) => ({
+        hint: l.hint,
+        rooms: l.rooms || 1,
+        room_type_id: pickRoomType(l.hint),
+      })),
       room_type_id: pickRoomType(d.room_type_hint),
       // v5r: default to the room count the voucher itself stated. It used to default to 1 whatever the
       // email said, so a 2-room reservation was confirmed as one room and the other stayed on sale.
@@ -515,9 +523,18 @@ const DraftsTab = ({ showToast }) => {
   const doConfirm = async () => {
     setBusy(true);
     try {
+      const hasLines = (cform.room_lines || []).length > 0;
       const payload = {
-        room_type_id: Number(cform.room_type_id),
-        quantity: Number(cform.quantity) || 1,
+        // Sent for both shapes: the single pair stays required by the API, and room_lines overrides
+        // it when the voucher is mixed.
+        room_type_id: Number(hasLines ? cform.room_lines[0].room_type_id : cform.room_type_id),
+        quantity: Number(hasLines ? cform.room_lines[0].rooms : cform.quantity) || 1,
+        ...(hasLines ? {
+          room_lines: cform.room_lines.map((l) => ({
+            room_type_id: Number(l.room_type_id),
+            quantity: Number(l.rooms) || 1,
+          })),
+        } : {}),
         guest_name: cform.guest_name || null,
         phone: cform.phone || null,
         email: cform.email || null,
@@ -668,14 +685,59 @@ const DraftsTab = ({ showToast }) => {
               </p>
             )}
             <div className="grid grid-cols-2 gap-3">
-              <div className="flex flex-col col-span-2"><label className="text-xs text-slate-400 mb-1">Room type</label>
-                <select value={cform.room_type_id} onChange={(e) => setCform({ ...cform, room_type_id: e.target.value })} className={inputCls}>
-                  {roomTypes.map((rt) => <option key={rt.room_type_id} value={rt.room_type_id}>{rt.name}</option>)}
-                </select>
-                {confirmFor.room_type_hint && <span className="text-xs text-slate-500 mt-1">OTA room: “{confirmFor.room_type_hint}”</span>}
-              </div>
-              <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Quantity</label>
-                <input type="number" min="1" max="5" value={cform.quantity} onChange={(e) => setCform({ ...cform, quantity: e.target.value })} className={inputCls} /></div>
+              {/* F-18: a voucher whose rooms are different types gets one row per type, read from
+                  its own "Room wise Payment Breakup". Otherwise the single picker, as before. */}
+              {(cform.room_lines || []).length > 0 ? (
+                <div className="flex flex-col col-span-2">
+                  <label className="text-xs text-slate-400 mb-1">
+                    Rooms on this voucher <span className="text-slate-500">({cform.room_lines.length} types)</span>
+                  </label>
+                  <div className="space-y-2">
+                    {cform.room_lines.map((ln, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <span className="text-xs text-slate-500 w-40 shrink-0 truncate" title={ln.hint}>
+                          {ln.rooms} × “{ln.hint}”
+                        </span>
+                        <select
+                          value={ln.room_type_id}
+                          onChange={(e) => {
+                            const next = [...cform.room_lines];
+                            next[i] = { ...next[i], room_type_id: e.target.value };
+                            setCform({ ...cform, room_lines: next });
+                          }}
+                          className={inputCls}
+                        >
+                          {roomTypes.map((rt) => <option key={rt.room_type_id} value={rt.room_type_id}>{rt.name}</option>)}
+                        </select>
+                        <input
+                          type="number" min="1" max="10" value={ln.rooms}
+                          onChange={(e) => {
+                            const next = [...cform.room_lines];
+                            next[i] = { ...next[i], rooms: e.target.value };
+                            setCform({ ...cform, room_lines: next });
+                          }}
+                          className={`${inputCls} w-20`}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <span className="text-xs text-slate-500 mt-1">
+                    Map each of the voucher's room types to one of yours. The total must price within
+                    tolerance of the voucher, or the confirm is refused.
+                  </span>
+                </div>
+              ) : (
+                <>
+                  <div className="flex flex-col col-span-2"><label className="text-xs text-slate-400 mb-1">Room type</label>
+                    <select value={cform.room_type_id} onChange={(e) => setCform({ ...cform, room_type_id: e.target.value })} className={inputCls}>
+                      {roomTypes.map((rt) => <option key={rt.room_type_id} value={rt.room_type_id}>{rt.name}</option>)}
+                    </select>
+                    {confirmFor.room_type_hint && <span className="text-xs text-slate-500 mt-1">OTA room: “{confirmFor.room_type_hint}”</span>}
+                  </div>
+                  <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Quantity</label>
+                    <input type="number" min="1" max="5" value={cform.quantity} onChange={(e) => setCform({ ...cform, quantity: e.target.value })} className={inputCls} /></div>
+                </>
+              )}
               <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Adults</label>
                 <input type="number" min="1" max="40" value={cform.adults} onChange={(e) => setCform({ ...cform, adults: e.target.value })} className={inputCls} /></div>
               <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Children</label>

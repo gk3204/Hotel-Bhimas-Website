@@ -17,6 +17,7 @@ from scripts.expire_booking_jobs import expire_pending_bookings
 from routers.payments import process_gateway_refund
 from routers.promotions import get_active_promotions, best_promotion_for_item
 from utils.email_service import send_admin_cancellation_email
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 # Request model for admin cancellation
 class AdminCancelRequest(BaseModel):
@@ -256,6 +257,9 @@ def create_booking(
         # 6️⃣ Create booking (without room assignment yet)
         booking = Booking(
             guest_id=guest.guest_id,
+            # F-01: the booking's OWN name, captured now. `guests.name` may be refreshed by a later
+            # booking on the same phone; this must not move with it.
+            guest_name=(data.guest_name or "").strip() or (guest.name if guest else None),
             check_in=data.check_in,
             check_in_time=data.check_in_time,
             check_out=data.check_out,
@@ -425,7 +429,7 @@ def read_all_bookings(
         room_types = [item.room_type.name for item in booking.booking_items]
         result.append({
             "booking_id": booking.booking_id,
-            "guest_name": booking.guest.name,
+            "guest_name": booking.display_guest_name,
             "room_types": ", ".join(room_types),
             "room_count": len(booking.booking_items),
             "check_in": booking.check_in,
@@ -531,7 +535,7 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
         "booking_id": booking.booking_id,
 
         "guest": {
-            "name": booking.guest.name,
+            "name": booking.display_guest_name,
             "phone": booking.guest.phone,
             "email": booking.guest.email,
         },
@@ -653,15 +657,17 @@ def admin_cancel_booking(
         booking.admin_cancelled_reason = request.reason
         booking.admin_notes = request.admin_notes
         booking.admin_cancelled_by = "admin"  # In production, get from JWT token
-        booking.admin_cancelled_at = datetime.now()
-        booking.cancelled_at = datetime.now()
+        # F-03: instants are UTC. routers/payments.py and services/ota_service.py already wrote
+        # this same column with utcnow(), so it held two clocks 5.5 h apart.
+        booking.admin_cancelled_at = clock.now_utc()
+        booking.cancelled_at = clock.now_utc()
         db.commit()
         
         # 6️⃣ Send notification email to guest
         try:
             send_admin_cancellation_email(
                 guest_email=booking.guest.email,
-                guest_name=booking.guest.name,
+                guest_name=booking.display_guest_name,
                 booking_ref=booking_id,
                 check_in=booking.check_in,
                 check_out=booking.check_out,

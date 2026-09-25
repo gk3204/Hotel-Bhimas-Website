@@ -27,6 +27,7 @@ from services import ota_service
 from utils import availability
 from utils.audit import write_audit
 from utils.auth_utils import require_admin, require_reception_or_admin
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -73,7 +74,7 @@ def _serialize(b: Booking) -> dict:
 def mark_no_show(db, booking: Booking, user, reason=None, client="desktop", automatic=False):
     """Shared by the endpoint and the night audit. Caller commits."""
     booking.status = "no_show"
-    booking.no_show_at = datetime.now()
+    booking.no_show_at = clock.now_utc()      # F-03: an instant, stored UTC
     write_audit(db, user, "booking.no_show", "booking", booking.booking_id,
                 before={"status": "confirmed"},
                 after={"status": "no_show", "reason": reason,

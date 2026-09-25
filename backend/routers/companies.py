@@ -567,7 +567,7 @@ def _cinvoice_payload(db: Session, cinv: CompanyInvoice) -> dict:
             if row.folio_id else None
         stays.append({
             "booking_id": row.booking_id,
-            "guest_name": booking.guest.name if booking and booking.guest else "—",
+            "guest_name": booking.display_guest_name if booking else "—",
             "check_in": f"{booking.check_in:%d-%m-%Y}" if booking else "",
             "check_out": f"{booking.check_out:%d-%m-%Y}" if booking else "",
             "invoice_no": invoice.invoice_no if invoice else "",

@@ -269,7 +269,7 @@ def transfer_folio_to_company(db: Session, folio: Folio, *, user=None,
         return None
 
     booking = db.query(Booking).filter(Booking.booking_id == folio.booking_id).first()
-    guest_name = booking.guest.name if booking and booking.guest else "Guest"
+    guest_name = (booking.display_guest_name if booking else "") or "Guest"
     stay = f"{booking.check_in:%d-%m-%Y} to {booking.check_out:%d-%m-%Y}" if booking else ""
 
     ledger = post_ledger(

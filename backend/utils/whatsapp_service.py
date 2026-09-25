@@ -205,6 +205,16 @@ def _body_params(order, params) -> list:
 
 def _send_meta(db, cfg, num, template, tpl, params, body, *, guest_id, booking_id, client_ref,
                sent_by=None, commit=True):
+    # F-06: the last line before the request actually leaves. `services/notify.safe_mode()` already
+    # refuses at the top of the stack, but the owner-OTP path and a few jobs call this service
+    # directly - and this function is where the network call is, so this is where the guarantee
+    # belongs. The message is still LOGGED, so a test can see exactly what would have gone out.
+    import os
+    if (os.getenv("SAFE_MODE", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+        logger.warning("SAFE_MODE: not sending WhatsApp %r to %s", template, num)
+        return _log_row(db, "out", num, template, params, body, status="failed", provider="meta",
+                        guest_id=guest_id, booking_id=booking_id, client_ref=client_ref,
+                        sent_by=sent_by, error="SAFE_MODE - not sent", commit=commit)
     row = _log_row(db, "out", num, template, params, body, status="queued", provider="meta",
                    guest_id=guest_id, booking_id=booking_id, client_ref=client_ref,
                    sent_by=sent_by, commit=False)

@@ -26,6 +26,7 @@ from sqlalchemy import func
 
 from models import Company, CompanyLedger, Payment
 from routers.reports import sales_by_date
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 
 def _tdate(iso: str) -> str:
@@ -35,12 +36,12 @@ def _tdate(iso: str) -> str:
 
 def _payments_by_day_method(db, dfrom, dto):
     """{(date_iso, method): amount} for paid payments in range (method None -> 'other')."""
-    rows = (db.query(func.date(Payment.created_at), Payment.method,
+    rows = (db.query(clock.business_date_sql(Payment.created_at), Payment.method,
                      func.coalesce(func.sum(Payment.amount), 0))
             .filter(Payment.status == "paid",
-                    func.date(Payment.created_at) >= dfrom,
-                    func.date(Payment.created_at) <= dto)
-            .group_by(func.date(Payment.created_at), Payment.method).all())
+                    clock.business_date_sql(Payment.created_at) >= dfrom,
+                    clock.business_date_sql(Payment.created_at) <= dto)
+            .group_by(clock.business_date_sql(Payment.created_at), Payment.method).all())
     out = {}
     for d, method, amt in rows:
         key = (str(d), (method or "other").lower())
@@ -59,13 +60,17 @@ def _company_receipts(db, dfrom, dto):
     Returns [(date_iso, company_name, method, amount)] with amount POSITIVE. Ledger payments are
     stored negative (they reduce what the company owes); the sign is flipped here so the receipt
     voucher reads like any other collection."""
-    rows = (db.query(func.date(CompanyLedger.created_at), Company.name, CompanyLedger.method,
+    _tally_start, _tally_end = clock.business_day_bounds(dfrom, dto)
+    rows = (db.query(clock.business_date_sql(CompanyLedger.created_at), Company.name, CompanyLedger.method,
                      func.coalesce(func.sum(CompanyLedger.amount), 0))
             .join(Company, Company.id == CompanyLedger.company_id)
             .filter(CompanyLedger.type == "payment",
-                    CompanyLedger.created_at >= datetime.combine(dfrom, datetime.min.time()),
-                    CompanyLedger.created_at < datetime.combine(dto, datetime.max.time()))
-            .group_by(func.date(CompanyLedger.created_at), Company.name, CompanyLedger.method)
+                    # F-03: created_at is UTC; the export is filed by BUSINESS month. A payment
+                    # taken at 01:00 IST on the 1st is 19:30 UTC on the last of the previous
+                    # month, and was being exported into the wrong month's books.
+                    CompanyLedger.created_at >= _tally_start,
+                    CompanyLedger.created_at < _tally_end)
+            .group_by(clock.business_date_sql(CompanyLedger.created_at), Company.name, CompanyLedger.method)
             .all())
     out = []
     for d, name, method, amt in rows:

@@ -24,6 +24,7 @@ import json
 import logging
 from copy import deepcopy
 from datetime import datetime, timedelta
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -274,8 +275,8 @@ def stay_events_report(db, date_from, date_to, kind: str | None = None) -> dict:
     q = (db.query(StayEvent, Booking, Guest)
            .join(Booking, Booking.booking_id == StayEvent.booking_id)
            .outerjoin(Guest, Guest.guest_id == Booking.guest_id)
-           .filter(func.date(StayEvent.created_at) >= date_from,
-                   func.date(StayEvent.created_at) <= date_to))
+           .filter(clock.business_date_sql(StayEvent.created_at) >= date_from,
+                   clock.business_date_sql(StayEvent.created_at) <= date_to))
     if kind:
         q = q.filter(StayEvent.kind == kind)
     rows, totals = [], {"early_checkin": {"count": 0, "charged": 0.0},

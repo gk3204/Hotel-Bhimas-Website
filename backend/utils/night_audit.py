@@ -20,6 +20,7 @@ from datetime import date, datetime, timedelta
 from models import Booking, CashShift, DayCloseSummary, Folio
 from sqlalchemy import func, text
 from utils.settings import (get_reports_config, set_setting, BUSINESS_DATE_KEY)
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,7 @@ def compute_day_close(db, business_date, folios_posted=0, generated_by="schedule
 
     # Cash expected/variance = sum across shifts CLOSED on the business date.
     shifts = (db.query(CashShift).filter(CashShift.status == "closed",
-                                         func.date(CashShift.closed_at) == business_date).all())
+                                         clock.business_date_sql(CashShift.closed_at) == business_date).all())
     cash_expected = round(sum(float(s.expected_cash or 0) for s in shifts), 2)
     cash_variance = round(sum(float(s.variance or 0) for s in shifts), 2)
 

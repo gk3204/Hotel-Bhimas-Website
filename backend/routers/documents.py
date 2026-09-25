@@ -92,7 +92,10 @@ def _row(type_, number, when, booking, guest, amount, status, pdf_url, room=None
         "number": number,
         "date": (when.isoformat() if isinstance(when, (datetime, date)) else when),
         "booking_id": booking.booking_id if booking else None,
-        "guest": guest.name if guest else (extra or {}).get("guest"),
+        # F-01: the document index lists invoices, slips and receipts - all of which print the
+        # name the booking was made in, so the list must agree with them.
+        "guest": (booking.display_guest_name if booking else None)
+                 or (guest.name if guest else None) or (extra or {}).get("guest"),
         "phone": guest.phone if guest else None,
         "room": room,
         "amount": round(float(amount), 2) if amount is not None else None,

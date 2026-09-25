@@ -40,6 +40,7 @@ from utils.housekeeping import (set_hk_status, cleaning_card_state, active_clean
 from utils.settings import (HK_AUTO_INSPECT_KEY, get_fraud_config, get_housekeeping_config,
                             set_setting, validate_category)
 from routers.folio import _recompute
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -451,7 +452,7 @@ def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail="No outstanding cleaning card for this room")
 
     card.status = "erased"
-    card.erased_at = datetime.now()
+    card.erased_at = clock.now_utc()          # F-03: an instant, stored UTC
     card.erased_by = _resolve_user_id(db, user)
 
     # Auto-finish cleaning -> awaiting inspection. Deliberately leave Room.status == "cleaning"

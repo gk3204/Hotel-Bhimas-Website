@@ -232,6 +232,12 @@ class OtaSettlementCreate(BaseModel):
     notes: Optional[str] = Field(None, max_length=500)
 
 
+class OtaDraftRoomLine(BaseModel):
+    """One room type on a mixed-type OTA voucher (F-18): which PMS type, and how many rooms of it."""
+    room_type_id: int = Field(..., gt=0)
+    quantity: int = Field(1, ge=1, le=10)
+
+
 class OtaDraftConfirm(BaseModel):
     """Confirm an email-parsed OTA draft into a real booking. The PMS room type + quantity must be
     chosen (the OTA's room name can't be reliably auto-mapped). Guest/date/commission fields default
@@ -252,6 +258,11 @@ class OtaDraftConfirm(BaseModel):
     # manual path did not — and that is exactly where a human is guessing the room count. A mixed-type
     # voucher (4 rooms across 3 types) cannot be expressed as one type x quantity, and confirming one
     # anyway billed Rs 7,350 against a voucher of Rs 6,300 with no warning.
+    # F-18: a voucher whose rooms are DIFFERENT types (1 Four Bed + 1 Double Deluxe + 2 Triple Bed)
+    # cannot be expressed as one `room_type_id` x `quantity`. When these are supplied they replace
+    # that pair, one booking item per line. `room_type_id`/`quantity` above stay required so an old
+    # client keeps working unchanged.
+    room_lines: Optional[List[OtaDraftRoomLine]] = None
     accept_price_variance: bool = False
 
 
@@ -361,6 +372,9 @@ class GuestKycEntry(BaseModel):
     # send that room its own in-room portal link instead of everything going to the payer.
     room_id: Optional[int] = Field(None, gt=0)
     phone: Optional[str] = Field(None, min_length=7, max_length=20)
+    # F-07: the police register has an Address column that only the CRM screen ever filled, so
+    # every walk-in filed a dash. Captured here, where the ID is already being taken.
+    address: Optional[str] = Field(None, max_length=300)
 
     # v5n: an ID is no longer demanded of every adult HERE. How many guests must be identified is a
     # property policy (`checkin_id_scope`: lead / per_room / all_adults) that only the endpoint can
@@ -395,6 +409,10 @@ class CheckinRequest(BaseModel):
     assignments: list[CheckinAssignment] = Field(..., min_length=1, max_length=10)
     id_type: str = Field(..., pattern=CATEGORY_SLUG_RE)   # editable list; checked at the endpoint
     id_number: str = Field(..., min_length=4, max_length=30)  # stored masked; raw value never persisted
+    # F-07: the lead guest's address for the police register. Optional here deliberately - whether
+    # the local station requires it is the owner's call, and refusing a check-in over it would be a
+    # worse failure than a blank column.
+    address: Optional[str] = Field(None, max_length=300)
     # OTA bookings mask the guest phone/email (a placeholder is stamped at confirm), so the desk
     # captures the real contact when the guest arrives. Optional — only updates the guest when sent.
     phone: Optional[str] = Field(None, min_length=7, max_length=15)

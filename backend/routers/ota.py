@@ -191,6 +191,19 @@ def list_drafts(status: str = Query(None),
     return {"rows": rows}
 
 
+def _confirm_lines(data) -> list:
+    """The room lines this confirm is for (F-18).
+
+    A mixed-type voucher supplies one line per room type; everything else is the single
+    `room_type_id` x `quantity` pair the form has always sent. One helper so the price guard and the
+    booking itself can never disagree about what is being confirmed.
+    """
+    lines = getattr(data, "room_lines", None)
+    if lines:
+        return [{"room_type_id": ln.room_type_id, "quantity": ln.quantity} for ln in lines]
+    return [{"room_type_id": data.room_type_id, "quantity": data.quantity}]
+
+
 @router.post("/drafts/{draft_id}/confirm")
 def confirm_draft(draft_id: int, data: OtaDraftConfirm,
                   db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
@@ -234,8 +247,11 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
         tol = float(_st.get_ota_config(db).get("max_variance_percent") or 0)
         if tol > 0:
             try:
-                quoted = ota_service._quote_rooms_total(
-                    db, data.room_type_id, data.quantity, check_in, check_out, d.channel_code)
+                # F-18: price every line of a mixed-type voucher, not just the first.
+                quoted = sum(
+                    ota_service._quote_rooms_total(db, ln["room_type_id"], ln["quantity"],
+                                                   check_in, check_out, d.channel_code) or 0
+                    for ln in _confirm_lines(data))
             except Exception as e:                       # pricing must never hard-fail a confirm
                 logger.debug(f"OTA confirm variance check skipped for draft {d.id}: {e}")
                 quoted = None
@@ -252,7 +268,8 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
                                 f"total. Re-send with accept_price_variance=true to override."))
 
     booking_req = DeskBookingCreate(
-        rooms=[BookingItemCreate(room_type_id=data.room_type_id, quantity=data.quantity)],
+        rooms=[BookingItemCreate(room_type_id=ln["room_type_id"], quantity=ln["quantity"])
+               for ln in _confirm_lines(data)],
         guest_name=guest_name,
         phone=phone,
         email=(data.email or d.email or None),

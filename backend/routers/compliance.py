@@ -29,6 +29,7 @@ from utils.settings import (COMPLIANCE_EDITABLE_KEYS, get_compliance_config, set
 from utils.tally_export import build_accounting_csv, build_tally_xml
 # Reuse the Reports export/dispatch + range helpers (single source of truth for totals).
 from routers.reports import (_export_or_json, _meta, _range, in_house_data)
+from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,7 @@ def police_register(from_: str = Query(None, alias="from"), to: str = Query(None
         rec = {
             "check_in": str(b.check_in), "check_out": str(b.check_out),
             "room": _rooms_for_booking(db, b.booking_id),
-            "guest_name": guest.name if guest else "—",
+            "guest_name": b.display_guest_name or "—",   # F-01: the name the STAY was registered in
             "phone": guest.phone if guest else "—",
             "address": (profile.address if profile else None) or "—",
             "id_type": (guest.id_type if guest else None) or "—",
@@ -162,7 +163,7 @@ def form_c(from_: str = Query(None, alias="from"), to: str = Query(None),
         if not (profile and profile.is_foreign_national):
             continue
         rec = {
-            "guest_name": guest.name if guest else "—",
+            "guest_name": b.display_guest_name or "—",   # F-01: the name the STAY was registered in
             "nationality": profile.nationality or "—",
             "passport_number": profile.passport_number_masked or "—",
             "passport_place_of_issue": profile.passport_place_of_issue or "—",
@@ -225,9 +226,12 @@ def id_access_audit(from_: str = Query(None, alias="from"), to: str = Query(None
                     db: Session = Depends(get_db), user=Depends(require_admin)):
     """Who viewed a guest's ID document / masked ID number, and when (audit action 'id.*')."""
     dfrom, dto = _range(from_, to)
+    # F-03: audit_logs.created_at is a DB default, so UTC. Filtering it with naive local midnights
+    # shifted this report - who looked at a guest's ID, and when - by 5.5 h.
+    _audit_start, _audit_end = clock.business_day_bounds(dfrom, dto)
     q = (db.query(AuditLog).filter(AuditLog.action.like("id.%"),
-                                   AuditLog.created_at >= datetime.combine(dfrom, dtime.min),
-                                   AuditLog.created_at <= datetime.combine(dto, dtime.max)))
+                                   AuditLog.created_at >= _audit_start,
+                                   AuditLog.created_at < _audit_end))
     if guest_id is not None:
         q = q.filter(AuditLog.entity_type == "guest", AuditLog.entity_id == str(guest_id))
     logs = q.order_by(AuditLog.created_at.desc()).limit(1000).all()

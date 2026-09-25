@@ -79,6 +79,12 @@ class Booking(Base):
     __tablename__ = "bookings"
     booking_id = Column(Integer, primary_key=True, index=True)
     guest_id = Column(Integer, ForeignKey("guests.guest_id"), index=True)
+    # F-01 (migration 047): the name THIS booking was made in, captured once at creation.
+    # Guests are matched by phone so history and loyalty attach to one customer, and that match used
+    # to refresh `guests.name` — which every document read. One phone per family or company driver is
+    # normal at a desk, so a later booking renamed the earlier one, and with it a tax invoice already
+    # issued, the registration slip and the police register. Read it through `display_guest_name`.
+    guest_name = Column(String(100), nullable=True)
     check_in = Column(Date, nullable=False, index=True)
     check_in_time = Column(Time, nullable=True)  # Guest's expected arrival time
     check_out = Column(Date, nullable=False, index=True)
@@ -164,6 +170,18 @@ class Booking(Base):
 
     guest = relationship("Guest")
     booking_items = relationship("BookingItem", cascade="all, delete-orphan", back_populates="booking")
+
+    @property
+    def display_guest_name(self) -> str:
+        """The name to print for THIS booking (F-01).
+
+        The snapshot when there is one; the live guest record otherwise, which is every row created
+        before migration 047 backfilled them. Use this for anything a guest or an inspector reads —
+        invoices, the registration slip, the police register, the board, the desk. The Guest
+        Directory and loyalty deliberately keep reading `guests.name`, which is the customer's
+        CURRENT best name: that split is the point of the column.
+        """
+        return (self.guest_name or (self.guest.name if self.guest else "") or "")
 
     # Composite index for date range queries
     __table_args__ = (
@@ -1031,6 +1049,11 @@ class OtaDraftBooking(Base):
     # v5r: how many ROOMS the voucher is for. Without this every OTA booking was created as one room
     # (quantity was hard-coded), so the rest of a 2-room reservation stayed on sale in the PMS.
     rooms = Column(Integer, nullable=True)
+    # F-18 (migration 047): the voucher's own per-room breakdown when it names MORE THAN ONE type,
+    # as JSON — [{"hint": "Four Bed Non-Ac", "rooms": 1}, ...]. Parsed from the "Room wise Payment
+    # Breakup" table, which is the only place a Go-MMT voucher states what each individual room is.
+    # NULL for an ordinary single-type voucher, which `room_type_hint` + `rooms` already describe.
+    room_lines = Column(String, nullable=True)
     # v5r: why this draft is still pending. Auto-confirm failures used to go only to the log — and one
     # of them (a NameError) silently stopped EVERY masked-phone voucher from ever becoming a booking.
     last_error = Column(String, nullable=True)

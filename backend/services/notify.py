@@ -80,6 +80,16 @@ def whatsapp_really_delivers() -> bool:
     return whatsapp_service.is_configured()
 
 
+def safe_mode() -> bool:
+    """True when this process must not send anything to a real person (F-06).
+
+    Set `SAFE_MODE=true` in the environment - in `backend/.env.local`, or inline for one command -
+    whenever you run scripts or a local server against production-shaped credentials.
+    """
+    import os
+    return (os.getenv("SAFE_MODE", "") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def notify(db, *, template, params=None, to_phone=None, to_email=None, to_name=None,
            guest_id=None, booking_id=None, client_ref=None, commit=True,
            respect_optout=None):
@@ -88,6 +98,21 @@ def notify(db, *, template, params=None, to_phone=None, to_email=None, to_name=N
     Returns {"channel": "whatsapp"|"email"|"none", "ok": bool, "detail": str}.
     """
     params = params or {}
+
+    # F-06: the last gate before anything leaves the building.
+    #
+    # Running any script from this repo loads backend/.env, which holds LIVE WhatsApp, Mailjet,
+    # Razorpay and IMAP credentials. During the 2026-09-24 QA run a direct-DB script did exactly
+    # that and reached Meta's API; it was refused only because the local .env happens to carry
+    # Meta's TEST number. Mailjet has no such safety net and would have mailed a real guest.
+    #
+    # SAFE_MODE is read at call time, not at import, so a test harness can set it per process, and a
+    # deployment that never sets it behaves exactly as before.
+    if safe_mode():
+        logger.warning("SAFE_MODE: refusing to send %r to phone=%s email=%s",
+                       template, to_phone, to_email)
+        return {"channel": "none", "ok": False,
+                "detail": "SAFE_MODE is on - nothing is sent from this process."}
 
     # ---- 1. WhatsApp -----------------------------------------------------
     if to_phone and whatsapp_really_delivers():

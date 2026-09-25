@@ -1746,7 +1746,7 @@ def booking_pdf_payload(booking) -> dict:
     message. Read eagerly -- the online flow builds this before its session closes."""
     return {
         "booking_id": booking.booking_id,
-        "guest_name": booking.guest.name,
+        "guest_name": booking.display_guest_name,
         "guest_email": booking.guest.email,
         "guest_phone": booking.guest.phone,
         "check_in": booking.check_in,
