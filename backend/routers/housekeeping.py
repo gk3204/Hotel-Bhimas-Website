@@ -27,6 +27,7 @@ from models import (Booking, BookingItem, CardIssuance, Folio, FolioCharge, Hous
                     HousekeepingTask, Room, User)
 from schemas import (CleaningCardRequest, HousekeepingConfigUpdate, HousekeepingStatusUpdate,
                      InspectRequest, MinibarRestockRequest, TaskCompleteRequest)
+from utils import ordering
 from utils.auth_utils import (require_admin, require_housekeeper_or_admin,
                               require_reception_or_admin,
                               require_supervisor_or_admin, require_roles)
@@ -128,7 +129,8 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
     me = _resolve_user_id(db, user)
     rows = db.query(Room, HousekeepingStatus).outerjoin(
         HousekeepingStatus, Room.room_id == HousekeepingStatus.room_id,
-    ).filter(Room.is_active == True).order_by(Room.room_number).all()  # noqa: E712
+    ).filter(Room.is_active == True).order_by(  # noqa: E712
+        *ordering.room_number_key(Room.room_number)).all()
 
     # open task per room (pending/in_progress) + most-recent task per room (any status,
     # for the 'cleaned by' name), both newest-first / first-wins.

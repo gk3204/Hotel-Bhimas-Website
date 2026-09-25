@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Room, RoomType, Booking, BookingItem, CardIssuance, Guest, MaintenanceTicket
 from schemas import RoomCreate, RoomUpdate, RoomStatusUpdate, RoomActiveToggle
+from utils import ordering
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit
 
@@ -54,7 +55,7 @@ def _serialize(r: Room, type_names: dict | None = None) -> dict:
 # GET all rooms — reception (desktop room grid) + admin
 @router.get("/", dependencies=[Depends(require_reception_or_admin)])
 def list_rooms(db: Session = Depends(get_db)):
-    rooms = db.query(Room).order_by(Room.room_number).all()
+    rooms = db.query(Room).order_by(*ordering.room_number_key(Room.room_number)).all()
     names = _type_names(db)
     return [_serialize(r, names) for r in rooms]
 

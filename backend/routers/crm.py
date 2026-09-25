@@ -30,6 +30,7 @@ from models import (Guest, GuestProfile, Booking, BookingItem, Payment, Folio,
                     Room, RoomType, MaintenanceTicket, LoyaltyLedger, PreArrivalRegistration)
 from schemas import (GuestProfileUpdate, VipUpdate, BlacklistUpdate, LoyaltyRedeem,
                      PreArrivalCreate, PreArrivalSubmit, FolioDiscountRequest)
+from utils import ordering
 from utils.auth_utils import require_reception_or_admin, require_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.settings import get_crm_config, set_setting, get_setting, validate_category
@@ -297,6 +298,7 @@ def match_guest_endpoint(phone: str | None = Query(None), id_number: str | None 
 @router.get("/guests", dependencies=[Depends(require_reception_or_admin)])
 def list_guests(q: str | None = Query(None), vip: bool | None = Query(None),
                 blacklist: bool | None = Query(None), limit: int = Query(50, le=200),
+                offset: int = Query(0, ge=0),
                 db: Session = Depends(get_db)):
     """Guest directory search (name/phone/email) with VIP/blacklist segment filters."""
     query = db.query(Guest).outerjoin(GuestProfile, GuestProfile.guest_id == Guest.guest_id)
@@ -308,8 +310,19 @@ def list_guests(q: str | None = Query(None), vip: bool | None = Query(None),
         query = query.filter(GuestProfile.vip == True)  # noqa: E712
     if blacklist is True:
         query = query.filter(GuestProfile.blacklist == True)  # noqa: E712
-    guests = query.order_by(Guest.guest_id.desc()).limit(limit).all()
-    return {"total": len(guests),
+    # v5s: by NAME — it used to come back newest-id-first, which is not a directory.
+    #
+    # And it now PAGES rather than silently truncating. "Sorted A-Z" is a lie when the server has
+    # already cut the result to whichever 50 rows it felt like returning, but the fix is not simply a
+    # bigger cap: _guest_dict runs ~4 queries per guest (profile, bookings, paid sum, refund sum), so
+    # returning all 176 guests at once is ~700 queries and a directory that hangs. Ordering server-side
+    # + offset paging keeps every page cheap AND keeps A-Z true across the whole table, which needs the
+    # ORDER BY to be total — hence guest_id after the name.
+    matched = query.count()
+    guests = (query.order_by(*ordering.guest_name_key(Guest.name), Guest.guest_id)
+              .offset(offset).limit(limit).all())
+    return {"total": len(guests), "matched": matched, "offset": offset, "limit": limit,
+            "has_more": offset + len(guests) < matched,
             "data": [_guest_dict(db, g) for g in guests]}
 
 

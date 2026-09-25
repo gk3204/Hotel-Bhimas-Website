@@ -19,6 +19,7 @@ from sqlalchemy.orm import Session
 
 from models import (Booking, BookingItem, Folio, FolioCharge, Guest, GuestRequest,
                     InvoiceCounter, MenuItem, Room, StockItem)
+from utils import ordering
 from utils.audit import _resolve_user_id
 
 logger = logging.getLogger(__name__)
@@ -276,7 +277,7 @@ def in_house_rooms(db: Session) -> list:
          .join(Room, Room.room_id == BookingItem.room_id)
          .outerjoin(Guest, Guest.guest_id == Booking.guest_id)
          .filter(Booking.status == "checked_in", BookingItem.room_id.isnot(None))
-         .order_by(Room.room_number))
+         .order_by(*ordering.room_number_key(Room.room_number)))
     for booking, _item, room, guest in q.all():
         folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
         rows.append({

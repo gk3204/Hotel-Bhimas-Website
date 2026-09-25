@@ -339,6 +339,8 @@ def read_all_bookings(
     q: str | None = None,
     skip: int = 0,
     limit: int = 15,
+    sort: str | None = None,
+    dir: str | None = None,
     db: Session = Depends(get_db)
 ):
     # 🔒 Clean up expired bookings before fetching
@@ -371,13 +373,39 @@ def read_all_bookings(
 
     total_count = query.count()
 
+    # v5s: sortable server-side, because this list is PAGED (15 rows). The admin screen had
+    # clickable headers that sorted only the rows already on screen — and in fact sorted nothing at
+    # all, since the sort state was missing from the reload effect's dependencies. "Sort by amount"
+    # has to mean the highest in the hotel, not the highest of the fifteen rows you can see.
+    #
+    # `sort` is matched against this map, never interpolated — the same whitelist discipline the
+    # settings module uses for category slugs.
+    SORTABLE = {
+        "booking_id": Booking.booking_id,
+        "guest": Guest.name,
+        "phone": Guest.phone,
+        "check_in": Booking.check_in,
+        "check_out": Booking.check_out,
+        "status": Booking.status,
+        "source": Booking.booking_source,
+        "amount": Booking.grand_total,
+    }
+    col = SORTABLE.get((sort or "").strip().lower())
+    descending = (dir or "desc").strip().lower() != "asc"
+    if col is None:
+        # Default: newest arrival first, which is what the screen has always opened with.
+        order = [Booking.check_in.desc(), Booking.booking_id.desc()]
+    else:
+        primary = col.desc() if descending else col.asc()
+        # booking_id LAST and always: without a unique final key, OFFSET paging over a non-unique
+        # sort (every status, every date, every amount that repeats) can show a row on two pages or
+        # skip it entirely — the executor is free to order equal keys differently per query.
+        order = [primary, Booking.booking_id.desc()]
+
     bookings = (
         query
         .options(joinedload(Booking.booking_items).joinedload(BookingItem.room_type))
-        # v5s: booking_id breaks the tie. check_in is not unique — several stays share an arrival
-        # date — and OFFSET paging over a non-unique sort can show a row on two pages or skip it
-        # entirely, because the executor is free to order equal keys differently per query.
-        .order_by(Booking.check_in.desc(), Booking.booking_id.desc())
+        .order_by(*order)
         .offset(skip)
         .limit(limit)
         .all()
@@ -542,7 +570,7 @@ def bookings_by_date(
     bookings = db.query(Booking).filter(
         Booking.check_in < to_date,
         Booking.check_out > from_date
-    ).all()
+    ).order_by(Booking.check_in, Booking.booking_id).all()   # v5s: was unordered
 
     return bookings
 
@@ -553,7 +581,7 @@ def bookings_by_status(status: str, db: Session = Depends(get_db)):
     
     bookings = db.query(Booking).filter(
         Booking.status == status
-    ).all()
+    ).order_by(Booking.check_in.desc(), Booking.booking_id.desc()).all()   # v5s
 
     return bookings
 

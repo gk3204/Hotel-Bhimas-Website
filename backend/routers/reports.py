@@ -832,7 +832,9 @@ def occupancy_analysis_data(db, as_on):
     total_rev = round(sum(r["net"] for r in rows), 2)
     return {
         "as_on": str(as_on),
-        "rooms": sorted(rows, key=lambda x: (x["floor"], x["room_no"])),
+        # v5s: room_no is a text label, so this sorted 10 before 9 within a floor.
+        "rooms": sorted(rows, key=lambda x: (x["floor"],
+                                             ordering.room_number_sort_key(x["room_no"]))),
         "floor_summary": [floor_summary[f] for f in sorted(floor_summary)],
         "by_source": _summarise(seg_acc),
         "by_type": _summarise(type_acc),
@@ -1129,7 +1131,8 @@ def room_service_by_room_data(db, dfrom, dto):
         g["subtotal"] += float(fc.amount or 0)
         g["qty"] += float(fc.qty or 0)
     rows = []
-    for key in sorted(groups, key=lambda k: (k[0], k[1])):
+    # v5s: k[0] is the room label — numerically, so room 9 precedes room 10.
+    for key in sorted(groups, key=lambda k: (ordering.room_number_sort_key(k[0]), k[1])):
         g = groups[key]
         items = [{"item": n, "qty": round(v["qty"], 2), "amount": round(v["amount"], 2)}
                  for n, v in sorted(g["items"].items(), key=lambda x: -x[1]["amount"])]

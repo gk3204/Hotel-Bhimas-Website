@@ -4,6 +4,7 @@ from sqlalchemy import and_, func
 from database import SessionLocal
 from models import RoomTypeAvailability, RoomType, Booking, BookingItem
 from schemas import AvailabilityBlockCreate
+from utils import ordering
 from utils.auth_utils import require_reception_or_admin
 from utils.booking_cleanup import expire_pending_bookings
 from utils.availability import booked_qty, out_of_service_count
@@ -91,9 +92,10 @@ def get_blocked_dates(
     room_type_id: int,
     db: Session = Depends(get_db)
 ):
+    # v5s: blocked dates read chronologically; they were unordered.
     return db.query(RoomTypeAvailability).filter(
         RoomTypeAvailability.room_type_id == room_type_id
-    ).all()
+    ).order_by(RoomTypeAvailability.date).all()
 
 
 # ✅ CHECK AVAILABLE ROOMS FOR DATE RANGE

@@ -7,6 +7,7 @@ from database import SessionLocal
 from models import RoomType, RatePlan, TravelAgent
 from schemas import RoomTypeCreate, RoomTypeUpdate, RoomTypeUpdateDetails, \
     RatePlanCreate, RatePlanUpdate
+from utils import ordering
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit
 from utils.rate_engine import quote_stay
@@ -31,7 +32,9 @@ def get_room_types(website_only: bool = Query(False), db: Session = Depends(get_
     q = db.query(RoomType)
     if website_only:
         q = q.filter(RoomType.is_active == True, RoomType.show_on_website == True)  # noqa: E712
-    return q.all()
+    # v5s: this had NO ordering, on the list the public site, the admin portal and the desk all
+    # read — three frontend files had each grown their own sort-by-id to paper over it.
+    return q.order_by(*ordering.name_key(RoomType.name)).all()
 
 # CREATE room type
 @router.post("/")

@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, joinedload
 from database import SessionLocal
 from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, BookingItem, \
     Folio, FolioCharge, CardIssuance, TravelAgent, Company, BookingGuest, StayEvent
+from utils import ordering
 from utils import arrival_rules
 from utils import secure_id_store
 from utils import availability
@@ -2754,7 +2755,7 @@ def _free_rooms_of_type(db, room_type_id: int, exclude_room_ids=()) -> list:
               .filter(Room.room_type_id == room_type_id,
                       Room.is_active == True,               # noqa: E712
                       Room.status == "vacant")
-              .order_by(Room.room_number).all())
+              .order_by(*ordering.room_number_key(Room.room_number)).all())
     out = []
     for r in rows:
         if r.room_id in exclude_room_ids:
@@ -3058,6 +3059,8 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
                         "active_cards": _active_cards(db, room.room_id),
                         "lock_type": room.lock_type,   # key rooms skip card read/erase at checkout
                     })
+        # v5s: a stay's own rooms read ascending ("9, 10", never "10, 9").
+        rooms.sort(key=lambda r: ordering.room_number_sort_key(r["room_number"]))
         inhouse.append({
             "booking_id": b.booking_id,
             "guest_id": b.guest_id,
@@ -3117,7 +3120,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
     ).filter(
         Room.is_active == True,  # noqa: E712
         Room.status == "vacant",
-    ).order_by(Room.room_number).all()]
+    ).order_by(*ordering.room_number_key(Room.room_number)).all()]
 
     # prompt 13: every active room + its housekeeping status, for the desktop's
     # READ-ONLY housekeeping panel (cleaning/dirty rooms are in neither vacant_rooms
@@ -3125,7 +3128,8 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
     rooms_hk = []
     for r, hk in db.query(Room, HousekeepingStatus).outerjoin(
         HousekeepingStatus, Room.room_id == HousekeepingStatus.room_id,
-    ).filter(Room.is_active == True).order_by(Room.room_number).all():  # noqa: E712
+    ).filter(Room.is_active == True).order_by(  # noqa: E712
+            *ordering.room_number_key(Room.room_number)).all():
         rooms_hk.append({
             "room_id": r.room_id,
             "room_number": r.room_number,
@@ -3139,6 +3143,11 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "cleaning_card": cleaning_card_state(db, r),
         })
 
+    # v5s, owner's explicit choice: the In-house board reads by ROOM NUMBER (Arrivals and
+    # Departures stay on time order — an arrivals board sorted by room is unusable at the desk, and
+    # an arrival has no room assigned until the wizard gives it one).
+    inhouse.sort(key=lambda r: ordering.room_number_sort_key(
+        (r["rooms"][0]["room_number"] if r.get("rooms") else "")))
     return {"date": str(today), "arrivals": arrivals, "upcoming": upcoming, "inhouse": inhouse,
             "vacant_rooms": vacant_rooms, "rooms": rooms_hk,
             # v5n: the front-desk policy the wizard must enforce (how many IDs, scans or not). Sent

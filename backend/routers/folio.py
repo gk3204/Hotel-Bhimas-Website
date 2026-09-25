@@ -33,6 +33,7 @@ from models import Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, 
 from schemas import (FolioBillToRequest, FolioChargeCreate, FolioDiscountRequest, FolioOpenRequest,
                      FolioVoidRequest, InvoiceBuyerRequest)
 from services import company_service, room_posting
+from utils import ordering
 from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import get_current_user, require_admin, require_reception_or_admin
@@ -240,12 +241,17 @@ def _invoice_totals(charges):
 
 
 def _room_numbers(booking) -> list:
-    """Physical room numbers on a booking, in order. A booking always reaches its rooms via
+    """Physical room numbers on a booking, in ROOM ORDER. A booking always reaches its rooms via
     BookingItem.room_id (there is no Booking->Room relationship), and a room is only assigned
-    at check-in — so a confirmed-but-not-arrived stay legitimately has none."""
+    at check-in — so a confirmed-but-not-arrived stay legitimately has none.
+
+    v5s: "in order" used to mean booking-item order, so a two-room stay could read "10, 9". Every
+    room list on the folio screen and the folio detail comes through here, so ordering it once here
+    orders all of them.
+    """
     if not booking:
         return []
-    return [bi.room.room_number for bi in booking.booking_items if bi.room]
+    return ordering.room_labels(bi.room.room_number for bi in booking.booking_items if bi.room)
 
 
 def _folio_detail(db: Session, folio: Folio):
@@ -350,6 +356,12 @@ def list_folios(db: Session = Depends(get_db), user=Depends(require_reception_or
     if scope == "inhouse":
         rows = (q.filter(Booking.status == "checked_in")
                  .order_by(Booking.check_in, Booking.booking_id).all())
+        # v5s, owner's explicit choice: the in-house list reads by ROOM NUMBER, not arrival time.
+        # Sorted here rather than in SQL because the rooms arrive through booking_items (already
+        # joinedload-ed above) and a stay may hold several — it sorts on its lowest room. A stay
+        # with no room yet assigned sorts last.
+        rows.sort(key=lambda r: ordering.room_number_sort_key(
+            (_room_numbers(r[0]) or [""])[0]))
     elif scope == "history":
         rows = (q.filter(Booking.status == "checked_out")
                  .order_by(Booking.check_out.desc(), Booking.booking_id.desc())

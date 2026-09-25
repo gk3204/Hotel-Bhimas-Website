@@ -6,6 +6,7 @@ import logging
 from database import SessionLocal
 from models import Promotion, RoomType
 from schemas import PromotionCreate, PromotionUpdate, PromotionToggle
+from utils import ordering
 from utils.auth_utils import require_admin
 
 logger = logging.getLogger(__name__)
@@ -29,8 +30,13 @@ def get_db():
 # ============================================================
 
 def get_active_promotions(db: Session):
-    """All promotions with is_active=True (date window is evaluated per-booking)."""
-    return db.query(Promotion).filter(Promotion.is_active == True).all()
+    """All promotions with is_active=True (date window is evaluated per-booking).
+
+    v5s: ordered by code — this list is rendered on the PUBLIC booking page, where an order that
+    changes between page loads is the most visible kind of unordered list there is.
+    """
+    return (db.query(Promotion).filter(Promotion.is_active == True)  # noqa: E712
+            .order_by(*ordering.name_key(Promotion.name), Promotion.promotion_id).all())
 
 
 def _within_window(promo: Promotion, on_date: date) -> bool:

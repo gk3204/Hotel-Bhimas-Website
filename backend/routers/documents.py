@@ -23,6 +23,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import (Booking, BookingItem, CashShift, Company, CompanyInvoice, Folio, Guest, Invoice,
                     Payment, Room, User)
+from utils import ordering
 from utils.auth_utils import require_admin
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
@@ -60,7 +61,8 @@ def _room_labels(db: Session, booking_ids) -> dict:
     rows = (db.query(BookingItem.booking_id, Room.room_number)
             .join(Room, Room.room_id == BookingItem.room_id)
             .filter(BookingItem.booking_id.in_(ids))
-            .order_by(BookingItem.booking_id, Room.room_number).all())
+            .order_by(BookingItem.booking_id,
+                      *ordering.room_number_key(Room.room_number)).all())
     out = {}
     for bid, num in rows:
         out.setdefault(bid, num)

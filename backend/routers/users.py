@@ -4,6 +4,7 @@ from database import SessionLocal
 from models import User
 from schemas import UserCreate, UserUpdate
 from passlib.context import CryptContext
+from utils import ordering
 from utils.auth_utils import require_admin
 router = APIRouter(
     prefix="/users",
@@ -27,7 +28,8 @@ def hash_password(password: str):
 # ✅ GET all users
 @router.get("/",dependencies=[Depends(require_admin)])
 def get_users(db: Session = Depends(get_db)):
-    return db.query(User).all()
+    # v5s: was unordered. Role first, then username — the same order the roster screen uses.
+    return db.query(User).order_by(User.role, *ordering.name_key(User.username)).all()
 
 
 # ✅ CREATE user
