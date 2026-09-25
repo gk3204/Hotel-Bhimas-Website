@@ -88,6 +88,24 @@ def ota_placeholder(ota_booking_id) -> str:
     path called it anyway and raised NameError on every masked-phone voucher, and a broad `except` logged
     that as a harmless "skipped draft". No OTA booking was ever created. Keeping the helper here, with
     both callers importing it, is what makes that class of mistake impossible.
+
+    F-05: the placeholder now always starts with a **0**, which no Indian mobile does, so the SHAPE
+    test in `is_ota_placeholder` recognises it on its own. The old form was the raw last ten digits,
+    and any reference ending 6-9 therefore produced a perfectly valid mobile belonging to a real
+    person — one the system then sent a booking confirmation to. Uniqueness is unchanged: the same
+    nine digits still distinguish one OTA booking from another.
+    """
+    d = digits(ota_booking_id)
+    tail = (d[-9:] if len(d) >= 9 else d).rjust(9, "0")
+    return "0" + tail
+
+
+def _legacy_ota_placeholder(ota_booking_id) -> str:
+    """The pre-F-05 placeholder: the raw last ten digits of the reference.
+
+    Kept so rows stamped before the change are still recognised as placeholders — they are the ones
+    that look like real mobiles, so the shape test cannot catch them and this exact match is the only
+    thing that can.
     """
     d = digits(ota_booking_id)
     return (d[-10:] if len(d) >= 10 else d.rjust(10, "0")) or "0000000000"
@@ -96,13 +114,16 @@ def ota_placeholder(ota_booking_id) -> str:
 def is_ota_placeholder(phone, ota_booking_id=None) -> bool:
     """True when `phone` is a stamped placeholder rather than a real number.
 
-    Checks the exact placeholder for this booking when the OTA id is known, and otherwise falls back to
-    the shape: a 10-digit number that is not a valid mobile (zero-padded, or starting 0-5) is a
-    placeholder for practical purposes — `is_valid_mobile` is the same test the desk shows a warning on.
+    Checks the exact placeholder for this booking when the OTA id is known — in BOTH the current and
+    the legacy spelling, because the legacy one is indistinguishable from a real mobile by shape and
+    is exactly the case that matters. Otherwise falls back to the shape: a 10-digit number that is not
+    a valid mobile (zero-padded, or starting 0-5) is a placeholder for practical purposes —
+    `is_valid_mobile` is the same test the desk shows a warning on.
     """
     if not phone:
         return False
-    if ota_booking_id and same_number(phone, ota_placeholder(ota_booking_id)):
+    if ota_booking_id and (same_number(phone, ota_placeholder(ota_booking_id))
+                           or same_number(phone, _legacy_ota_placeholder(ota_booking_id))):
         return True
     return not is_valid_mobile(phone)
 

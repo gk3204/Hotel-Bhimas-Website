@@ -222,6 +222,35 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
     if commission_pct is None and d.commission_percent is not None:
         commission_pct = float(d.commission_percent)
 
+    # ---- the money must agree with the voucher (F-18) -------------------------------------------
+    # Auto-confirm refuses a total more than `max_variance_percent` out; the manual path did not, and
+    # the manual path is where a human is GUESSING the room count and type. A voucher listing 4 rooms
+    # across 3 types cannot be expressed as one type x quantity, so confirming it "the only way the
+    # form allows" quietly billed the guest Rs 7,350 against a voucher of Rs 6,300 — on a channel
+    # whose own terms say the property must invoice the voucher's gross.
+    # Same helper, same config and same tolerance as the auto path, so the two cannot drift.
+    if d.amount and not data.accept_price_variance:
+        from utils import settings as _st
+        tol = float(_st.get_ota_config(db).get("max_variance_percent") or 0)
+        if tol > 0:
+            try:
+                quoted = ota_service._quote_rooms_total(
+                    db, data.room_type_id, data.quantity, check_in, check_out, d.channel_code)
+            except Exception as e:                       # pricing must never hard-fail a confirm
+                logger.debug(f"OTA confirm variance check skipped for draft {d.id}: {e}")
+                quoted = None
+            voucher = float(d.amount)
+            if quoted and voucher > 0:
+                gap = abs(quoted - voucher) / voucher * 100
+                if gap > tol:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(f"The voucher says Rs {voucher:,.0f} but {data.quantity} x this room "
+                                f"type prices at Rs {quoted:,.0f} ({gap:.0f}% out). Check the room "
+                                f"count and type — a voucher with rooms of DIFFERENT types cannot be "
+                                f"confirmed as one type, and the guest must be billed the voucher's "
+                                f"total. Re-send with accept_price_variance=true to override."))
+
     booking_req = DeskBookingCreate(
         rooms=[BookingItemCreate(room_type_id=data.room_type_id, quantity=data.quantity)],
         guest_name=guest_name,

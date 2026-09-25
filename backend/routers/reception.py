@@ -175,6 +175,11 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
                 raise HTTPException(status_code=409,
                                     detail=f"{rt.name} not available for selected dates. Reason: {blk.reason or 'blocked'}")
 
+            # F-08: serialise this room type's capacity decision before reading it. Without this the
+            # row lock below has nothing to lock (the competing bookings do not exist yet) and
+            # concurrent requests all read the same free count — five simultaneous requests for the
+            # last five rooms were all accepted. Released on commit/rollback.
+            availability.lock_room_type(db, item.room_type_id)
             booked = _booked_qty(db, item.room_type_id, data.check_in, data.check_out, lock=True)
             inactive = _inactive_count(db, item.room_type_id)
             available = rt.total_rooms - int(booked) - int(inactive)
@@ -509,7 +514,19 @@ def _active_cards(db: Session, room_id: int) -> int:
 
 
 def _encode_payload(db: Session, item: BookingItem, room: Room, valid_from, valid_to):
-    """Everything the desktop needs to encode one guest card for one room."""
+    """Everything the desktop needs to encode one guest card for one room.
+
+    F-12: a card whose window has already closed is refused here rather than handed to the encoder.
+    No correct flow ever wants one — the lock only knows the expiry written on the card, so the desk
+    would burn a blank, hand it over, and the guest would find it dead at the door. This is the
+    backstop for the lapse rule above: if any future path lets an expired stay through, it fails here
+    with something a receptionist can act on instead of at the lock.
+    """
+    if valid_to and valid_from and valid_to <= valid_from:
+        raise HTTPException(
+            status_code=409,
+            detail=(f"Room {room.room_number}: this stay's key window has already closed "
+                    f"({valid_to:%d-%m-%Y %H:%M}). Extend the stay before cutting a card."))
     return {
         "booking_item_id": item.booking_item_id,
         "room_id": room.room_id,
@@ -657,11 +674,26 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
            "needs_approval": False, "stay_start": now, "night_rate": 0.0, "comp": comp,
            "text": "", "lapsed": None, "extra_nights": 0}
 
-    # Lapsed window: OTA after noon on the check-out date; others once the check-out date is over.
-    if is_ota and now >= datetime.combine(booking.check_out, time(hour=12)):
-        out["lapsed"] = f"OTA stay window closed at 12:00 on {booking.check_out:%d-%m-%Y}"
-    elif not is_ota and today > booking.check_out:
-        out["lapsed"] = f"Stay window lapsed on {booking.check_out:%d-%m-%Y}"
+    # Lapsed window: the stay is over, so there is nothing left to check into.
+    #
+    # F-02/F-12: both branches now compare the same MOMENT. The non-OTA branch used to compare DATES
+    # (`today > check_out`), so on the check-out date itself a stay never counted as lapsed however
+    # long ago its checkout moment had passed — for a 14:00 checkout that is ten hours a day in which
+    # the desk could check a guest into a stay that had already ended. Reproduced: a 24-09 08:00 ->
+    # 25-09 booking accepted at 11:47 on the 25th, in-house with `expected_check_out` 3 h 47 m in the
+    # PAST, and the card cut for it ran valid_from 11:47 -> valid_to 09:00 — dead before it was
+    # written. The booked checkout moment is the booked arrival plus the nights (or the fixed hour
+    # when that mode is on), which is what `checkout_at` below computes from the ACTUAL arrival.
+    if is_ota:
+        booked_checkout = datetime.combine(booking.check_out, time(hour=12))
+    elif _checkout_mode() == "fixed":
+        booked_checkout = datetime.combine(booking.check_out, time(hour=_checkout_hour()))
+    else:
+        booked_checkout = expected + timedelta(days=nights)
+    if now >= booked_checkout:
+        out["lapsed"] = (f"OTA stay window closed at 12:00 on {booking.check_out:%d-%m-%Y}"
+                         if is_ota else
+                         f"Stay window lapsed at {booked_checkout:%H:%M} on {booking.check_out:%d-%m-%Y}")
 
     # v5n: which rooms this arrival is for. The desk ticks the rooms whose guests actually turned
     # up early; everything below (percent base, fixed multiplier, extra nights, fee lines) follows
@@ -3036,6 +3068,20 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         Booking.check_in > today, Booking.check_in <= today + timedelta(days=7),
     ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()]
 
+    # F-16: the fourth bucket — a reservation nobody ever arrived for, whose window has now closed.
+    # It was in NO bucket: `arrivals` requires check_out >= today, `upcoming` requires a future
+    # check_in, `inhouse` requires checked_in. So it simply disappeared from the desk while staying
+    # `confirmed` in the database and still consuming availability on its dates. The nightly no-show
+    # sweep is the only thing that would ever touch it, and that ignores anything before
+    # `no_show_from_date`, so a stay that lapses quietly stays confirmed for ever. For an OTA booking
+    # that is money: no no-show, no commission dispute, no record.
+    # Capped and newest-first — this is a to-do list, not an archive. The row carries the same shape
+    # as an arrival so the desk can reuse the card, and both actions it needs (mark no-show, re-date)
+    # already exist in routers/booking_lifecycle.py.
+    missed = [_arrival_row(b) for b in _arrival_q.filter(
+        Booking.check_out < today,
+    ).order_by(Booking.check_out.desc(), Booking.booking_id.desc()).limit(50).all()]
+
     # Read the overstay config ONCE for the whole board rather than per row.
     ov_cfg = app_settings.get_overstay_config(db)
     inhouse = []
@@ -3149,6 +3195,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
     inhouse.sort(key=lambda r: ordering.room_number_sort_key(
         (r["rooms"][0]["room_number"] if r.get("rooms") else "")))
     return {"date": str(today), "arrivals": arrivals, "upcoming": upcoming, "inhouse": inhouse,
+            "missed": missed,
             "vacant_rooms": vacant_rooms, "rooms": rooms_hk,
             # v5n: the front-desk policy the wizard must enforce (how many IDs, scans or not). Sent
             # with the board rather than as a separate call so the desk always has it, keeps it in the

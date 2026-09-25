@@ -1,3 +1,4 @@
+import re
 from typing import List, Optional
 from pydantic import BaseModel, Field, EmailStr, field_validator, model_validator
 from datetime import date, time, datetime
@@ -72,6 +73,27 @@ class RoomTypeUpdateDetails(BaseModel):
         return v
 
 
+CARD_ROOM_NUMBER_RE = re.compile(r"^\d{1,2}$")
+CARD_ROOM_NUMBER_MSG = (
+    "A card-lock room's number must be 1-2 digits (00-99) — the door card encodes it as the RR in "
+    "BBFFRR, so a longer or non-numeric number can never be checked in. Renumber the room, or set "
+    "its lock type to 'key' if it has a metal key."
+)
+
+
+def card_room_number_ok(room_number, lock_type) -> bool:
+    """F-02: a room number the Rooms screen accepts must be one check-in can actually encode.
+
+    `_room_code` (routers/reception.py) builds BBFFRR and rejects anything outside 00-99 — but it did
+    so at CHECK-IN, with the guest at the desk, and the message said nothing about renumbering. The
+    constraint belongs here, where it is free to fix. Key-lock rooms are exempt: they never get a card,
+    which is why `routers/housekeeping.py` refuses them BEFORE building a code.
+    """
+    if (lock_type or "card") != "card":
+        return True
+    return bool(CARD_ROOM_NUMBER_RE.match((room_number or "").strip()))
+
+
 class RoomCreate(BaseModel):
     room_number: str = Field(..., min_length=1, max_length=10)
     room_type_id: int = Field(..., ge=1)
@@ -88,6 +110,12 @@ class RoomCreate(BaseModel):
         default="vacant",
         pattern="^(vacant|occupied|cleaning|inspected|maintenance|blocked)$",
     )
+
+    @model_validator(mode="after")
+    def _room_number_fits_a_card(self):
+        if not card_room_number_ok(self.room_number, self.lock_type):
+            raise ValueError(CARD_ROOM_NUMBER_MSG)
+        return self
 
 
 class RoomUpdate(BaseModel):
@@ -219,6 +247,12 @@ class OtaDraftConfirm(BaseModel):
     adults: Optional[int] = Field(None, ge=1, le=40)
     children: Optional[int] = Field(None, ge=0, le=40)
     ota_commission_percent: Optional[float] = Field(None, ge=0, le=100)
+    # The desk's deliberate "yes, I know the money disagrees" (F-18). Auto-confirm has always refused
+    # a voucher total more than `max_variance_percent` from what the PMS prices those rooms at; the
+    # manual path did not — and that is exactly where a human is guessing the room count. A mixed-type
+    # voucher (4 rooms across 3 types) cannot be expressed as one type x quantity, and confirming one
+    # anyway billed Rs 7,350 against a voucher of Rs 6,300 with no warning.
+    accept_price_variance: bool = False
 
 
 class FolioOpenRequest(BaseModel):

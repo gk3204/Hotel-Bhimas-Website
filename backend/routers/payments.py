@@ -3,6 +3,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
+from sqlalchemy.exc import IntegrityError
 from decimal import Decimal
 import os
 import json
@@ -1087,6 +1088,24 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
     except HTTPException:
         db.rollback()
         raise
+    except IntegrityError as e:
+        # F-09: the same client_ref arriving CONCURRENTLY. The pre-check above is a plain SELECT, so
+        # two in-flight requests both miss it and the unique index on payments.client_ref catches the
+        # loser. The money was never at risk — one row is written — but answering 500 was, because the
+        # desk's offline outbox (ReceptionApp.Desktop/Services/SyncService.cs) treats 4xx as permanent
+        # and 5xx as RETRYABLE and then `break`s to preserve FIFO: a payment that is already recorded
+        # would be re-posted for ever and every later item queued behind it would never send.
+        # The real-world trigger is not concurrency in the lab, it is one post whose response is lost
+        # after the server committed, retried while the first is still in flight.
+        db.rollback()
+        if data.client_ref and "client_ref" in str(getattr(e, "orig", e)):
+            existing = db.query(Payment).filter(Payment.client_ref == data.client_ref).first()
+            if existing:
+                logger.info("Desk payment %s already recorded (concurrent re-flush) — returning it",
+                            data.client_ref)
+                return _desk_payment_response(db, existing, duplicate=True)
+        logger.error(f"❌ Desk payment integrity error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to record payment")
     except Exception as e:
         logger.error(f"❌ Desk payment failed: {e}", exc_info=True)
         db.rollback()

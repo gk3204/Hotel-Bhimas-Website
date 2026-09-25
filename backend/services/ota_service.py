@@ -728,9 +728,17 @@ def _room_count(text: str) -> int | None:
     raw = _first([
         r"total\s*(?:no\.?|number)\s*of\s*rooms?[\s:*|]*(\d{1,2})",
         r"(?:no\.?|number)\s*of\s*rooms?[\s:*|]*(\d{1,2})",
+        # The heading a REAL Go-MMT Hotelier Voucher actually prints: "4 Room(s)", sitting above one
+        # "1 x <type>" block per room. No pattern matched it, so the "N x" line below won and every
+        # multi-room voucher was read as ONE room — the PMS booked 1 of 4 and left 3 on sale.
+        # Verified against live vouchers NH24070518404988 (4 x Double Deluxe Non-Ac) and
+        # NH73163518841498 (4 rooms across 3 types). MUST stay above the "N x" pattern: both match
+        # such a voucher and _first returns the first hit.
+        r"(\d{1,2})\s*rooms?\s*\(\s*s\s*\)",
         r"rooms?\s*(?:count|booked)[\s:*|]*(\d{1,2})",
         r"(\d{1,2})\s*rooms?\s*(?:booked|reserved)\b",
-        # "2 x Double Deluxe Ac" — the same line the room-type hint is read from.
+        # "2 x Double Deluxe Ac" — the same line the room-type hint is read from. LAST on purpose:
+        # on a voucher that enumerates its rooms this reads the first block's "1", not the total.
         r"(\d{1,2})[ \t]*[xX][ \t]+[A-Za-z]",
     ], text)
     if not raw or not raw.isdigit():

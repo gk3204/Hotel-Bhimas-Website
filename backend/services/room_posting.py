@@ -217,6 +217,11 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
     for item in items:
         rt = db.query(RoomType).filter(RoomType.room_type_id == item.room_type_id).first()
         label = rt.name if rt else item.room_type_id
+        # F-14: name the ROOM on the line when the item has one. A three-room stay used to post
+        # three identical "Room AC Deluxe x1 — 25 Sep" lines; on a printed bill or a reprinted
+        # invoice there was no way to tell which room any of them was for. Before check-in an item
+        # has no room yet, and then the type alone is still the honest label.
+        room_prefix = f"Room {item.room.room_number} · " if getattr(item, "room", None) else "Room "
         item_nightly, item_amount, item_posted = [], 0.0, []
 
         if price_mode == PRICE_BOOKING_SPLIT:
@@ -236,7 +241,7 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
             charge = FolioCharge(
                 folio_id=folio.id,
                 type="room",
-                description=f"Room {label} x{item.quantity} — {night:%d %b %Y}",
+                description=f"{room_prefix}{label} x{item.quantity} — {night:%d %b %Y}",
                 qty=item.quantity,
                 unit_price=round(line_amount / qty, 2) if qty else line_amount,
                 amount=line_amount,

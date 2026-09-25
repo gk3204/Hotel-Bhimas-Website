@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import Room, RoomType, Booking, BookingItem, CardIssuance, Guest, MaintenanceTicket
-from schemas import RoomCreate, RoomUpdate, RoomStatusUpdate, RoomActiveToggle
+from schemas import (RoomCreate, RoomUpdate, RoomStatusUpdate, RoomActiveToggle,
+                     card_room_number_ok, CARD_ROOM_NUMBER_MSG)
 from utils import ordering
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit
@@ -175,6 +176,15 @@ def update_room(room_id: int, data: RoomUpdate, db: Session = Depends(get_db)):
         if new_number and new_number != room.room_number:
             if db.query(Room).filter(Room.room_number == new_number).first():
                 raise HTTPException(status_code=400, detail="Room number already exists")
+
+        # F-02: the number must remain one a door card can encode. Checked HERE rather than on the
+        # schema because this update is PATCH-shaped — an absent `lock_type` means "unchanged", so
+        # only the router knows the EFFECTIVE pair. Both directions matter: renaming a card room to
+        # "101", and switching an existing 3-digit key room over to a card lock.
+        eff_number = new_number or room.room_number
+        eff_lock = update_data.get("lock_type") or room.lock_type or "card"
+        if not card_room_number_ok(eff_number, eff_lock):
+            raise HTTPException(status_code=422, detail=CARD_ROOM_NUMBER_MSG)
 
         if "room_type_id" in update_data:
             if not db.query(RoomType).filter(RoomType.room_type_id == update_data["room_type_id"]).first():

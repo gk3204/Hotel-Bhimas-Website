@@ -383,16 +383,16 @@ function ConfigPanel({ cfg, busy, onSave, inject, setInject, onInject, showToast
           <p className="text-slate-500 text-sm mb-4">Dev only — drives the full pipeline without live Google. Disable in production with REVIEW_TEST_INJECT_ENABLED=false.</p>
           <div className="grid grid-cols-1 md:grid-cols-4 gap-4 items-end">
             <Field label="Rating">
-              <select value={inject.rating} onChange={(e) => setInject({ ...inject, rating: e.target.value })} className={inputCls2}>
+              <select value={inject.rating} onChange={(e) => setInject({ ...inject, rating: e.target.value })} className={inputCls}>
                 {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
               </select>
             </Field>
             <Field label="Author name">
-              <input value={inject.author_name} onChange={(e) => setInject({ ...inject, author_name: e.target.value })} className={inputCls2} placeholder="Test Reviewer" />
+              <input value={inject.author_name} onChange={(e) => setInject({ ...inject, author_name: e.target.value })} className={inputCls} placeholder="Test Reviewer" />
             </Field>
             <div className="md:col-span-2">
               <Field label="Review text">
-                <input value={inject.review_text} onChange={(e) => setInject({ ...inject, review_text: e.target.value })} className={inputCls2} placeholder="Optional review body" />
+                <input value={inject.review_text} onChange={(e) => setInject({ ...inject, review_text: e.target.value })} className={inputCls} placeholder="Optional review body" />
               </Field>
             </div>
           </div>

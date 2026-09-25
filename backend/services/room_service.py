@@ -148,13 +148,24 @@ def post_to_folio(db: Session, r: GuestRequest, user):
         r.payload = json.dumps(payload)
         return folio
 
+    # F-14: the room this order goes to, resolved once for the line descriptions below.
+    _room_label = None
+    if r.room_id:
+        from models import Room
+        _room = db.query(Room).filter(Room.room_id == r.room_id).first()
+        _room_label = f"Room {_room.room_number}" if _room else None
+
     first_charge_id = None
     for ln in lines:
         qty = float(ln.get("qty") or 1)
         unit = float(ln.get("unit_price") or 0)
         charge = FolioCharge(
             folio_id=folio.id, type="food",
-            description=f"Room service — {ln.get('name', 'item')}",
+            # F-14: name the room on the line. `room_id` below has carried it since v5n, but the
+            # printed bill and the folio screen only ever show the DESCRIPTION, so a three-room
+            # family's food all read as an unattributable "Room service — Idly".
+            description=(f"{_room_label} · Room service — {ln.get('name', 'item')}"
+                         if _room_label else f"Room service — {ln.get('name', 'item')}"),
             # unit_price = ex-GST menu price (the invoice's Rate column); amount = GST-inclusive
             # payable, which is what the folio and the GST summary work from.
             qty=qty, unit_price=unit, amount=line_total(unit, qty, ln.get("gst_percent")),

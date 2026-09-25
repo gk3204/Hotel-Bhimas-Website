@@ -1,5 +1,7 @@
 from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 from database import Base, engine
 from dotenv import load_dotenv
 import os
@@ -12,7 +14,7 @@ from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-da
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
-APP_BUILD = "v5s"
+APP_BUILD = "v6a"
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
@@ -314,6 +316,35 @@ cors_origins = [origin.strip() for origin in cors_origins]
 
 logger.info(f"CORS enabled for origins: {cors_origins}")
 
+
+# -------------------------
+# Unhandled errors must still carry CORS headers
+# -------------------------
+# F-19: an exception that escapes a route reaches Starlette's ServerErrorMiddleware, which sits
+# OUTSIDE CORSMiddleware, so the 500 it returns has no `access-control-allow-origin` — and the
+# browser reports `TypeError: Failed to fetch` instead of the status. The admin UI's own handler
+# (frontend/src/api/reports.js) would have shown a readable "HTTP 500", but it never gets the
+# chance: a missing route and a broken query look identical to whoever is standing at the desk.
+# Measured on a database whose migrations lagged the code: 35 endpoints answered 500 with no
+# CORS header, including the desk board, the dashboard and the whole compliance section.
+#
+# ⚠️ ORDER MATTERS, and it is the opposite of how it reads. `add_middleware` INSERTS AT THE FRONT,
+# so the LAST one added is the OUTERMOST. This catcher is therefore added BEFORE CORSMiddleware so
+# that it ends up INSIDE it — CORS then decorates the JSONResponse below on its way out. Registering
+# an `@app.exception_handler(Exception)` instead does NOT work here, whatever it looks like: that
+# handler is installed on ServerErrorMiddleware, which is outside CORS again. This was verified, not
+# assumed — the exception-handler version left the header off and the suite caught it.
+class CatchUnhandledErrors(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        try:
+            return await call_next(request)
+        except Exception:
+            logger.exception("Unhandled error on %s %s", request.method, request.url.path)
+            return JSONResponse(status_code=500, content={"detail": "Server error"})
+
+
+app.add_middleware(CatchUnhandledErrors)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=cors_origins,
@@ -421,6 +452,95 @@ app.include_router(opsettings.router)
 app.include_router(booking_lifecycle.router)
 app.include_router(linen.router)
 app.include_router(documents.router)
+
+
+# -------------------------
+# Every route must be guarded, or be on this list
+# -------------------------
+# F-04: five endpoints shipped with no authentication at all — `PUT /room-types/{id}` (a probe set a
+# nightly rate to Rs 7.00), `POST`/`PATCH /room-types/`, and the two booking reads that together
+# returned every guest's name, phone and e-mail by sequential id. Each file already imported the
+# right guard and applied it to NEIGHBOURING routes; these were simply missed, and nothing could
+# notice. This makes "public" a decision someone has to write down.
+#
+# Paths are the ROUTE TEMPLATES as FastAPI stores them. Add to this list only with a reason.
+PUBLIC_ROUTES = {
+    ("GET", "/health"),                       # uptime + which build is live
+    ("POST", "/admin/login"),                 # you cannot hold a token before you log in
+    ("POST", "/admin/login/2fa"),
+    ("POST", "/admin-security/validate-secret"),
+    ("POST", "/bookings/"),                   # the public website creates bookings here
+    ("GET", "/room-types/"),                  # public site: rooms + prices
+    ("GET", "/promotions/active"),            # public site: current offers
+    ("GET", "/room-type-availability/{room_type_id}"),
+    ("GET", "/room-type-availability/check-availability/{room_type_id}"),
+    ("POST", "/enquiry/send"),                # public contact form
+    # Gateway + WhatsApp callbacks: authenticated by SIGNATURE, not by a bearer token.
+    ("POST", "/payments/webhook"),
+    ("POST", "/payments/phonepe/webhook"),
+    ("GET", "/whatsapp/webhook"),
+    ("POST", "/whatsapp/webhook"),
+    # Razorpay's browser-side return path: the guest has no login.
+    ("POST", "/payments/create-order/{booking_id}"),
+    ("POST", "/payments/verify"),
+    ("POST", "/payments/mark-failed/{booking_id}"),
+    ("POST", "/payments/retry/{booking_id}"),
+}
+
+# Route FAMILIES whose secret IS the URL — a one-time token in the path, held only by that guest.
+PUBLIC_PREFIXES = ("/portal/{token}", "/crm/pre-arrival/{token}", "/crm/files/")
+
+
+def _audit_route_guards(application) -> list:
+    """Return [(method, path)] for routes that carry no auth dependency and are not declared public.
+
+    A guard counts when the route's dependant tree mentions one of our `require_*` helpers or
+    `get_current_user` — that covers both spellings in use: `dependencies=[Depends(require_admin)]`
+    and `user=Depends(require_reception_or_admin)` in the signature.
+    """
+    unguarded = []
+    for route in application.routes:
+        path = getattr(route, "path", None)
+        methods = getattr(route, "methods", None)
+        if not path or not methods:
+            continue
+        if path.startswith(("/docs", "/redoc", "/openapi")):
+            continue
+        if any(path.startswith(pfx) for pfx in PUBLIC_PREFIXES):
+            continue
+        names = ""
+        dependant = getattr(route, "dependant", None)
+        if dependant is not None:
+            stack = [dependant]
+            while stack:
+                d = stack.pop()
+                call = getattr(d, "call", None)
+                if call is not None:
+                    names += getattr(call, "__name__", "") + " "
+                stack.extend(getattr(d, "dependencies", []) or [])
+        guarded = "require_" in names or "get_current_user" in names
+        for m in methods:
+            if m in ("HEAD", "OPTIONS"):
+                continue
+            if not guarded and (m, path) not in PUBLIC_ROUTES:
+                unguarded.append((m, path))
+    return sorted(unguarded)
+
+
+_unguarded = _audit_route_guards(app)
+if _unguarded:
+    # Loud, and at startup, because this class of miss is invisible in review: the route works
+    # perfectly for the logged-in staff member who tests it. Deliberately a WARNING rather than a
+    # hard exit — refusing to boot would turn one missed decorator into an outage for the whole
+    # hotel — but it is the first thing in the deploy log.
+    logger.warning("=" * 78)
+    logger.warning("UNGUARDED ROUTES (%d) — no auth dependency and not in PUBLIC_ROUTES:", len(_unguarded))
+    for _m, _p in _unguarded:
+        logger.warning("    %-6s %s", _m, _p)
+    logger.warning("Add the right require_* guard, or declare it public in main.PUBLIC_ROUTES.")
+    logger.warning("=" * 78)
+else:
+    logger.info("Route guard audit: every route is authenticated or declared public.")
 
 # -------------------------
 # Health Check

@@ -10,6 +10,7 @@ from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, Booking
 from schemas import BookingCreate
 from sqlalchemy.orm import joinedload
 from utils.auth_utils import require_reception_or_admin, require_admin
+from utils import availability
 from scripts.expire_booking_jobs import expire_pending_bookings
 # Gateway-agnostic: a booking's paid payment may have been taken on Razorpay (website,
 # desk link) or PhonePe (desk UPI QR), and this path picks the payment before it knows which.
@@ -106,6 +107,13 @@ def create_booking(
             
             # 4️⃣ Check room count availability - ensure enough rooms exist
             # Only count confirmed, pending_payment & payment_pending (reserved bookings)
+            #
+            # F-08: take the room type's advisory lock FIRST. The `with_for_update()` below reads as
+            # if it prevents concurrent overbooking, but it locks only bookings that already exist —
+            # when two website guests (or a guest and the desk) race for the last room, neither has
+            # inserted yet, the subquery matches nothing, and both are allowed through. The advisory
+            # lock is on the room type itself, which always exists. Released on commit/rollback.
+            availability.lock_room_type(db, room_item.room_type_id)
             booked_rooms = db.query(func.sum(BookingItem.quantity)).filter(
                 BookingItem.room_type_id == room_item.room_type_id,
                 BookingItem.booking_id.in_(

@@ -140,6 +140,28 @@ def notify(db, *, template, params=None, to_phone=None, to_email=None, to_name=N
     return dict(_RESULT_NONE)
 
 
+def _is_placeholder_number(db, phone, booking_id) -> bool:
+    """True when `phone` is an OTA stand-in rather than a number a guest will answer (F-05).
+
+    Checked against the booking's OWN ota reference when we have one, because that is exact; the
+    shape test alone cannot catch a placeholder that happens to look like a valid mobile, which is
+    precisely the dangerous case. Never raises — messaging must not break because a lookup failed.
+    """
+    if not phone:
+        return False
+    try:
+        from utils.phone import is_ota_placeholder
+        ota_ref = None
+        if booking_id:
+            from models import Booking
+            b = db.query(Booking).filter(Booking.booking_id == booking_id).first()
+            ota_ref = getattr(b, "ota_booking_id", None) if b else None
+        return bool(is_ota_placeholder(phone, ota_ref))
+    except Exception as e:
+        logger.debug(f"placeholder check skipped: {e}")
+        return False
+
+
 def notify_guest(db, guest, *, template, params=None, setting_key=None, booking_id=None,
                  client_ref=None):
     """Transactional guest message, gated by an app_settings toggle (the shape
@@ -150,8 +172,22 @@ def notify_guest(db, guest, *, template, params=None, setting_key=None, booking_
         if setting_key and str(app_settings.get_setting(db, setting_key, "true")
                                ).strip().lower() in ("false", "0", "no", ""):
             return {"channel": "none", "ok": False, "detail": "This message type is switched off."}
+        phone = getattr(guest, "phone", None)
+        if _is_placeholder_number(db, phone, booking_id):
+            # F-05: an OTA voucher masks the guest's phone, so confirming a draft stamps a stand-in
+            # built from the booking reference (utils/phone.ota_placeholder). Any reference whose
+            # last ten digits begin 6-9 is a VALID Indian mobile belonging to a real person — and
+            # nothing stopped us messaging it. Observed: booking NH7001234567 sent its confirmation,
+            # naming the guest and their dates, to 917001234567. The desk captures the real number at
+            # OTA check-in (v5r enforces it); until then this guest has no reachable number and the
+            # honest answer is to say so, not to message a stranger.
+            logger.info("notify_guest (%s): skipped — placeholder number for booking %s",
+                        template, booking_id)
+            return {"channel": "none", "ok": False,
+                    "detail": "No reachable number for this guest yet — the OTA masked it. "
+                              "Capture the guest's own mobile at check-in."}
         return notify(db, template=template, params=params,
-                      to_phone=getattr(guest, "phone", None),
+                      to_phone=phone,
                       to_email=getattr(guest, "email", None),
                       to_name=getattr(guest, "name", None),
                       guest_id=getattr(guest, "guest_id", None),
@@ -183,6 +219,11 @@ def notify_guest_document(db, guest, *, doc_template, text_template, doc_params,
             return {"channel": "none", "ok": False, "detail": "This message type is switched off."}
 
         phone = getattr(guest, "phone", None)
+        # F-05: same guard as notify_guest — an OTA placeholder must never receive a document either.
+        # This one carries an invoice or a registration slip, so it is the worse of the two to send to
+        # a stranger. The text fallback below routes through notify_guest, which refuses it again.
+        if _is_placeholder_number(db, phone, booking_id):
+            phone = None
         if pdf_path and phone and whatsapp_really_delivers():
             try:
                 row = whatsapp_service.send_document(

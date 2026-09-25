@@ -26,8 +26,42 @@ RESERVED_STATUSES = ["confirmed", "pending_payment", "payment_pending", "checked
 OUT_OF_SERVICE_STATUSES = ("maintenance", "blocked")
 
 
+# Namespace for the per-room-type advisory lock. pg_advisory_xact_lock takes two int4s; the first
+# keeps our keys from colliding with any other advisory lock in the database (the night audit holds
+# one of its own, utils/night_audit.py).
+_CAPACITY_LOCK_NS = 0x524F4F4D  # "ROOM"
+
+
+def lock_room_type(db, room_type_id) -> None:
+    """Serialise capacity decisions for ONE room type, for the rest of this transaction.
+
+    F-08 — the overbooking guard did not hold. `booked_qty(lock=True)` takes `SELECT ... FOR UPDATE`
+    on the bookings that overlap the dates, but a row lock can only lock rows that ALREADY EXIST:
+    when the competing bookings have not been inserted yet the subquery matches nothing, so there is
+    nothing to lock. Every concurrent request read `booked = 0`, every one passed the check, and
+    every one inserted. Measured before this existed: five simultaneous requests for the last five
+    rooms were ALL accepted — 25 rooms sold against 5 — and `available` then read 0, so the oversell
+    was invisible until the guests arrived. `READ COMMITTED` (database.py) makes that phantom the
+    expected behaviour, not bad luck.
+
+    An advisory lock has no such problem: it locks a NUMBER, which exists whether or not any row
+    does. Taken on the room type, so it serialises only bookings competing for the same inventory,
+    and `_xact_` releases it on commit or rollback — nothing to leak. Precedent in this codebase:
+    `utils/night_audit.py`.
+
+    Call this BEFORE reading capacity, inside the booking transaction.
+    """
+    from sqlalchemy import text
+    db.execute(text("SELECT pg_advisory_xact_lock(:ns, :k)"),
+               {"ns": _CAPACITY_LOCK_NS, "k": int(room_type_id)})
+
+
 def booked_qty(db, room_type_id, check_in, check_out, lock=False):
-    """Rooms of this type consumed by bookings overlapping [check_in, check_out)."""
+    """Rooms of this type consumed by bookings overlapping [check_in, check_out).
+
+    `lock=True` adds a row lock on the overlapping bookings, which is worth having but is NOT what
+    makes the capacity check safe — see `lock_room_type` above, which the callers take first.
+    """
     inner = db.query(Booking.booking_id).filter(
         Booking.status.in_(RESERVED_STATUSES),
         Booking.check_in < check_out,

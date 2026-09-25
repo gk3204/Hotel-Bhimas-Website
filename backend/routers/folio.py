@@ -254,6 +254,21 @@ def _room_numbers(booking) -> list:
     return ordering.room_labels(bi.room.room_number for bi in booking.booking_items if bi.room)
 
 
+def _charge_room(charge: FolioCharge, rooms_by_item: dict, rooms_by_id: dict) -> dict:
+    """The room a folio line belongs to, as `{room_id, room_number}` (both None when it has none).
+
+    F-14. Two sources, and both already existed — neither was ever returned. `folio_charges.room_id`
+    is set directly by room service (v5n: "which room ate it"), and room nights carry
+    `booking_item_id`, which after check-in IS one room. Prefer the explicit column; fall back to the
+    item. Lines that genuinely belong to no room — a folio-level discount, a payment — return None,
+    and the UI should show those against the stay rather than inventing a room for them.
+    """
+    room = rooms_by_id.get(getattr(charge, "room_id", None)) \
+        or rooms_by_item.get(getattr(charge, "booking_item_id", None))
+    return {"room_id": room.room_id if room else None,
+            "room_number": room.room_number if room else None}
+
+
 def _folio_detail(db: Session, folio: Folio):
     """Shared response builder: folio + booking/guest summary + all lines + GST totals."""
     from routers.payments import prepaid_slice      # local: payments imports this module
@@ -268,6 +283,11 @@ def _folio_detail(db: Session, folio: Folio):
     invoice = _get_invoice(db, folio.id)
     company = company_service.get_company(db, folio.company_id)
     company_balance = float(folio.company_balance or 0)
+    # F-14: booking_item_id -> the room it is assigned to. Built once here rather than per charge,
+    # from the items already eager-loaded above, so naming the room on every line costs no queries.
+    _items = booking.booking_items if booking else []
+    rooms_by_item = {i.booking_item_id: i.room for i in _items if i.room is not None}
+    rooms_by_id = {i.room.room_id: i.room for i in _items if i.room is not None}
     return {
         "folio_id": folio.id,
         "booking_id": folio.booking_id,
@@ -319,6 +339,13 @@ def _folio_detail(db: Session, folio: Folio):
             "void_reason": c.void_reason,
             "reversal_of_id": c.reversal_of_id,
             "bill_to": c.bill_to or "guest",
+            # F-14: WHICH ROOM this line belongs to. On a multi-room stay the folio showed two
+            # identical "Room Non AC Standard x1 — 25 Sep" lines and a room-service line that had
+            # forgotten the room it was delivered to, so nothing downstream could attribute a charge,
+            # split a bill, or settle one room. The information was never missing — room nights store
+            # `folio_charges.booking_item_id` and after check-in each item is exactly one room — it
+            # was simply never returned.
+            **_charge_room(c, rooms_by_item, rooms_by_id),
         } for c in charges],
         **{k: v for k, v in totals.items() if k != "gst_rows"},
         "gst_rows": totals["gst_rows"],
