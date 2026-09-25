@@ -5,6 +5,7 @@
 // #E5C07B gold accent, rounded-2xl cards. Extracted rather than pasted three times; nothing here
 // introduces a second look, it just names the pieces those pages already use.
 import React, { useEffect, useMemo, useState } from "react";
+import { cmpValues } from "../../utils/tableSort";
 
 export const GOLD = "#E5C07B";
 
@@ -182,19 +183,24 @@ export function Stat({ label, value, tone = "" }) {
 }
 
 /** Table with the loading / error / empty states the guidelines require (never optional). */
-// Generic comparator: numbers numerically, everything else as natural strings; nulls sort last.
-const cmpValues = (a, b) => {
-  if (a == null && b == null) return 0;
-  if (a == null) return 1;
-  if (b == null) return -1;
-  if (typeof a === "number" && typeof b === "number") return a - b;
-  return String(a).localeCompare(String(b), undefined, { numeric: true, sensitivity: "base" });
-};
+/** A sortable <th>. `k` is the stable column key; `get` is an optional accessor for a derived
+ *  value (a joined label, a looked-up name). A column with no `k` renders as a plain header. */
+export function SortTh({ ctx, k, get, className = "px-4 py-3 font-semibold", children }) {
+  if (!k) return <th className={className}>{children}</th>;
+  const active = ctx.sort.key === k;
+  return (
+    <th className={className + " whitespace-nowrap"}>
+      <button
+        onClick={() => ctx.toggle(k, get)}
+        className={`inline-flex items-center gap-1 hover:text-[#E5C07B] transition ${active ? "text-[#E5C07B]" : ""}`}
+      >
+        {children}
+        <span className="text-[10px] opacity-70">{active ? (ctx.sort.dir === "asc" ? "▲" : "▼") : "↕"}</span>
+      </button>
+    </th>
+  );
+}
 
-// Paginates client-side (rows are already fully loaded on these screens). Defaults to 25 rows/page;
-// tables shorter than that show no footer. Pass `pageSize={0}` to disable and render every row.
-// A column may be a string (not sortable) or an object { label, sort } where `sort` is a row-key
-// string or an accessor (row) => comparableValue; clicking a sortable header cycles asc → desc → off.
 export function DataTable({ columns, rows, renderRow, loading, error, empty = "No records.", pageSize = 25, onRetry }) {
   const cols = columns.map((c) => (typeof c === "string" ? { label: c } : c));
   const [sort, setSort] = useState({ idx: null, dir: "asc" });

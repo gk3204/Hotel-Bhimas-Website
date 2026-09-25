@@ -2,7 +2,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import { getAllPayments } from "../../api/payments";
 import { FaSync } from "react-icons/fa";
 import { usePaged, Paginator } from "../../components/admin/Paginator";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell, SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 
 const filterInputCls =
   "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -25,7 +26,10 @@ const Payments = () => {
       }),
     [payments, statusFilter, dateFrom, dateTo]
   );
-  const paged = usePaged(filtered, 25);
+  // v5s: sort FIRST, then page — paging a list and then sorting the page would sort 25 rows
+  // and leave the rest unsorted behind them, which is the trap the Bookings screen was in.
+  const sortedPayments = useTableSort(filtered);
+  const paged = usePaged(sortedPayments.rows, 25);
 
   useEffect(() => {
     fetchPayments();
@@ -182,15 +186,15 @@ const Payments = () => {
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 sticky top-0 border-b border-slate-700">
                   <tr>
-                    <th className="px-6 py-4 font-semibold text-sm">Payment ID</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Booking ID</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Amount</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Status</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Refund ID</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Refund Amount</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Refund Status</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Gateway</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Date & Time</th>
+                    <SortTh ctx={sortedPayments} k="payment_id" className="px-6 py-4 font-semibold text-sm">Payment ID</SortTh>
+                    <SortTh ctx={sortedPayments} k="booking_id" className="px-6 py-4 font-semibold text-sm">Booking ID</SortTh>
+                    <SortTh ctx={sortedPayments} k="amount" className="px-6 py-4 font-semibold text-sm">Amount</SortTh>
+                    <SortTh ctx={sortedPayments} k="status" className="px-6 py-4 font-semibold text-sm">Status</SortTh>
+                    <SortTh ctx={sortedPayments} k="refund_id" className="px-6 py-4 font-semibold text-sm">Refund ID</SortTh>
+                    <SortTh ctx={sortedPayments} k="refund_amount" className="px-6 py-4 font-semibold text-sm">Refund Amount</SortTh>
+                    <SortTh ctx={sortedPayments} k="refund_status" className="px-6 py-4 font-semibold text-sm">Refund Status</SortTh>
+                    <SortTh ctx={sortedPayments} k="gateway" className="px-6 py-4 font-semibold text-sm">Gateway</SortTh>
+                    <SortTh ctx={sortedPayments} k="created_at" className="px-6 py-4 font-semibold text-sm">Date & Time</SortTh>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">

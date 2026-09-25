@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell , SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 import { getRatePlans, createRatePlan, deleteRatePlan, getQuote } from "../../api/ratePlans";
 import { getRoomTypes } from "../../api/roomTypes";
 import { getAgents } from "../../api/travelAgents";
@@ -25,6 +26,8 @@ const RatePlans = () => {
   const [agents, setAgents] = useState([]);
   const [selectedRt, setSelectedRt] = useState("");
   const [plans, setPlans] = useState([]);
+  // v5s: click any header to sort; a third click returns to the API's order.
+  const sortedPlans = useTableSort(plans);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
   const [form, setForm] = useState(emptyForm);
@@ -198,17 +201,17 @@ const RatePlans = () => {
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 border-b border-slate-700">
                   <tr>
-                    <th className="px-6 py-4 font-semibold text-sm">Channel</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Agent</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Price</th>
+                    <SortTh ctx={sortedPlans} k="channel" className="px-6 py-4 font-semibold text-sm">Channel</SortTh>
+                    <SortTh ctx={sortedPlans} k="agent_name" className="px-6 py-4 font-semibold text-sm">Agent</SortTh>
+                    <SortTh ctx={sortedPlans} k="price_per_night" className="px-6 py-4 font-semibold text-sm">Price</SortTh>
                     <th className="px-6 py-4 font-semibold text-sm">Window</th>
                     <th className="px-6 py-4 font-semibold text-sm">Days</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Priority</th>
+                    <SortTh ctx={sortedPlans} k="priority" className="px-6 py-4 font-semibold text-sm">Priority</SortTh>
                     <th className="px-6 py-4 font-semibold text-sm"></th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {plans.map((p) => (
+                  {sortedPlans.rows.map((p) => (
                     <tr key={p.id} className="hover:bg-slate-700/30 transition">
                       <td className="px-6 py-4"><span className="px-3 py-1 rounded-full text-xs font-bold border bg-slate-600/30 text-slate-200 border-slate-500/40">{channelLabel(p.channel)}</span></td>
                       <td className="px-6 py-4 text-slate-300">{p.agent_name || "—"}</td>

@@ -1,9 +1,13 @@
 import React, { useEffect, useState } from "react";
+import { SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 import { getAllPayments } from "../../api/payments";
 import { FaSync } from "react-icons/fa";
 
 const Payments = () => {
   const [payments, setPayments] = useState([]);
+  // v5s: click any header to sort; a third click returns to the API's order.
+  const sortedPayments = useTableSort(payments);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
@@ -132,16 +136,16 @@ const Payments = () => {
               <table className="w-full">
                 <thead className="bg-slate-900/80 sticky top-0 border-b border-slate-700">
                   <tr>
-                    <th className="px-6 py-4 text-left font-semibold text-sm">Payment ID</th>
-                    <th className="px-6 py-4 text-left font-semibold text-sm">Booking ID</th>
-                    <th className="px-6 py-4 text-left font-semibold text-sm">Amount</th>
-                    <th className="px-6 py-4 text-left font-semibold text-sm">Status</th>
-                    <th className="px-6 py-4 text-left font-semibold text-sm">Gateway</th>
-                    <th className="px-6 py-4 text-left font-semibold text-sm">Date & Time</th>
+                    <SortTh ctx={sortedPayments} k="payment_id" className="px-6 py-4 text-left font-semibold text-sm">Payment ID</SortTh>
+                    <SortTh ctx={sortedPayments} k="booking_id" className="px-6 py-4 text-left font-semibold text-sm">Booking ID</SortTh>
+                    <SortTh ctx={sortedPayments} k="amount" className="px-6 py-4 text-left font-semibold text-sm">Amount</SortTh>
+                    <SortTh ctx={sortedPayments} k="status" className="px-6 py-4 text-left font-semibold text-sm">Status</SortTh>
+                    <SortTh ctx={sortedPayments} k="gateway" className="px-6 py-4 text-left font-semibold text-sm">Gateway</SortTh>
+                    <SortTh ctx={sortedPayments} k="created_at" className="px-6 py-4 text-left font-semibold text-sm">Date & Time</SortTh>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {payments.map((payment) => (
+                  {sortedPayments.rows.map((payment) => (
                     <tr key={payment.payment_id} className="hover:bg-slate-700/30 transition">
                       <td className="px-6 py-4 text-[#FCD34D] font-mono font-semibold">
                         {payment.payment_id}

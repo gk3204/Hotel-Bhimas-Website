@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell , SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 import {
   getRoomTypes,
   createRoomType,
@@ -10,6 +11,8 @@ import { FaPlus, FaEdit, FaToggleOn, FaToggleOff } from "react-icons/fa";
 
 const RoomTypes = () => {
   const [roomTypes, setRoomTypes] = useState([]);
+  // v5s: click any header to sort; a third click returns to the API's order.
+  const sortedTypes = useTableSort(roomTypes);
   const [loading, setLoading] = useState(false);
   const [editingRoom, setEditingRoom] = useState(null);
   const [toast, setToast] = useState(null);
@@ -182,19 +185,19 @@ const RoomTypes = () => {
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 sticky top-0 border-b border-slate-700">
                   <tr>
-                    <th className="px-6 py-4 font-semibold text-sm">ID</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Name</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Price/Night</th>
-                    <th className="px-6 py-4 font-semibold text-sm">GST</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Max adults</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Total Rooms</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Status</th>
+                    <SortTh ctx={sortedTypes} k="room_type_id" className="px-6 py-4 font-semibold text-sm">ID</SortTh>
+                    <SortTh ctx={sortedTypes} k="name" className="px-6 py-4 font-semibold text-sm">Name</SortTh>
+                    <SortTh ctx={sortedTypes} k="price_per_night" className="px-6 py-4 font-semibold text-sm">Price/Night</SortTh>
+                    <SortTh ctx={sortedTypes} k="gst_percent" className="px-6 py-4 font-semibold text-sm">GST</SortTh>
+                    <SortTh ctx={sortedTypes} k="max_occupancy" className="px-6 py-4 font-semibold text-sm">Max adults</SortTh>
+                    <SortTh ctx={sortedTypes} k="total_rooms" className="px-6 py-4 font-semibold text-sm">Total Rooms</SortTh>
+                    <SortTh ctx={sortedTypes} k="is_active" className="px-6 py-4 font-semibold text-sm">Status</SortTh>
                     <th className="px-6 py-4 font-semibold text-sm">Actions</th>
                   </tr>
                 </thead>
 
                 <tbody className="divide-y divide-slate-700">
-                  {roomTypes.map((room) => (
+                  {sortedTypes.rows.map((room) => (
                     <tr
                       key={room.room_type_id}
                       className="hover:bg-slate-700/30 transition"

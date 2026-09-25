@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from "react";
 import { FaSyncAlt, FaCheckDouble, FaCheck } from "react-icons/fa";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell , SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 import {
   getTickets,
   getTicket,
@@ -45,6 +46,8 @@ const STATUS_LABEL = {
 
 export default function Maintenance() {
   const [tickets, setTickets] = useState([]);
+  // v5s: click any header to sort; a third click returns to the API's order.
+  const sortedTickets = useTableSort(tickets);
   const [summary, setSummary] = useState({});
   const [staff, setStaff] = useState([]);
   const [filters, setFilters] = useState({ status: "", category: "", overdue: false });
@@ -182,18 +185,18 @@ export default function Maintenance() {
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 border-b border-slate-700">
                   <tr>
-                    <th className="px-5 py-4 font-semibold text-sm">#</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Location</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Category</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Priority</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Status</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Assignee</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Age</th>
+                    <SortTh ctx={sortedTickets} k="id" className="px-5 py-4 font-semibold text-sm">#</SortTh>
+                    <SortTh ctx={sortedTickets} k="room_number" className="px-5 py-4 font-semibold text-sm">Location</SortTh>
+                    <SortTh ctx={sortedTickets} k="category" className="px-5 py-4 font-semibold text-sm">Category</SortTh>
+                    <SortTh ctx={sortedTickets} k="priority" className="px-5 py-4 font-semibold text-sm">Priority</SortTh>
+                    <SortTh ctx={sortedTickets} k="status" className="px-5 py-4 font-semibold text-sm">Status</SortTh>
+                    <SortTh ctx={sortedTickets} k="assignee_name" className="px-5 py-4 font-semibold text-sm">Assignee</SortTh>
+                    <SortTh ctx={sortedTickets} k="created_at" className="px-5 py-4 font-semibold text-sm">Age</SortTh>
                     <th className="px-5 py-4 font-semibold text-sm text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {tickets.map((t) => (
+                  {sortedTickets.rows.map((t) => (
                     <React.Fragment key={t.id}>
                       <tr className="hover:bg-slate-700/30 transition">
                         <td className="px-5 py-4 font-medium">{t.id}</td>

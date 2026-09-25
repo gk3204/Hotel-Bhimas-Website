@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell , SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 import {
   getPromotions,
   createPromotion,
@@ -22,6 +23,8 @@ const emptyForm = {
 
 const Promotions = () => {
   const [promotions, setPromotions] = useState([]);
+  // v5s: click any header to sort; a third click returns to the API's order.
+  const sortedPromos = useTableSort(promotions);
   const [roomTypes, setRoomTypes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [form, setForm] = useState(emptyForm);
@@ -242,16 +245,16 @@ const Promotions = () => {
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 sticky top-0 border-b border-slate-700">
                   <tr>
-                    <th className="px-6 py-4 font-semibold text-sm">Name</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Discount</th>
+                    <SortTh ctx={sortedPromos} k="name" className="px-6 py-4 font-semibold text-sm">Name</SortTh>
+                    <SortTh ctx={sortedPromos} k="discount_value" className="px-6 py-4 font-semibold text-sm">Discount</SortTh>
                     <th className="px-6 py-4 font-semibold text-sm">Applies To</th>
                     <th className="px-6 py-4 font-semibold text-sm">Window</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Status</th>
+                    <SortTh ctx={sortedPromos} k="is_active" className="px-6 py-4 font-semibold text-sm">Status</SortTh>
                     <th className="px-6 py-4 font-semibold text-sm">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {promotions.map((p) => (
+                  {sortedPromos.rows.map((p) => (
                     <tr key={p.promotion_id} className="hover:bg-slate-700/30 transition">
                       <td className="px-6 py-4 font-medium">{p.name}</td>
                       <td className="px-6 py-4 text-[#E5C07B] font-bold">{formatValue(p)}</td>

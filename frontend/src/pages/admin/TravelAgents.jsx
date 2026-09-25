@@ -1,5 +1,6 @@
 import React, { useEffect, useState } from "react";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell , SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 import {
   getAgents,
   createAgent,
@@ -17,6 +18,8 @@ const emptyForm = { name: "", contact: "", gst_no: "", commission_percent: "", c
 
 const TravelAgents = () => {
   const [agents, setAgents] = useState([]);
+  // v5s: click any header to sort; a third click returns to the API's order.
+  const sortedAgents = useTableSort(agents);
   const [roomTypes, setRoomTypes] = useState([]);
   const [loading, setLoading] = useState(false);
   const [toast, setToast] = useState(null);
@@ -181,18 +184,18 @@ const TravelAgents = () => {
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 border-b border-slate-700">
                   <tr>
-                    <th className="px-6 py-4 font-semibold text-sm">ID</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Name</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Contact</th>
-                    <th className="px-6 py-4 font-semibold text-sm">GSTIN</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Commission</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Credit Limit</th>
-                    <th className="px-6 py-4 font-semibold text-sm">Status</th>
+                    <SortTh ctx={sortedAgents} k="agent_id" className="px-6 py-4 font-semibold text-sm">ID</SortTh>
+                    <SortTh ctx={sortedAgents} k="name" className="px-6 py-4 font-semibold text-sm">Name</SortTh>
+                    <SortTh ctx={sortedAgents} k="phone" className="px-6 py-4 font-semibold text-sm">Contact</SortTh>
+                    <SortTh ctx={sortedAgents} k="gstin" className="px-6 py-4 font-semibold text-sm">GSTIN</SortTh>
+                    <SortTh ctx={sortedAgents} k="commission_percent" className="px-6 py-4 font-semibold text-sm">Commission</SortTh>
+                    <SortTh ctx={sortedAgents} k="credit_limit" className="px-6 py-4 font-semibold text-sm">Credit Limit</SortTh>
+                    <SortTh ctx={sortedAgents} k="is_active" className="px-6 py-4 font-semibold text-sm">Status</SortTh>
                     <th className="px-6 py-4 font-semibold text-sm">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {agents.map((a) => (
+                  {sortedAgents.rows.map((a) => (
                     <tr key={a.id} className={`hover:bg-slate-700/30 transition ${!a.is_active ? "opacity-50" : ""}`}>
                       <td className="px-6 py-4 font-semibold text-[#FCD34D]">#{a.id}</td>
                       <td className="px-6 py-4 font-medium">{a.name}</td>

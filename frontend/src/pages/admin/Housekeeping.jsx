@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from "react";
 import { FaSyncAlt, FaCheckDouble, FaBroom } from "react-icons/fa";
 import { getRooms, getConfig, inspectRoom, setRoomStatus } from "../../api/housekeeping";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell , SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 import ConfigPanel from "../../components/admin/ConfigPanel";
 import { groupByKey } from "../../components/admin/settingsGroups";
 import { useCategoryList, prettyCategory } from "../../utils/useCategoryList";
@@ -20,6 +21,8 @@ const hkChip = (s) => {
 
 export default function Housekeeping() {
   const [rooms, setRooms] = useState([]);
+  // v5s: click any header to sort; a third click returns to the API's order.
+  const sortedRooms = useTableSort(rooms);
   const [config, setConfig] = useState({ auto_inspect: false, cleaning_max_hours: 6 });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -142,18 +145,18 @@ export default function Housekeeping() {
               <table className="w-full text-left">
                 <thead className="bg-slate-900/80 border-b border-slate-700">
                   <tr>
-                    <th className="px-5 py-4 font-semibold text-sm">Room</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Room status</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Housekeeping</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Cleaning task</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Cleaned by</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Inspected by</th>
-                    <th className="px-5 py-4 font-semibold text-sm">Updated</th>
+                    <SortTh ctx={sortedRooms} k="room_number" className="px-5 py-4 font-semibold text-sm">Room</SortTh>
+                    <SortTh ctx={sortedRooms} k="status" className="px-5 py-4 font-semibold text-sm">Room status</SortTh>
+                    <SortTh ctx={sortedRooms} k="display" className="px-5 py-4 font-semibold text-sm">Housekeeping</SortTh>
+                    <SortTh ctx={sortedRooms} k="task_status" className="px-5 py-4 font-semibold text-sm">Cleaning task</SortTh>
+                    <SortTh ctx={sortedRooms} k="cleaned_by_name" className="px-5 py-4 font-semibold text-sm">Cleaned by</SortTh>
+                    <SortTh ctx={sortedRooms} k="inspected_by_name" className="px-5 py-4 font-semibold text-sm">Inspected by</SortTh>
+                    <SortTh ctx={sortedRooms} k="updated_at" className="px-5 py-4 font-semibold text-sm">Updated</SortTh>
                     <th className="px-5 py-4 font-semibold text-sm text-right">Action</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {rooms.map((r) => (
+                  {sortedRooms.rows.map((r) => (
                     <tr key={r.room_id} className="hover:bg-slate-700/30 transition">
                       <td className="px-5 py-4 font-medium">{r.room_number}</td>
                       <td className="px-5 py-4 text-slate-300 text-sm">{r.room_status}</td>

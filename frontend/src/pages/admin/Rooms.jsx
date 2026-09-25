@@ -9,7 +9,8 @@ import {
 } from "../../api/rooms";
 import { getRoomTypes } from "../../api/roomTypes";
 import { useConfirm } from "../../components/ConfirmDialog";
-import { PageShell } from "../../components/admin/BackofficeUI";
+import { PageShell, SortTh } from "../../components/admin/BackofficeUI";
+import { useTableSort } from "../../utils/tableSort";
 import { FaPlus, FaEdit, FaTrash, FaToggleOn, FaToggleOff, FaHistory } from "react-icons/fa";
 
 const STATUSES = ["vacant", "occupied", "cleaning", "inspected", "maintenance", "blocked"];
@@ -25,6 +26,8 @@ const STATUS_COLORS = {
 
 const Rooms = () => {
   const [rooms, setRooms] = useState([]);
+  // v5s: click-to-sort over the rows the API already ordered; a third click restores that order.
+  const sortedRooms = useTableSort(rooms);
   const [roomTypes, setRoomTypes] = useState([]);
   const [editingRoom, setEditingRoom] = useState(null);
   const [toast, setToast] = useState(null);
@@ -221,14 +224,17 @@ const Rooms = () => {
           <table className="w-full text-left">
             <thead className="bg-slate-900/60 text-slate-300 text-sm">
               <tr>
-                <th className="px-5 py-3">Room</th>
-                <th className="px-5 py-3">Type</th>
-                <th className="px-5 py-3">Bldg / Floor</th>
-                <th className="px-5 py-3">Lock</th>
-                <th className="px-5 py-3">Max Cards</th>
-                <th className="px-5 py-3">Lock No</th>
-                <th className="px-5 py-3">Status</th>
-                <th className="px-5 py-3">Active</th>
+                {/* v5s: click to sort. Room sorts NUMERICALLY (cmpValues uses numeric collation), so
+                    9 comes before 10 — the server already sends them in that order, and a third
+                    click returns to it. */}
+                <SortTh ctx={sortedRooms} k="room_number" className="px-5 py-3">Room</SortTh>
+                <SortTh ctx={sortedRooms} k="type" get={(r) => typeName(r.room_type_id)} className="px-5 py-3">Type</SortTh>
+                <SortTh ctx={sortedRooms} k="bldg" get={(r) => `${r.building}/${r.floor}`} className="px-5 py-3">Bldg / Floor</SortTh>
+                <SortTh ctx={sortedRooms} k="lock_type" className="px-5 py-3">Lock</SortTh>
+                <SortTh ctx={sortedRooms} k="max_cards" className="px-5 py-3">Max Cards</SortTh>
+                <SortTh ctx={sortedRooms} k="lock_no" className="px-5 py-3">Lock No</SortTh>
+                <SortTh ctx={sortedRooms} k="status" className="px-5 py-3">Status</SortTh>
+                <SortTh ctx={sortedRooms} k="is_active" className="px-5 py-3">Active</SortTh>
                 <th className="px-5 py-3 text-right">Actions</th>
               </tr>
             </thead>
@@ -236,7 +242,7 @@ const Rooms = () => {
               {rooms.length === 0 && (
                 <tr><td colSpan="9" className="px-5 py-6 text-slate-400">No rooms yet. Add your first room above.</td></tr>
               )}
-              {rooms.map((r) => (
+              {sortedRooms.rows.map((r) => (
                 <tr key={r.room_id} className={`border-t border-slate-700/60 hover:bg-slate-700/20 ${r.is_active ? "" : "opacity-50"}`}>
                   <td className="px-5 py-3 font-semibold">
                     {r.room_number}
