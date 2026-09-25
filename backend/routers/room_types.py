@@ -37,7 +37,11 @@ def get_room_types(website_only: bool = Query(False), db: Session = Depends(get_
     return q.order_by(*ordering.name_key(RoomType.name)).all()
 
 # CREATE room type
-@router.post("/")
+# v5s SECURITY: these three CRUD routes carried NO auth guard while every rate-plan route below
+# them has always had one. Anyone who could reach the Railway URL could create a room type or
+# rewrite the nightly rate the website sells at (a QA probe changed a rate to Rs 7.00 with no
+# token at all). Admin-only, like the rest of the file.
+@router.post("/", dependencies=[Depends(require_admin)])
 def create_room_type(
     data: RoomTypeCreate,
     db: Session = Depends(get_db)
@@ -60,7 +64,7 @@ def create_room_type(
 
 
 # TOGGLE active/inactive
-@router.patch("/{room_type_id}")
+@router.patch("/{room_type_id}", dependencies=[Depends(require_admin)])
 def toggle_room_type(
     room_type_id: int,
     data: RoomTypeUpdate,
@@ -82,7 +86,7 @@ def toggle_room_type(
         "is_active": room_type.is_active
     }
 
-@router.put("/{room_type_id}")
+@router.put("/{room_type_id}", dependencies=[Depends(require_admin)])
 def update_room_type_details(
     room_type_id: int,
     data: RoomTypeUpdateDetails,

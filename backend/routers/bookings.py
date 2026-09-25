@@ -486,7 +486,11 @@ def read_all_bookings(
 #     return result
 
 
-@router.get("/{booking_id}")
+# v5s SECURITY: unguarded, while the neighbouring GET / and /filter/by-date both require a login.
+# Booking ids are sequential, so this returned any guest's name, phone, e-mail, stay and amounts
+# to an unauthenticated `for` loop — a personal-data exposure, not just a missing check. Both the
+# admin portal and the desk already send a token on this call.
+@router.get("/{booking_id}", dependencies=[Depends(require_reception_or_admin)])
 def read_booking(booking_id: int, db: Session = Depends(get_db)):
     booking = (
         db.query(Booking)
@@ -574,7 +578,8 @@ def bookings_by_date(
 
     return bookings
 
-@router.get("/filter/by-status/{status}")
+# v5s SECURITY: unguarded, and it returned EVERY booking row in full (including admin_notes).
+@router.get("/filter/by-status/{status}", dependencies=[Depends(require_reception_or_admin)])
 def bookings_by_status(status: str, db: Session = Depends(get_db)):
     # 🔒 Clean up expired bookings before fetching
     expire_pending_bookings(db)
