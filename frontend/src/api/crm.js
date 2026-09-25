@@ -17,13 +17,30 @@ async function handle(res, fallback) {
   return res.json();
 }
 
-export async function listGuests({ q = "", vip = null, blacklist = null } = {}) {
+export async function listGuests({ q = "", vip = null, blacklist = null,
+                                   limit = 25, offset = 0 } = {}) {
   const params = new URLSearchParams();
   if (q) params.set("q", q);
   if (vip) params.set("vip", "true");
   if (blacklist) params.set("blacklist", "true");
+  params.set("limit", String(limit));
+  params.set("offset", String(offset));
   const res = await fetch(`${BASE_URL}/crm/guests?${params.toString()}`, { headers: getAuthHeader() });
+  // { data, matched, offset, limit, has_more } — the server sorts by name and pages, so A-Z is true
+  // across the whole directory rather than across whichever rows happened to load.
   return handle(res, "Failed to load guests");
+}
+
+// Every matching guest, in the server's order — for CSV export, where a one-page export of a
+// directory would quietly mislead. Capped so a runaway loop cannot hammer the API.
+export async function listAllGuests(filters = {}) {
+  const out = [];
+  for (let offset = 0; offset < 10000; offset += 200) {
+    const page = await listGuests({ ...filters, limit: 200, offset });
+    out.push(...(page.data || []));
+    if (!page.has_more) break;
+  }
+  return out;
 }
 
 export async function getGuest(id) {

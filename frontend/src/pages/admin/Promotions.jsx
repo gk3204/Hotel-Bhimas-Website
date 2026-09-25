@@ -38,7 +38,7 @@ const Promotions = () => {
     try {
       const [promos, rooms] = await Promise.all([getPromotions(), getRoomTypes()]);
       setPromotions(promos);
-      setRoomTypes(rooms.sort((a, b) => a.room_type_id - b.room_type_id));
+      setRoomTypes(rooms);   // v5s: the API orders room types by name; do not re-sort by id
     } catch (err) {
       showToast(err.message || "Failed to load promotions", "error");
     } finally {

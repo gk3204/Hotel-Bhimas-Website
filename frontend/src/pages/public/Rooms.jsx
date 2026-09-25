@@ -108,8 +108,8 @@ const Rooms = () => {
           .map((room) => ({
             ...room,
             ...(roomExtraDetails[room.room_type_id] || {}),
-          }))
-          .sort((a, b) => a.room_type_id - b.room_type_id);
+          }));
+        // v5s: the API returns room types by name; the id sort that used to be here overrode it.
 
         setRooms(merged);
       } catch (error) {

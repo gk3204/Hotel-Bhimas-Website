@@ -2,6 +2,7 @@ import React, { useEffect, useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import {
   listGuests,
+  listAllGuests,
   getGuest,
   getGuestHistory,
   updateGuest,
@@ -9,7 +10,7 @@ import {
   setBlacklist,
 } from "../../api/crm";
 import { FaSearch, FaStar, FaBan, FaEdit, FaGift, FaFileCsv } from "react-icons/fa";
-import { usePaged, Paginator } from "../../components/admin/Paginator";
+import { Paginator } from "../../components/admin/Paginator";
 import { PageShell } from "../../components/admin/BackofficeUI";
 import { exportCsv } from "../../utils/exportCsv";
 
@@ -27,7 +28,16 @@ const GuestDirectory = () => {
   const [segment, setSegment] = useState("all");
   const [selected, setSelected] = useState(null); // {guest, history}
   const [toast, setToast] = useState(null);
-  const paged = usePaged(guests, 25);
+  // v5s: the SERVER sorts (by name) and pages. Client-side paging over a server-truncated list made
+  // "A-Z" mean "A-Z within whichever rows arrived" — with 243 guests and a 50-row cap, most of the
+  // directory was simply unreachable.
+  const PAGE_SIZE = 25;
+  const [page, setPage] = useState(0);
+  const [matched, setMatched] = useState(0);
+
+  // A new search or segment starts at the first page — staying on page 4 of the previous result set
+  // shows an empty table and looks like "no guests".
+  useEffect(() => { setPage(0); }, [q, segment]);
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -41,14 +51,17 @@ const GuestDirectory = () => {
         q,
         vip: segment === "vip",
         blacklist: segment === "blacklist",
+        limit: PAGE_SIZE,
+        offset: page * PAGE_SIZE,
       });
       setGuests(data.data || []);
+      setMatched(data.matched ?? (data.data || []).length);
     } catch (err) {
       showToast(err.message || "Failed to load guests", "error");
     } finally {
       setLoading(false);
     }
-  }, [q, segment]);
+  }, [q, segment, page]);
 
   useEffect(() => {
     load();
@@ -159,9 +172,14 @@ const GuestDirectory = () => {
               ))}
             </div>
             <button
-              onClick={() => {
+              onClick={async () => {
                 if (!guests.length) { showToast("Nothing to export", "error"); return; }
-                exportCsv("guest-directory.csv", guests, [
+                // Every match, in the order the screen shows them — exporting only the visible page
+                // of a directory would quietly mislead.
+                const all = await listAllGuests({
+                  q, vip: segment === "vip", blacklist: segment === "blacklist",
+                });
+                exportCsv("guest-directory.csv", all, [
                   { header: "Name", value: (g) => g.name },
                   { header: "Phone", value: (g) => g.phone },
                   { header: "Stays", value: (g) => g.stay_count },
@@ -205,7 +223,7 @@ const GuestDirectory = () => {
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
-                  {paged.pageItems.map((g) => (
+                  {guests.map((g) => (
                     <tr
                       key={g.guest_id}
                       className={`hover:bg-slate-700/30 transition ${g.profile.blacklist ? "opacity-70" : ""}`}
@@ -239,7 +257,14 @@ const GuestDirectory = () => {
                 </tbody>
               </table>
             </div>
-            <Paginator {...paged} />
+            <Paginator
+              page={page}
+              setPage={setPage}
+              pageCount={Math.max(1, Math.ceil(matched / PAGE_SIZE))}
+              total={matched}
+              from={matched === 0 ? 0 : page * PAGE_SIZE + 1}
+              to={Math.min(matched, page * PAGE_SIZE + guests.length)}
+            />
             </>
           )}
         </div>

@@ -40,7 +40,7 @@ const UserManagement = () => {
     setLoading(true);
     try {
       const data = await getUsers();
-      setUsers(data.sort((a, b) => a.user_id - b.user_id));
+      setUsers(data);   // v5s: the API now orders users by role then username
     } catch (err) {
       showToast("Failed to load users", "error");
     }

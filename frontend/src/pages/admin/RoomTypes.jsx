@@ -30,9 +30,9 @@ const RoomTypes = () => {
 
   const loadRoomTypes = async () => {
     setLoading(true);
-    const data = await getRoomTypes();
-    const sorted = data.sort((a, b) => a.room_type_id - b.room_type_id);
-    setRoomTypes(sorted);
+    // v5s: the API now returns room types by NAME. This used to re-sort them by id — which is
+    // insertion order, meaningless to a human — and it also mutated the fetched array in place.
+    setRoomTypes(await getRoomTypes());
     setLoading(false);
   };
 

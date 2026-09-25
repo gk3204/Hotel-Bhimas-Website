@@ -226,7 +226,10 @@ function RosterTab({ staff, showToast }) {
       {coverage?.data?.length > 0 && (
         <Card title="Planned vs actually worked">
           <DataTable
-            columns={["Staff", "Planned", "Absent", "Sessions worked", "Hours", "Drawers opened", "No-shows", "Unplanned"]}
+            columns={[{ label: "Staff", sort: "staff_name" }, { label: "Planned", sort: "planned" },
+                      { label: "Absent", sort: "absent" }, { label: "Sessions worked", sort: "worked_sessions" },
+                      { label: "Hours", sort: "hours" }, { label: "Drawers opened", sort: "drawers_opened" },
+                      { label: "No-shows", sort: "no_shows" }, { label: "Unplanned", sort: "unplanned" }]}
             rows={coverage.data}
             empty="Nothing rostered or worked this week."
             renderRow={(r) => [
@@ -363,7 +366,8 @@ function AttendanceTab({ staff, showToast }) {
       {data?.by_staff?.length > 0 && (
         <Card title="Hours by staff member" className="mb-6">
           <DataTable
-            columns={["Staff", "Sessions", "Hours"]}
+            columns={[{ label: "Staff", sort: "staff_name" }, { label: "Sessions", sort: "sessions" },
+                      { label: "Hours", sort: "hours" }]}
             rows={data.by_staff}
             renderRow={(r) => [r.staff_name, r.sessions, r.hours]}
           />
@@ -372,7 +376,10 @@ function AttendanceTab({ staff, showToast }) {
 
       <Card title="Sessions">
         <DataTable
-          columns={["Staff", "Clock in", "Clock out", "Hours", "Source", "Station", "Duty", "Note"]}
+          columns={[{ label: "Staff", sort: "staff_name" }, { label: "Clock in", sort: "clock_in" },
+            { label: "Clock out", sort: "clock_out" }, { label: "Hours", sort: "hours_worked" },
+            { label: "Source", sort: "source" }, { label: "Station", sort: "station_id" },
+            "Duty", "Note"]}
           rows={data?.data} loading={loading} error={error}
           empty="No attendance recorded in this period."
           renderRow={(r) => [
@@ -514,8 +521,14 @@ function PerformanceTab({ showToast }) {
 
       <Card title="Per staff member">
         <DataTable
-          columns={["Staff", "Role", "Bookings", "Room nights", "Revenue", "Upsells", "Discounts",
-            "Voids", "Cards", "Shifts", "Cash variance", "Complaints", "Hours", "Planned", "No-shows"]}
+          columns={[{ label: "Staff", sort: "staff_name" }, { label: "Role", sort: "role" },
+            { label: "Bookings", sort: "bookings" }, { label: "Room nights", sort: "room_nights" },
+            { label: "Revenue", sort: "revenue" }, { label: "Upsells", sort: "upsells" },
+            { label: "Discounts", sort: "discounts" }, { label: "Voids", sort: "voids" },
+            { label: "Cards", sort: "cards" }, { label: "Shifts", sort: "shifts" },
+            { label: "Cash variance", sort: "cash_variance" },
+            { label: "Complaints", sort: "complaints" }, { label: "Hours", sort: "hours" },
+            { label: "Planned", sort: "planned" }, { label: "No-shows", sort: "no_shows" }]}
           rows={data?.rows} loading={loading} error={error}
           empty="No staff activity in this period."
           renderRow={(r) => [
@@ -588,7 +601,9 @@ function CardsTab({ staff, reload, showToast }) {
 
       <Card title="Staff">
         <DataTable
-          columns={["Staff", "Role", "PIN set", "Card bound", "Assign / change card UID", ""]}
+          columns={[{ label: "Staff", sort: (r) => r.full_name || r.username },
+            { label: "Role", sort: "role" }, "PIN set", "Card bound",
+            "Assign / change card UID", ""]}
           rows={staff}
           empty="No staff accounts yet."
           renderRow={(u) => [

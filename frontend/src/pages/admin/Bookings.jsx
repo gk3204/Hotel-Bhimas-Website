@@ -51,38 +51,36 @@ const Bookings = () => {
   const [redate, setRedate] = useState(null);   // { booking, check_in, check_out, check_in_time, reason }
   const [redateBusy, setRedateBusy] = useState(false);
 
+  // Column -> the server's whitelisted sort key (routers/bookings.py SORTABLE). Kept as a map so a
+  // column the API cannot sort simply falls back to the default order instead of sending junk.
+  const SORT_FIELDS = {
+    booking_id: "booking_id",
+    guest_name: "guest",
+    check_in: "check_in",
+    check_out: "check_out",
+    status: "status",
+    source: "source",
+    payable_amount: "amount",
+  };
+
   const limit = 15;
   const totalPages = Math.ceil(total / limit);
 
+  // v5s: sortField/sortOrder BELONG here. They were absent, so clicking a column header updated the
+  // arrow and re-sorted nothing until some other filter happened to change.
   useEffect(() => {
     loadBookings();
-  }, [page, fromDate, toDate, statusFilter]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, fromDate, toDate, statusFilter, sortField, sortOrder]);
 
   const loadBookings = async () => {
     try {
       setLoading(true);
-      const res = await getBookings(page, fromDate, toDate, statusFilter);
-      let sortedBookings = [...res.data];
-
-      sortedBookings.sort((a, b) => {
-        let aVal = a[sortField];
-        let bVal = b[sortField];
-
-        if (
-          sortField === "booking_id" ||
-          sortField === "payable_amount" ||
-          sortField === "room_count"
-        ) {
-          aVal = Number(aVal);
-          bVal = Number(bVal);
-        }
-
-        if (aVal < bVal) return sortOrder === "asc" ? -1 : 1;
-        if (aVal > bVal) return sortOrder === "asc" ? 1 : -1;
-        return 0;
-      });
-
-      setBookings(sortedBookings);
+      // The server sorts and pages. The old client-side sort could only ever reorder the 15 rows
+      // already fetched, so "sort by amount" meant "the biggest of these fifteen".
+      const res = await getBookings(page, fromDate, toDate, statusFilter,
+                                    SORT_FIELDS[sortField] || "", sortOrder);
+      setBookings(res.data);
       setTotal(res.total);
     } catch (err) {
       showToast("Failed to load bookings", "error");
@@ -100,6 +98,7 @@ const Bookings = () => {
   }, []);
 
   const handleSort = (field) => {
+    setPage(1);                   // a new sort means page 1; staying on page 4 of the old order lies
     if (sortField === field) {
       setSortOrder(sortOrder === "asc" ? "desc" : "asc");
     } else {

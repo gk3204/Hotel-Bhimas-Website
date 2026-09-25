@@ -11,7 +11,9 @@ function getAuthHeader() {
  // change if deployed
 
 // Get all bookings (paginated + optional check-in date range and status filter — ALT-10)
-export const getBookings = async (page = 1, fromDate = "", toDate = "", status = "") => {
+export const getBookings = async (
+  page = 1, fromDate = "", toDate = "", status = "", sort = "", dir = ""
+) => {
   const limit = 15;
   const skip = (page - 1) * limit;
 
@@ -20,6 +22,9 @@ export const getBookings = async (page = 1, fromDate = "", toDate = "", status =
   if (fromDate) url += `&from_date=${fromDate}`;
   if (toDate) url += `&to_date=${toDate}`;
   if (status) url += `&status=${encodeURIComponent(status)}`;
+  // v5s: sorting is done by the SERVER, because this list is paged 15 at a time — sorting the rows
+  // already on screen would order a page, not the hotel.
+  if (sort) url += `&sort=${encodeURIComponent(sort)}&dir=${dir === "asc" ? "asc" : "desc"}`;
 
   const res = await fetch(url, {
     headers: getAuthHeader(),
