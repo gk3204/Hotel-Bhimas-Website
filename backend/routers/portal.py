@@ -37,6 +37,7 @@ from models import (Booking, Folio, FolioCharge, Guest, GuestPortalSession, Gues
 from schemas import (CabRequest, CheckoutRequestBody, MenuAvailabilityUpdate, MenuItemCreate,
                      MenuItemUpdate, PortalConfigUpdate, PortalSessionRequest, RequestActionRequest,
                      RoomServiceOrder, WakeupRequest, WifiRequestBody)
+from utils import ordering
 from utils import settings as app_settings
 from utils.audit import _resolve_user_id, write_audit
 from utils.auth_utils import require_admin, require_reception_or_admin
@@ -474,7 +475,7 @@ def list_menu(available_only: bool = Query(False), db: Session = Depends(get_db)
     query = db.query(MenuItem)
     if available_only:
         query = query.filter(MenuItem.is_available == True)  # noqa: E712
-    rows = query.order_by(MenuItem.sort_order, MenuItem.name).all()
+    rows = query.order_by(*ordering.menu_item_key(MenuItem.category, MenuItem.sort_order, MenuItem.name)).all()
     return {"total": len(rows), "data": [_menu_dict(m) for m in rows]}
 
 
@@ -609,7 +610,7 @@ def portal_home(token: str, db: Session = Depends(get_db)):
     menu = []
     if cfg["room_service_enabled"]:
         menu = [_menu_dict(m) for m in db.query(MenuItem).filter(
-            MenuItem.is_available == True).order_by(MenuItem.sort_order, MenuItem.name).all()]  # noqa: E712
+            MenuItem.is_available == True).order_by(*ordering.menu_item_key(MenuItem.category, MenuItem.sort_order, MenuItem.name)).all()]  # noqa: E712
     wifi = None
     if cfg["wifi_enabled"]:
         wifi = {"ssid": cfg["wifi_ssid"],
@@ -641,7 +642,7 @@ def portal_menu(token: str, db: Session = Depends(get_db)):
     cfg = app_settings.get_portal_config(db)
     _feature_gate(cfg, "room_service_enabled")
     _resolve_token(db, token, for_action=False)
-    rows = db.query(MenuItem).order_by(MenuItem.sort_order, MenuItem.name).all()
+    rows = db.query(MenuItem).order_by(*ordering.menu_item_key(MenuItem.category, MenuItem.sort_order, MenuItem.name)).all()
     return {"total": len(rows), "data": [_menu_dict(m) for m in rows]}
 
 

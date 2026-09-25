@@ -24,6 +24,7 @@ from database import SessionLocal
 from models import Booking, GuestRequest, MenuItem
 from schemas import DeskRoomServiceOrder, RoomServiceCancel
 from services import room_service
+from utils import ordering
 from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_roomservice
@@ -92,7 +93,7 @@ def list_menu(db: Session = Depends(get_db), user=Depends(require_roomservice)):
     so a room-service login can't change what a dish costs."""
     rows = (db.query(MenuItem)
             .filter(MenuItem.is_available == True)  # noqa: E712
-            .order_by(MenuItem.sort_order, MenuItem.name).all())
+            .order_by(*ordering.menu_item_key(MenuItem.category, MenuItem.sort_order, MenuItem.name)).all())
     return {"items": [{
         "id": m.id, "name": m.name, "description": m.description, "category": m.category,
         "price": float(m.price or 0),
