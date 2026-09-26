@@ -813,12 +813,15 @@ def occupancy_analysis_data(db, as_on):
         disc, net = float(b.discount_amount or 0), float(b.grand_total or b.total_amount or 0)
         seg = _segment_of(db, b)
         pax = int((b.adults or 0) + (b.children or 0))
-        arr = b.checked_in_at
-        dep = booking_checkout_moment(b) if booking_checkout_moment else None
         for idx, it in enumerate(items):
             r = rooms_by_id.get(it.room_id)
             if not r:
                 continue
+            # v6f: this ROOM's own arrival and departure. A stay whose rooms arrived in two cars
+            # has two of each, and the booking's are the FIRST room's - so every later room was
+            # reported as having arrived and left at times it did not.
+            arr = it.checked_in_at or b.checked_in_at
+            dep = (booking_checkout_moment(b, item=it) if booking_checkout_moment else None)
             share = racks[idx] / rack_total
             rt = rt_by_id.get(it.room_type_id)
             row = {

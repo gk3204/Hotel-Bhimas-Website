@@ -33,6 +33,15 @@ def _now_ist() -> datetime:
     return datetime.utcnow() + IST_OFFSET
 
 
+def _item_room_label(db, item) -> str:
+    """One room's number (v6f). A stay's rooms can be due out at different times, so a reminder
+    is about a room, not about the booking."""
+    if not item.room_id:
+        return ""
+    row = db.query(Room.room_number).filter(Room.room_id == item.room_id).first()
+    return row[0] if row else ""
+
+
 def _room_label(db, booking) -> str:
     """Comma-joined assigned room numbers for the booking (empty before check-in)."""
     rows = (db.query(Room.room_number)
@@ -56,10 +65,19 @@ def send_checkout_reminders(db) -> int:
     sent = 0
     bookings = db.query(Booking).filter(Booking.status == "checked_in").all()
     for b in bookings:
-        moment = booking_checkout_moment(b)
-        # Fire once, the first sweep where checkout falls inside the lead window (and not past).
-        if now <= moment <= now + lead:
-            if wa.already_sent(db, f"checkout_reminder:{b.booking_id}"):
+        # v6f: ONE REMINDER PER ROOM, at that room's own checkout moment. A family arriving in two
+        # cars is due out at two different times; the booking-level moment is the FIRST room's, so
+        # the later rooms were being told to leave hours before they had to. The idempotency key
+        # carries the item id for the same reason - the rooms must not share one.
+        for it in b.booking_items:
+            if it.checked_out_at or not it.room_id:
+                continue
+            moment = booking_checkout_moment(b, item=it)
+            # Fire once, the first sweep where checkout falls inside the lead window (not past).
+            if not (now <= moment <= now + lead):
+                continue
+            key = f"checkout_reminder:{b.booking_id}:{it.booking_item_id}"
+            if wa.already_sent(db, key):
                 continue
             g = _guest(db, b)
             if not g or not (g.phone or g.email):
@@ -68,9 +86,9 @@ def send_checkout_reminders(db) -> int:
                 db, g, template="checkout_reminder",
                 params={"guest_name": g.name,
                         "checkout_time": moment.strftime("%d-%m-%Y %H:%M"),
-                        "room_label": _room_label(db, b)},
+                        "room_label": _item_room_label(db, it) or _room_label(db, b)},
                 booking_id=b.booking_id,
-                client_ref=f"checkout_reminder:{b.booking_id}")
+                client_ref=key)
             sent += 1
     return sent
 
@@ -85,23 +103,32 @@ def send_overstay_alerts(db) -> int:
     sent = 0
     bookings = db.query(Booking).filter(Booking.status == "checked_in").all()
     for b in bookings:
-        moment = booking_checkout_moment(b)
-        if now > moment + grace:
+        # v6f: per ROOM, like the reminder above - room 103 overstaying says nothing about room 101,
+        # and the booking-level moment is the earliest room's, so every room looked overdue as soon
+        # as the first one was.
+        for it in b.booking_items:
+            if it.checked_out_at or not it.room_id:
+                continue
+            moment = booking_checkout_moment(b, item=it)
+            if now <= moment + grace:
+                continue
             g = _guest(db, b)
-            room_label = _room_label(db, b)
-            if g and (g.phone or g.email) and not wa.already_sent(db, f"overstay:{b.booking_id}"):
+            room_label = _item_room_label(db, it) or _room_label(db, b)
+            key = f"overstay:{b.booking_id}:{it.booking_item_id}"
+            owner_key = f"overstay_owner:{b.booking_id}:{it.booking_item_id}"
+            if g and (g.phone or g.email) and not wa.already_sent(db, key):
                 notify_service.notify(
                     db, template="overstay",
                     params={"guest_name": g.name, "room_label": room_label},
                     to_phone=g.phone, to_email=g.email, to_name=g.name,
                     guest_id=g.guest_id, booking_id=b.booking_id,
-                    client_ref=f"overstay:{b.booking_id}", respect_optout=False)
+                    client_ref=key, respect_optout=False)
                 sent += 1
-            if cfg["owner_alerts_enabled"] and not wa.already_sent(db, f"overstay_owner:{b.booking_id}"):
+            if cfg["owner_alerts_enabled"] and not wa.already_sent(db, owner_key):
                 notify_service.notify_owner(
                     db, template="overstay",
                     params={"guest_name": g.name if g else "Guest", "room_label": room_label},
-                    client_ref=f"overstay_owner:{b.booking_id}")
+                    client_ref=owner_key)
                 sent += 1
     return sent
 

@@ -485,14 +485,23 @@ def booking_checkout_moment(booking: Booking, ref=None, item: BookingItem | None
     return anchor + timedelta(days=nights)
 
 
-def _card_window(booking: Booking):
+def _card_window(booking: Booking, item: BookingItem | None = None):
     """Card validity window.
     24h mode (default): expiry = the ACTUAL check-in moment + nights x 24h + grace
     (guest in at 10pm -> out at 10pm). Before check-in, 'now' stands in for the
     check-in moment (the wizard checks in and encodes within the same minute).
-    Fixed mode: expiry = checkout date @ CHECKOUT_HOUR + grace."""
+    Fixed mode: expiry = checkout date @ CHECKOUT_HOUR + grace.
+
+    v6f: pass the ROOM's booking item. Since v6c a stay's rooms arrive, extend and leave
+    independently, so they no longer share a checkout moment - and this window was still cut from
+    the BOOKING's, which `sync_booking_from_items` sets to the FIRST room's arrival. A family
+    arriving in two cars, noon and 9 pm, had the 9 pm rooms' cards expire at noon the next day:
+    locked out of rooms they had paid for, on the morning they were leaving. Without an item the
+    booking's own dates are used, which is what a single-room stay means and what every pre-v6f
+    caller meant.
+    """
     valid_from = datetime.now()
-    base = booking_checkout_moment(booking, ref=valid_from)
+    base = booking_checkout_moment(booking, ref=valid_from, item=item)
     return valid_from, base + timedelta(minutes=_grace_minutes())
 
 
@@ -943,15 +952,17 @@ def checkin_quote(data: CheckinQuoteRequest, db: Session = Depends(get_db),
 
 
 def _checkin_response(db: Session, booking: Booking, folio: Folio | None, already: bool):
-    valid_from, valid_to = _card_window(booking)
+    valid_from, valid_to = _card_window(booking)     # the stay's own window, for the response
     cards = []
     for item in booking.booking_items:
         if item.room_id:
+            # v6f: each card is cut to ITS OWN room's clock.
+            _vf, _vt = _card_window(booking, item)
             room = db.query(Room).filter(Room.room_id == item.room_id).first()
             # Key-lock rooms have a physical metal key — nothing to encode, so they produce no
             # card task and the desk wizard skips straight past the "cards" step for an all-key stay.
             if room and room.lock_type != "key":
-                cards.append(_encode_payload(db, item, room, valid_from, valid_to))
+                cards.append(_encode_payload(db, item, room, _vf, _vt))
     return {
         "booking_id": booking.booking_id,
         "status": booking.status,
@@ -2292,7 +2303,8 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
                                 detail="Folio already invoiced — the rate difference cannot be posted; "
                                        "shift with a zero adjustment or void the invoice first")
 
-        valid_from, valid_to = _card_window(booking)
+        # v6f: a shift moves ONE room, so the new card is cut to that room's own clock.
+        valid_from, valid_to = _card_window(booking, item)
         response = {
             "booking_id": booking.booking_id,
             "dry_run": data.dry_run,
@@ -2659,9 +2671,16 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         # again over the new number of nights.
         booking.checkout_extended_until = None
 
-        cards = db.query(CardIssuance).filter(
+        # v6f: ONLY the rooms being extended. Their window moved, so their cards must be re-cut;
+        # every other room's card is still correct, and killing it locks a guest out over a change
+        # that had nothing to do with them. (Room shift has filtered by room since v4b7; extend
+        # never did, so extending room 103 sent rooms 101 and 102 back to the desk.)
+        _extended_room_ids = {i.room_id for i in
+                              target_items(booking, getattr(data, "room_ids", None)) if i.room_id}
+        cards = [c for c in db.query(CardIssuance).filter(
             CardIssuance.booking_id == booking.booking_id,
             CardIssuance.status == "active").all()
+            if not _extended_room_ids or c.room_id in _extended_room_ids]
         for c in cards:
             c.status = "superseded"      # frees the max_cards slot for the re-cut
         superseded_ids = [c.id for c in cards]
@@ -2687,11 +2706,12 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         # the encoder cannot address (a non-numeric or out-of-range room number) must not turn
         # a successful extension into a 500. The stay stays flagged card_reencode_required, and
         # staff cut the key from the Cards screen instead.
-        valid_from, valid_to = _card_window(booking)
+        valid_from, valid_to = _card_window(booking)     # the stay's own window, for the response
         card_payloads = []
         for item in booking.booking_items:
             if not item.room_id:
                 continue
+            _vf, _vt = _card_window(booking, item)   # v6f: this room's clock, not the stay's
             room = db.query(Room).filter(Room.room_id == item.room_id).first()
             # v5n: a key-lock room has a metal key and nothing to encode — skip it, exactly as
             # check-in (_checkin_response) and /extend-hours already do. Without this a mixed
@@ -2699,7 +2719,7 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             if not room or room.lock_type == "key":
                 continue
             try:
-                card_payloads.append(_encode_payload(db, item, room, valid_from, valid_to))
+                card_payloads.append(_encode_payload(db, item, room, _vf, _vt))
             except HTTPException as e:
                 logger.error(f"extend: no card payload for room {room.room_number} "
                              f"(booking {booking.booking_id}): {e.detail}")
@@ -2876,9 +2896,16 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
 
         booking.checkout_extended_until = until
         booking.card_reencode_required = True
-        cards = db.query(CardIssuance).filter(
+        # v6f: ONLY the rooms being extended. Their window moved, so their cards must be re-cut;
+        # every other room's card is still correct, and killing it locks a guest out over a change
+        # that had nothing to do with them. (Room shift has filtered by room since v4b7; extend
+        # never did, so extending room 103 sent rooms 101 and 102 back to the desk.)
+        _extended_room_ids = {i.room_id for i in
+                              target_items(booking, getattr(data, "room_ids", None)) if i.room_id}
+        cards = [c for c in db.query(CardIssuance).filter(
             CardIssuance.booking_id == booking.booking_id,
             CardIssuance.status == "active").all()
+            if not _extended_room_ids or c.room_id in _extended_room_ids]
         for c in cards:
             c.status = "superseded"
         superseded_ids = [c.id for c in cards]
@@ -2895,15 +2922,16 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
                            "folio_balance": float(folio.balance or 0), "client_ref": data.client_ref},
                     client="desktop", commit=True)
 
-        valid_from, valid_to = _card_window(booking)
+        valid_from, valid_to = _card_window(booking)     # the stay's own window, for the response
         card_payloads = []
         for item in booking.booking_items:
             if not item.room_id:
                 continue
+            _vf, _vt = _card_window(booking, item)   # v6f: this room's clock, not the stay's
             room = db.query(Room).filter(Room.room_id == item.room_id).first()
             if room and room.lock_type != "key":
                 try:
-                    card_payloads.append(_encode_payload(db, item, room, valid_from, valid_to))
+                    card_payloads.append(_encode_payload(db, item, room, _vf, _vt))
                 except HTTPException as e:
                     logger.error(f"extend-hours: no card payload for room {room.room_number}: {e.detail}")
 
@@ -3433,6 +3461,10 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             if i.room_id:
                 room = db.query(Room).filter(Room.room_id == i.room_id).first()
                 if room:
+                    # v6f: this ROOM's own clock. On a stay whose rooms arrived at different
+                    # times the desk has to see which one is due out first, and the window beside
+                    # it is the one actually encoded on that room's card.
+                    _r_vf, _r_vt = _card_window(b, i)
                     rooms.append({
                         "room_id": room.room_id,
                         "room_number": room.room_number,
@@ -3441,6 +3473,10 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
                         "max_cards": room.max_cards,
                         "active_cards": _active_cards(db, room.room_id),
                         "lock_type": room.lock_type,   # key rooms skip card read/erase at checkout
+                        "checked_in_at": i.checked_in_at.isoformat() if i.checked_in_at else None,
+                        "expected_check_out": booking_checkout_moment(b, item=i).isoformat(),
+                        "valid_from": _r_vf.isoformat(),
+                        "valid_to": _r_vt.isoformat(),
                     })
         # v5s: a stay's own rooms read ascending ("9, 10", never "10, 9").
         rooms.sort(key=lambda r: ordering.room_number_sort_key(r["room_number"]))
@@ -3794,8 +3830,12 @@ def _reg_rules(db) -> str:
 
 
 @router.get("/checkin/{booking_id}/slip")
-def registration_slip(booking_id: int, db: Session = Depends(get_db),
+def registration_slip(booking_id: int, room_ids: str = Query(None),
+                      db: Session = Depends(get_db),
                       user=Depends(require_reception_or_admin)):
+    """The paper the guest signs. `room_ids` (comma-separated) prints the slip for just those
+    rooms — v6f, because on a split arrival the first car should not have to wait for the third
+    before it can sign anything. Omitted, every room that has actually arrived is on it."""
     booking = db.query(Booking).options(
         joinedload(Booking.guest),
         joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
@@ -3806,17 +3846,41 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail="Registration slip is available after check-in")
 
     folio = folio_resolver.primary_folio(db, booking)
-    rooms = []
-    for i in booking.booking_items:
-        if i.room_id:
-            room = db.query(Room).filter(Room.room_id == i.room_id).first()
-            if room:
-                rooms.append(room.room_number)
+    # v6f: which rooms this slip covers. A room only has a `room_id` once it has checked in, so
+    # the default already excludes rooms still to arrive; `room_ids` narrows it to one car's.
+    _wanted = None
+    if room_ids:
+        try:
+            _wanted = {int(x) for x in str(room_ids).split(",") if x.strip()}
+        except ValueError:
+            raise HTTPException(status_code=400, detail="room_ids must be comma-separated numbers")
+    slip_items = [i for i in booking.booking_items
+                  if i.room_id and (_wanted is None or i.room_id in _wanted)]
+    if _wanted and not slip_items:
+        raise HTTPException(status_code=404,
+                            detail="None of those rooms are checked in on this booking")
+    rooms, room_stays = [], []
+    for i in slip_items:
+        room = db.query(Room).filter(Room.room_id == i.room_id).first()
+        if room:
+            rooms.append(room.room_number)
+            # v6f: each room's OWN arrival and departure. Rooms on one booking can arrive in
+            # different cars and leave at different times, and a slip showing one pair of times
+            # for all of them is wrong for every room but the first.
+            room_stays.append({
+                "room_number": room.room_number,
+                "checked_in_at": i.checked_in_at or booking.checked_in_at,
+                "expected_check_out": booking_checkout_moment(booking, item=i),
+            })
 
     # All occupants (FE-3): the reg-slip lists every guest (name + masked ID + "ID on file"),
     # falling back to the lead Guest when no roster exists.
     guest_rows = (db.query(BookingGuest).filter(BookingGuest.booking_id == booking_id)
                   .order_by(BookingGuest.is_primary.desc(), BookingGuest.id).all())
+    # v6f: when the slip is for one car, it lists that car's occupants. A row with no room (a
+    # companion nobody tied to a room) stays on every slip rather than disappearing from all of them.
+    if _wanted is not None:
+        guest_rows = [g for g in guest_rows if g.room_id is None or g.room_id in _wanted]
     # v5n: each occupant's ROOM, so a group booking's slip records who slept where (the whole point
     # of the roster when three rooms are on one booking, and the first thing a police query asks).
     _room_nums = {r.room_id: r.room_number for r in
@@ -3840,6 +3904,9 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
         "id_type": booking.guest.id_type if booking.guest else None,
         "id_number_masked": booking.guest.id_number_masked if booking.guest else None,
         "rooms": rooms,
+        # v6f: one line per room, each with its own in/out. The PDF prints it whenever the slip
+        # covers more than one room.
+        "room_stays": room_stays,
         "check_in": booking.check_in,
         "check_out": booking.check_out,
         "checked_in_at": booking.checked_in_at,

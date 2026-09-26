@@ -751,6 +751,30 @@ def generate_registration_slip_pdf(slip_data):
     elements.append(meta_table)
     elements.append(Spacer(1, 0.25 * inch))
 
+    # v6f: each room's own arrival and departure, when the slip covers more than one. Since v6c
+    # a stay's rooms arrive and leave independently — a family in two cars is due out at two
+    # different times — and the single "Exp. check-out" above can only ever state one of them.
+    _stays = slip_data.get("room_stays") or []
+    if len(_stays) > 1:
+        elements.append(Paragraph("<b>Rooms</b>", styles["Normal"]))
+        elements.append(Spacer(1, 0.06 * inch))
+        s_rows = [["Room", "Checked in", "Expected check-out"]]
+        for st in _stays:
+            s_rows.append([st.get("room_number") or "—",
+                           _dt(st.get("checked_in_at")),
+                           _dt(st.get("expected_check_out"))])
+        s_table = Table(s_rows, colWidths=[70, 170, 170])
+        s_table.setStyle(TableStyle([
+            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f5f5f5")),
+            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
+            ('FONTSIZE', (0, 0), (-1, -1), 9),
+            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
+            ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
+            ('TOPPADDING', (0, 0), (-1, -1), 2),
+        ]))
+        elements.append(s_table)
+        elements.append(Spacer(1, 0.2 * inch))
+
     # Occupant roster (FE-3): list every guest with masked ID when there is more than the lead.
     guests = slip_data.get("guests") or []
     _ad = slip_data.get("adults")

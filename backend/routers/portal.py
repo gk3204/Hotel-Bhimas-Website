@@ -103,7 +103,13 @@ def _get_or_create_session(db: Session, booking: Booking, user=None, room_id=Non
         return s
     from routers.reception import booking_checkout_moment
     try:
-        expires = booking_checkout_moment(booking) + timedelta(hours=24)
+        # v6f: a portal session belongs to ONE room, and rooms on the same stay can be due out
+        # at different times. Expiring room 102's in-room link on room 101's clock cut a guest off
+        # from ordering while they were still in the hotel.
+        _item = (db.query(BookingItem)
+                 .filter(BookingItem.booking_id == booking.booking_id,
+                         BookingItem.room_id == wanted).first()) if wanted else None
+        expires = booking_checkout_moment(booking, item=_item) + timedelta(hours=24)
     except Exception:
         expires = datetime.utcnow() + timedelta(days=3)
     room_id = wanted
