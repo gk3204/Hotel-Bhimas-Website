@@ -114,7 +114,11 @@ OTA_AUTO_CONFIRM_VARIANCE_KEY = "ota_auto_confirm_max_variance_percent"
 # Front-desk policy (v5n; seeded in migration 045). How much KYC the desk must capture before a
 # check-in can complete, and the date from which an unarrived booking becomes an automatic no-show.
 CHECKIN_ID_SCOPE_KEY = "checkin_id_scope"              # lead | per_room | all_adults
-CHECKIN_SCANS_REQUIRED_KEY = "checkin_scans_required"  # front+back scans for whoever must show an ID
+CHECKIN_SCANS_REQUIRED_KEY = "checkin_scans_required"
+# v6f: a travel agent arriving with thirty rooms cannot produce thirty IDs at the counter, so an
+# agent booking asks for the lead guest's only. On by default, because it is what the owner asked
+# for; turn it off and agent bookings obey `checkin_id_scope` like everything else.
+AGENT_LEAD_ID_ONLY_KEY = "checkin_agent_lead_id_only"  # front+back scans for whoever must show an ID
 NO_SHOW_FROM_DATE_KEY = "no_show_from_date"            # ISO date; the sweep ignores stays that ended earlier
 
 # Google review auto-reply config keys + defaults (prompt 20; seeded in migration 018).
@@ -372,6 +376,8 @@ def get_frontdesk_config(db) -> dict:
     from utils.phone import BLOCKED_PHONES_KEY
     return {
         "id_scope": scope,
+        # v6f: agent group bookings fall back to lead-only. See AGENT_LEAD_ID_ONLY_KEY.
+        "agent_lead_id_only": _as_bool(get_setting(db, AGENT_LEAD_ID_ONLY_KEY, "true")),
         "scans_required": _as_bool(get_setting(db, CHECKIN_SCANS_REQUIRED_KEY, "true")),
         "no_show_from_date": cutoff.isoformat() if cutoff else None,
         # v5r: numbers that may never be stored as a guest contact (the OTAs' own lines).

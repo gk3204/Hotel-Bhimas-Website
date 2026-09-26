@@ -391,6 +391,8 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             "booking_source": booking.booking_source,
             "billing_mode": booking.billing_mode,   # v6e
             "agent_id": booking.agent_id,
+            "kyc_scope": _effective_id_scope(db, booking),   # v6f
+            "agent_id": booking.agent_id,
             "check_in": str(booking.check_in),
             "check_out": str(booking.check_out),
             "nights": nights,
@@ -610,6 +612,21 @@ def recompute_stay(db, booking) -> None:
     from routers.folio import _recompute
     for _f in folio_resolver.folios_for_booking(db, booking.booking_id):
         _recompute(db, _f)
+
+
+def _effective_id_scope(db, booking: Booking, cfg: dict | None = None) -> str:
+    """How many guests this booking must identify at check-in (v6f).
+
+    The property-wide `checkin_id_scope`, unless the booking came through a travel agent — then
+    the lead guest's ID covers the group, because thirty rooms cannot produce thirty IDs at a
+    counter. The desk reads this off the arrivals row so it shows one KYC row instead of thirty;
+    `check_in` resolves the same thing server-side, and that is the one that decides.
+    """
+    cfg = cfg or app_settings.get_frontdesk_config(db)
+    if cfg.get("agent_lead_id_only", True) and (booking.agent_id
+                                                or (booking.booking_source or "") == "agent"):
+        return "lead"
+    return cfg["id_scope"]
 
 
 def sync_booking_from_items(booking: Booking) -> None:
@@ -1193,7 +1210,17 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # Per-occupant KYC roster (FE-3): rebuild booking_guests (lead + companions). The desk sends
         # the full roster in `additional_guests` (each row incl. the primary); an empty list keeps the
         # old single-guest behaviour. ID numbers masked here; scans were uploaded encrypted beforehand.
-        db.query(BookingGuest).filter(BookingGuest.booking_id == booking.booking_id).delete()
+        # v6f: wipe only what this call is replacing. Rebuilding the whole roster was right when
+        # check-in was all-or-nothing; since v6c made it partial, checking in the second car
+        # DELETED the first car's guest records — gone from the slip, the guests list, the
+        # per-room portal link and the ID-scan archive a police query is answered from, with no
+        # warning. A first check-in (nobody in yet) still rebuilds the lot, exactly as before.
+        _already_in = [i for i in booking.booking_items if i.checked_in_at and i.room_id]
+        _q = db.query(BookingGuest).filter(BookingGuest.booking_id == booking.booking_id)
+        if _already_in:
+            _arriving = [rid for a in data.assignments for rid in a.room_ids]
+            _q = _q.filter(BookingGuest.room_id.in_(_arriving or [0]))
+        _q.delete(synchronize_session=False)
         roster = list(data.additional_guests or [])
 
         # ---- v5n: HOW MANY guests must be identified is a property policy, not a constant ----
@@ -1208,6 +1235,14 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # per booking, so a three-room reservation routinely arrives saying adults = 1.
         fd_cfg = app_settings.get_frontdesk_config(db)
         id_scope = fd_cfg["id_scope"]
+        # v6f: a travel agent arriving with thirty rooms cannot produce thirty IDs at the counter.
+        # The agent is the hotel's counterparty and the group leader is who it holds responsible,
+        # so an agent booking needs the lead guest's ID, name and phone — all three mandatory —
+        # and nothing else. Resolved HERE, as the one variable every gate below reads, so the
+        # per-room ID, per-room phone, count and scan gates all fall through together.
+        agent_booking = bool(booking.agent_id) or (booking.booking_source or "") == "agent"
+        if fd_cfg.get("agent_lead_id_only", True) and agent_booking:
+            id_scope = "lead"
         scans_required = fd_cfg["scans_required"]
         room_ids_being_assigned = list(rooms_by_id.keys())
         if id_scope == "per_room":
@@ -1399,14 +1434,21 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                     phone=(g.phone or "").strip() or None,
                 ))
         else:
-            db.add(BookingGuest(
-                booking_id=booking.booking_id,
-                name=booking.display_guest_name,
-                id_type=lead_id_type,
-                id_number_masked=booking.guest.id_number_masked,
-                is_primary=True,
-                room_id=next(iter(rooms_by_id), None),
-            ))
+            # v6f: ONE ROW PER ROOM, all carrying the lead. The owner's rule for an agent group is
+            # "one ID and phone, maintained for all rooms" — so room 214 still answers "who is in
+            # here and who do we call", with the group leader. A single row left every room but
+            # the first with nobody named against it.
+            _lead_rooms = list(rooms_by_id) or [None]
+            for _n, _rid in enumerate(_lead_rooms):
+                db.add(BookingGuest(
+                    booking_id=booking.booking_id,
+                    name=booking.display_guest_name,
+                    id_type=lead_id_type,
+                    id_number_masked=booking.guest.id_number_masked,
+                    phone=(booking.guest.phone if booking.guest else None),
+                    is_primary=(_n == 0),
+                    room_id=_rid,
+                ))
 
         # OTA bookings arrive with a masked/placeholder phone and no email — capture the real
         # contact the desk collected at arrival, onto the guest record.
@@ -3359,6 +3401,8 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
     _rules = arrival_rules.load_rules(db)
     _now = datetime.now()
 
+    _fd_cfg = app_settings.get_frontdesk_config(db)   # v6f: once for the board, not per row
+
     def _arrival_row(b):
         paid, folio_id, folio_balance = _paid_and_folio(b.booking_id)
         try:
@@ -3380,6 +3424,11 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "check_out": str(b.check_out),
             "booking_source": b.booking_source,
             "billing_mode": b.billing_mode,   # v6e
+            # v6f: how many guests this booking must identify. The desk seeds its KYC step from
+            # this, so an agent's thirty-room group shows ONE row instead of thirty. The server
+            # re-resolves the same thing at check-in and that is the one that decides.
+            "agent_id": b.agent_id,
+            "kyc_scope": _effective_id_scope(db, b, cfg=_fd_cfg),
             # v5r: the desk needs the channel reference to recognise (and refuse) the placeholder phone
             # that was stamped from it at check-in.
             "ota_booking_id": b.ota_booking_id,

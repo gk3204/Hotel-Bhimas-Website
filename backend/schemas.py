@@ -145,11 +145,13 @@ class RoomActiveToggle(BaseModel):
 
 class BookingItemCreate(BaseModel):
     room_type_id: int = Field(..., gt=0)
-    quantity: int = Field(default=1, ge=1, le=5)
+    # v6f: was 5. The desk builds ONE line per room type, so a 30-room agent group with three
+    # types needs 10 per line — five made a booking that size impossible to enter at all.
+    quantity: int = Field(default=1, ge=1, le=40)
 
 
 class BookingCreate(BaseModel):
-    rooms: list[BookingItemCreate] = Field(..., min_items=1, max_items=10)
+    rooms: list[BookingItemCreate] = Field(..., min_items=1, max_items=20)
     guest_name: str = Field(..., min_length=2, max_length=100)
     phone: str = Field(..., min_length=10, max_length=15)
     email: Optional[EmailStr] = None
@@ -157,8 +159,9 @@ class BookingCreate(BaseModel):
     check_in_time: time  # Required: guest's expected arrival time ("HH:MM")
     check_out: date
     # Occupancy: adults count against the rooms' max_occupancy; children are separate.
-    adults: int = Field(1, ge=1, le=40)
-    children: int = Field(0, ge=0, le=40)
+    # v6f: was 40. A 30-room group is 60 adults before anybody counts the children.
+    adults: int = Field(1, ge=1, le=120)
+    children: int = Field(0, ge=0, le=120)
     booking_source: str = Field("online", pattern="^(online|frontdesk|website)$")
 
     @field_validator('check_out')
@@ -171,7 +174,7 @@ class BookingCreate(BaseModel):
 
 class DeskBookingCreate(BaseModel):
     """Reception desk booking (walk-in today or advance future). No online gateway / convenience fee."""
-    rooms: list[BookingItemCreate] = Field(..., min_length=1, max_length=10)
+    rooms: list[BookingItemCreate] = Field(..., min_length=1, max_length=20)
     guest_name: str = Field(..., min_length=2, max_length=100)
     phone: str = Field(..., min_length=7, max_length=15)
     email: Optional[EmailStr] = None
@@ -180,8 +183,9 @@ class DeskBookingCreate(BaseModel):
     check_out: date
     # Occupancy: total adults must be <= combined max_occupancy of the rooms booked (checked at
     # the endpoint); children are separate.
-    adults: int = Field(1, ge=1, le=40)
-    children: int = Field(0, ge=0, le=40)
+    # v6f: was 40. A 30-room group is 60 adults before anybody counts the children.
+    adults: int = Field(1, ge=1, le=120)
+    children: int = Field(0, ge=0, le=120)
     # Complimentary at booking (desk only). `none` = normal. Setting all/room requires a reason
     # and the owner OTP (consumed at the endpoint); reuses the v4b6 suppression downstream.
     comp_mode: str = Field("none", pattern="^(none|all|room)$")
@@ -255,7 +259,7 @@ class OtaDraftConfirm(BaseModel):
     check_in: Optional[date] = None
     check_out: Optional[date] = None
     check_in_time: Optional[time] = None
-    adults: Optional[int] = Field(None, ge=1, le=40)
+    adults: Optional[int] = Field(None, ge=1, le=120)
     children: Optional[int] = Field(None, ge=0, le=40)
     ota_commission_percent: Optional[float] = Field(None, ge=0, le=100)
     # The desk's deliberate "yes, I know the money disagrees" (F-18). Auto-confirm has always refused
@@ -354,7 +358,7 @@ class DeskCollectRequest(BaseModel):
 class CheckinAssignment(BaseModel):
     """Specific physical rooms for one booking item (len(room_ids) must equal item.quantity)."""
     booking_item_id: int = Field(..., gt=0)
-    room_ids: list[int] = Field(..., min_length=1, max_length=10)
+    room_ids: list[int] = Field(..., min_length=1, max_length=40)
 
 
 class GuestKycEntry(BaseModel):
@@ -415,7 +419,7 @@ class GuestKycEntry(BaseModel):
 
 class CheckinRequest(BaseModel):
     booking_id: int = Field(..., gt=0)
-    assignments: list[CheckinAssignment] = Field(..., min_length=1, max_length=10)
+    assignments: list[CheckinAssignment] = Field(..., min_length=1, max_length=20)
     id_type: str = Field(..., pattern=CATEGORY_SLUG_RE)   # editable list; checked at the endpoint
     id_number: str = Field(..., min_length=4, max_length=30)  # stored masked; raw value never persisted
     # F-07: the lead guest's address for the police register. Optional here deliberately - whether
@@ -428,7 +432,7 @@ class CheckinRequest(BaseModel):
     email: Optional[EmailStr] = None
     # FE-3: full occupant roster (lead + companions), each with masked ID + optional encrypted scan.
     # Backward-compatible: empty ⇒ old single-guest behaviour (lead from id_type/id_number above).
-    additional_guests: list[GuestKycEntry] = Field(default_factory=list, max_length=20)
+    additional_guests: list[GuestKycEntry] = Field(default_factory=list, max_length=60)
     # v4b7: ONE owner approval covers every alternate-type room in this check-in. Three codes
     # for a three-room family is unusable and staff would route around it.
     owner_otp_id: Optional[int] = Field(None, gt=0)
@@ -444,7 +448,7 @@ class CheckinRequest(BaseModel):
     # group where only one room turned up early is charged for that room alone. Room ids rather than
     # booking-item ids because one item can be several rooms (quantity > 1) — an item id cannot say
     # "two of these three". Omitted / empty = the whole stay arrived early.
-    early_room_ids: Optional[list[int]] = Field(None, max_length=20)
+    early_room_ids: Optional[list[int]] = Field(None, max_length=40)
     client_ref: Optional[str] = Field(None, max_length=64)
 
 
@@ -481,7 +485,7 @@ class CheckinQuoteRequest(BaseModel):
     """v5m dry-run of the arrival rules for the check-in wizard (no writes)."""
     booking_id: int = Field(..., gt=0)
     arrival_fee_applied: Optional[float] = Field(None, ge=0)
-    early_room_ids: Optional[list[int]] = Field(None, max_length=20)
+    early_room_ids: Optional[list[int]] = Field(None, max_length=40)
 
 
 class CardIssueRequest(BaseModel):
@@ -510,7 +514,7 @@ class CheckoutRequest(BaseModel):
     # booking and every existing caller sends. A multi-room family can now check out the room that
     # is going home on Tuesday and leave the rest in-house - the owner's rule, "the same rules but
     # for each room and not for the entire booking".
-    room_ids: Optional[List[int]] = Field(None, max_length=20)
+    room_ids: Optional[List[int]] = Field(None, max_length=40)
     override: bool = False                                    # settle despite non-zero balance
     override_reason: Optional[str] = Field(None, min_length=3, max_length=200)
     client_ref: Optional[str] = Field(None, max_length=64)
@@ -565,7 +569,7 @@ class ExtendStayRequest(BaseModel):
     # v6c: which rooms are being extended. Omitted = the whole stay (every existing caller).
     # The owner's rule is that a multi-room booking follows the same rules PER ROOM, so one
     # room can stay an extra night while the rest leave as booked.
-    room_ids: Optional[List[int]] = Field(None, max_length=20)
+    room_ids: Optional[List[int]] = Field(None, max_length=40)
     new_check_out: date
     applied_amount: Optional[float] = Field(None, ge=0, le=10_000_000)
     reason: Optional[str] = Field(None, min_length=3, max_length=200)
@@ -627,7 +631,7 @@ class EarlyCheckoutRequest(BaseModel):
     `dry_run` previews the credit without mutating. `new_check_out` defaults to today."""
     booking_id: int = Field(..., gt=0)
     # v6c: which rooms are leaving early. Omitted = the whole stay.
-    room_ids: Optional[List[int]] = Field(None, max_length=20)
+    room_ids: Optional[List[int]] = Field(None, max_length=40)
     new_check_out: Optional[date] = None
     dry_run: bool = False
 

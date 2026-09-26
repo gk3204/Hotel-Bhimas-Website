@@ -136,6 +136,13 @@ export const SETTINGS_GROUPS = [
           { value: "lead", label: "Lead guest only" },
           { value: "all_adults", label: "Every adult on the booking" },
         ] },
+      { key: "agent_lead_id_only", type: "toggle", wide: true,
+        label: "Travel-agent bookings need only the lead guest's ID",
+        hint: "A coach party booked through an agent can be thirty rooms at once, and thirty ID " +
+              "captures at the counter is not something a desk can do. With this on, an agent " +
+              "booking asks for the group leader's ID, name and phone — all three still " +
+              "mandatory — and holds them against every room. Off = agent bookings follow the " +
+              "rule above like any other." },
       { key: "scans_required", type: "toggle", label: "Require front + back ID scans",
         hint: "Applies only to the guests who must show an ID. Off = the ID number alone is accepted.",
         wide: true },

@@ -144,6 +144,7 @@ def get_frontdesk_config(db: Session = Depends(get_db)):
 
 @router.put("/frontdesk-config")
 def set_frontdesk_config(id_scope: str | None = Body(None),
+                         agent_lead_id_only: bool | None = Body(None),
                          scans_required: bool | None = Body(None),
                          no_show_from_date: str | None = Body(None),
                          blocked_guest_phones: str | None = Body(None),
@@ -157,6 +158,9 @@ def set_frontdesk_config(id_scope: str | None = Body(None),
             raise HTTPException(status_code=422,
                                 detail="id_scope must be one of: " + ", ".join(app_settings.ID_SCOPES))
         app_settings.set_setting(db, app_settings.CHECKIN_ID_SCOPE_KEY, scope, user=user)
+    if agent_lead_id_only is not None:
+        app_settings.set_setting(db, app_settings.AGENT_LEAD_ID_ONLY_KEY,
+                                 "true" if agent_lead_id_only else "false", user=user)
     if scans_required is not None:
         app_settings.set_setting(db, app_settings.CHECKIN_SCANS_REQUIRED_KEY,
                                  "true" if scans_required else "false", user=user)
