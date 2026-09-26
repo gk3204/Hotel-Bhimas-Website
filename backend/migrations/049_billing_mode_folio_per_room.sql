@@ -26,13 +26,20 @@ ALTER TABLE bookings ADD COLUMN IF NOT EXISTS billing_mode VARCHAR(10) NOT NULL 
 ALTER TABLE folios ADD COLUMN IF NOT EXISTS booking_item_id INTEGER
     REFERENCES booking_items(booking_item_id);
 
--- Drop whatever UNIQUE constraint the column carries. The name is `folios_booking_id_key` on a
--- database built by SQLAlchemy's create_all, but it is looked up rather than assumed, because a
--- database restored from a dump can carry a different one and a wrong guess would leave the old
--- constraint in place and per-room billing failing at the first insert.
+-- Drop the uniqueness on folios.booking_id, in BOTH the forms it can take. Names are looked up
+-- rather than assumed, because a database restored from a dump can carry different ones and a
+-- wrong guess leaves the old uniqueness in place and per-room billing failing at the first insert.
+--
+-- ⚠️ Two forms, and missing the second one is how this migration first shipped wrong. SQLAlchemy
+-- renders `Column(..., unique=True, index=True)` as a UNIQUE INDEX (`ix_folios_booking_id`), NOT
+-- as a table constraint — so a `pg_constraint` sweep alone finds nothing, reports success, and
+-- leaves the index enforcing exactly what this migration exists to remove. A QA database built by
+-- `create_all` from the CURRENT models never has it (the model dropped `unique=True` in v6e), so
+-- the test harness cannot see the difference; only a real database created before v6e can.
 DO $$
 DECLARE c RECORD;
 BEGIN
+    -- (a) as a table constraint
     FOR c IN
         SELECT con.conname
           FROM pg_constraint con
@@ -44,6 +51,24 @@ BEGIN
            AND att.attname = 'booking_id'
     LOOP
         EXECUTE format('ALTER TABLE folios DROP CONSTRAINT %I', c.conname);
+    END LOOP;
+
+    -- (b) as a bare unique index, which is what SQLAlchemy actually creates. The two partial
+    -- unique indexes created below replace it; a plain lookup index is restored with it.
+    FOR c IN
+        SELECT i.relname AS indexname
+          FROM pg_index idx
+          JOIN pg_class i ON i.oid = idx.indexrelid
+          JOIN pg_class t ON t.oid = idx.indrelid
+          JOIN pg_attribute att ON att.attrelid = t.oid AND att.attnum = idx.indkey[0]
+         WHERE t.relname = 'folios'
+           AND idx.indisunique
+           AND NOT idx.indisprimary
+           AND idx.indnatts = 1
+           AND att.attname = 'booking_id'
+           AND NOT EXISTS (SELECT 1 FROM pg_constraint con WHERE con.conindid = idx.indexrelid)
+    LOOP
+        EXECUTE format('DROP INDEX %I', c.indexname);
     END LOOP;
 END $$;
 
