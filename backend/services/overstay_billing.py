@@ -44,10 +44,37 @@ _SWEEP_LOCK_KEY = 0x00570A11
 
 
 def _checkout_moment(booking: Booking) -> datetime:
+    """When this stay is due out.
+
+    v6c: the EARLIEST room still in the building, not the booking. `booking.check_out` is now the
+    latest room's departure (rooms can be extended independently), so using it would let a room
+    that should have left on Tuesday sit unnoticed until Friday - the guest who overstays is
+    exactly the one this read-model exists to catch. Falls back to the booking for a stay whose
+    items predate migration 048.
+    """
     # Imported lazily: routers.reception imports services, so a module-level import here
     # would close the cycle.
     from routers.reception import booking_checkout_moment
-    return booking_checkout_moment(booking)
+    due = booking_checkout_moment(booking)
+    per_room = [booking_checkout_moment(booking, item=i)
+                for i in (booking.booking_items or [])
+                if i.checked_in_at and i.checked_out_at is None and i.check_out]
+    return min(per_room) if per_room else due
+
+
+def overdue_items(db: Session, booking: Booking, *, now=None, cfg=None) -> list:
+    """The rooms individually past their own checkout moment (v6c) - what the biller charges."""
+    from routers.reception import booking_checkout_moment
+    now = now or datetime.now()
+    cfg = cfg or app_settings.get_overstay_config(db)
+    out = []
+    for i in (booking.booking_items or []):
+        if not (i.checked_in_at and i.checked_out_at is None and i.check_out):
+            continue
+        grace = booking_checkout_moment(booking, item=i) + timedelta(minutes=cfg["grace_minutes"])
+        if now > grace:
+            out.append(i)
+    return out
 
 
 def overstay_state(db: Session, booking: Booking, *, now=None, cfg=None) -> dict:
@@ -188,10 +215,16 @@ def _bill_one(db: Session, booking_id: int, *, now, cfg) -> dict:
 
         posted = {"amount": 0.0, "posted": []}
         if not comped:
+            # v6c: bill the ROOMS that are actually overdue, not the whole stay. On a multi-room
+            # booking one room may have overstayed while the others are still within their own
+            # window (or have already gone home) - charging the family for all of them would be
+            # plainly wrong, and is exactly the "same rules, per room" case.
+            _overdue = overdue_items(db, booking, now=now, cfg=cfg)
             posted = room_posting.post_room_nights(
                 db, booking, folio, old_co, new_co, user=None,
                 posting_reason=room_posting.REASON_OVERSTAY,
-                price_mode=room_posting.PRICE_QUOTE, recompute=False)
+                price_mode=room_posting.PRICE_QUOTE, recompute=False,
+                only_items=sorted({i.booking_item_id for i in _overdue}) or None)
 
             # ⚠️ Nothing posted means this night's slot is already taken — and because the
             # unique index ignores `void`, "taken" includes a night the OWNER HAS JUST
@@ -208,7 +241,18 @@ def _bill_one(db: Session, booking_id: int, *, now, cfg) -> dict:
 
         if booking.original_check_out is None:
             booking.original_check_out = old_co
-        booking.check_out = new_co
+        # v6c: advance only the rooms that were billed, then let the booking follow them. A room
+        # that is still inside its own window must not have its departure pushed out because a
+        # different room on the same booking overstayed.
+        from routers.reception import sync_booking_from_items
+        for _it in (_overdue or []):
+            if _it.original_check_out is None:
+                _it.original_check_out = _it.check_out or old_co
+            _it.check_out = new_co
+            _it.checkout_extended_until = None
+        sync_booking_from_items(booking)
+        if not _overdue:
+            booking.check_out = new_co
         # v5m: an hourly extension was the explicit checkout moment; now that a whole night has
         # been billed the clock runs from the stay anchor again. Leaving it set would keep the
         # (past) moment authoritative and re-bill the same guest on every tick.

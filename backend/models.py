@@ -210,6 +210,33 @@ class BookingItem(Base):
                                   nullable=True, index=True)
     created_at = Column(TIMESTAMP, server_default=func.now())
 
+    # --- This ROOM's own stay (v6c, migration 048) -------------------------------------------
+    # The owner's rule: every stay operation applies per room, not per booking - "in multiple
+    # booking we apply the same rules but for each room and not for the entire booking". A family
+    # arriving in two cars is checked in room by room; the room that leaves on Tuesday checks out on
+    # Tuesday; extending one room does not move the others.
+    #
+    # ⚠️ The BOOKING still carries the same fields, maintained as aggregates of these by
+    # `reception.sync_booking_from_items()`. ~94 places read `booking.check_out` / `status` /
+    # `checked_in_at`, and they keep working because of that. Write the ROOM here; let the sync
+    # helper move the booking.
+    checked_in_at = Column(DateTime, nullable=True, index=True)
+    checked_out_at = Column(DateTime, nullable=True, index=True)
+    check_out = Column(Date, nullable=True, index=True)      # this room's own departure date
+    original_check_out = Column(Date, nullable=True)         # before an extension / overstay charge
+    stay_started_at = Column(DateTime, nullable=True)        # this room's 24h clock anchor
+    expected_arrival_at = Column(DateTime, nullable=True)    # what early/late is measured against
+    checkout_extended_until = Column(DateTime, nullable=True)  # a planned hourly extension
+
+    @property
+    def is_checked_in(self) -> bool:
+        """In the room right now: arrived and not yet departed."""
+        return self.checked_in_at is not None and self.checked_out_at is None
+
+    @property
+    def is_departed(self) -> bool:
+        return self.checked_out_at is not None
+
     # Two FKs to room_types now, so the join has to be explicit.
     room_type = relationship("RoomType", foreign_keys=[room_type_id])
     sold_as_room_type = relationship("RoomType", foreign_keys=[sold_as_room_type_id])

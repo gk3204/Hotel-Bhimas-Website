@@ -445,31 +445,40 @@ def _checkout_override_requires_admin() -> bool:
     return os.getenv("CHECKOUT_OVERRIDE_REQUIRES_ADMIN", "true").strip().lower() not in ("false", "0", "no")
 
 
-def booking_checkout_moment(booking: Booking, ref=None) -> datetime:
-    """The real checkout moment for a booking (the shared anchor for BOTH card expiry and
-    the '2h before checkout' WhatsApp reminder — prompt 15). This is the checkout time
-    BEFORE the grace buffer.
+def booking_checkout_moment(booking: Booking, ref=None, item: BookingItem | None = None) -> datetime:
+    """The real checkout moment (the shared anchor for BOTH card expiry and the '2h before
+    checkout' WhatsApp reminder — prompt 15). This is the checkout time BEFORE the grace buffer.
     24h mode (default): the ACTUAL check-in moment + nights x 24h.
     Fixed mode: checkout date @ CHECKOUT_HOUR.
-    `ref` stands in for the check-in moment before the guest is checked in."""
+    `ref` stands in for the check-in moment before the guest is checked in.
+
+    v6c: pass `item` for ONE room's moment. Rooms can now be extended, shortened and checked out
+    independently, so "when is this stay due out?" has a different answer per room. Without an item
+    the booking's own (latest) dates are used, which is what every pre-v6c caller means and what a
+    single-room booking always means.
+    """
     ref = ref or datetime.now()
-    nights = max(1, (booking.check_out - booking.check_in).days)
+    _check_out = (item.check_out if item is not None and item.check_out else booking.check_out)
+    _extended = (item.checkout_extended_until if item is not None else None)         or getattr(booking, "checkout_extended_until", None)
+    _anchor_src = item if (item is not None and item.checked_in_at) else booking
+    nights = max(1, (_check_out - booking.check_in).days)
     # OTA stays are contracted NOON-to-NOON: checkout is always the checkout date @ 12:00, never
     # derived from the actual (often late) check-in moment — even under the property's 24h policy.
     # This one anchor feeds card expiry, overstay auto-billing and the reminders, so all of them
     # become fixed 12→12 for an OTA booking together.
     if ota_service.is_ota_source(booking.booking_source):
-        return datetime.combine(booking.check_out, time(hour=12))
+        return datetime.combine(_check_out, time(hour=12))
     # v5m: an hourly extension (checkout_extended_until) is an explicit checkout moment that beats
     # every derived one — card window, overstay sweep and reminders all follow it.
-    if getattr(booking, "checkout_extended_until", None):
-        return booking.checkout_extended_until
+    if _extended:
+        return _extended
     if _checkout_mode() == "fixed":
-        return datetime.combine(booking.check_out, time(hour=_checkout_hour()))
+        return datetime.combine(_check_out, time(hour=_checkout_hour()))
     # v5m: the 24h clock runs from stay_started_at (set at check-in by the arrival rules — the
     # expected time for an early or badly-late guest, the actual moment otherwise), falling back
     # to checked_in_at for stays that started before the rules existed.
-    anchor = getattr(booking, "stay_started_at", None) or booking.checked_in_at or ref
+    anchor = (getattr(_anchor_src, "stay_started_at", None)
+              or getattr(_anchor_src, "checked_in_at", None) or ref)
     return anchor + timedelta(days=nights)
 
 
@@ -550,6 +559,91 @@ def _encode_payload(db: Session, item: BookingItem, room: Room, valid_from, vali
 # ---------------------------------------------------------------------------------------------
 # v5m — arrival rules at check-in
 # ---------------------------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------------------------
+# v6c — the stay is per ROOM; the booking carries the aggregate
+# ---------------------------------------------------------------------------------------------
+
+def target_items(booking: Booking, room_ids=None, *, in_house_only=True) -> list:
+    """The rooms an operation applies to (v6c).
+
+    `room_ids` empty or omitted means the whole stay, which is what every pre-v6c caller sends and
+    what a single-room booking always means. Otherwise just those rooms - the owner's rule that a
+    multi-room booking follows the same rules "for each room and not for the entire booking".
+
+    Raises rather than silently doing the wrong thing: an unknown room id here would mean the desk
+    thinks it is extending room 12 while the server extends the whole family.
+    """
+    pool = [i for i in (booking.booking_items or [])
+            if (not in_house_only or i.checked_out_at is None)]
+    if not room_ids:
+        return pool
+    wanted = {int(r) for r in room_ids}
+    chosen = [i for i in pool if i.room_id in wanted]
+    missing = wanted - {i.room_id for i in chosen}
+    if missing:
+        raise HTTPException(status_code=409,
+                            detail=f"Room id(s) {sorted(missing)} are not part of this stay")
+    return chosen
+
+
+def sync_booking_from_items(booking: Booking) -> None:
+    """Recompute the booking's own stay fields from its rooms. Call after EVERY per-room change.
+
+    This is the hinge of the per-room rework. `bookings.check_out`, `status`, `checked_in_at` and
+    `checked_out_at` are read in ~94 places across 22 backend files - availability, every report,
+    overstay billing, the card window, the night audit, the desk board. Rewriting all of them would
+    have been a far riskier change than the feature itself, so instead the booking keeps those
+    fields and they are maintained here as aggregates of the rooms:
+
+      check_out       the LATEST room's departure - so availability and the overstay sweep still
+                      see the stay as occupied until the last room has gone
+      checked_in_at   the FIRST room's arrival
+      checked_out_at  the LAST room's departure, and only once every room has left
+      status          `checked_in` the moment ANY room arrives; `checked_out` only when ALL have
+
+    A booking whose items predate migration 048 (no per-room dates) is left exactly as it was - the
+    guards below mean an un-split or un-backfilled row can never blank a booking's dates.
+    """
+    items = [i for i in (booking.booking_items or [])]
+    if not items:
+        return
+
+    outs = [i.check_out for i in items if i.check_out]
+    if outs:
+        booking.check_out = max(outs)
+
+    ins = [i.checked_in_at for i in items if i.checked_in_at]
+    if ins:
+        booking.checked_in_at = min(ins)
+        starts = [i.stay_started_at for i in items if i.stay_started_at]
+        if starts:
+            booking.stay_started_at = min(starts)
+
+    # Cancelled / no-show bookings are not driven by room arrivals - leave their status alone.
+    if booking.status in ("confirmed", "checked_in", "checked_out"):
+        if ins and all(i.checked_out_at for i in items):
+            booking.status = "checked_out"
+            booking.checked_out_at = max(i.checked_out_at for i in items)
+        elif ins:
+            booking.status = "checked_in"
+            booking.checked_out_at = None
+
+
+def arrived_items(booking: Booking) -> list:
+    """Rooms currently in the building: arrived and not yet departed."""
+    return [i for i in (booking.booking_items or []) if i.is_checked_in]
+
+
+def pending_items(booking: Booking) -> list:
+    """Rooms on this booking that have not arrived yet - what Arrivals still owes."""
+    return [i for i in (booking.booking_items or []) if i.checked_in_at is None]
+
+
+def item_check_out(item: BookingItem, booking: Booking):
+    """This room's departure date, falling back to the booking's for pre-048 rows."""
+    return item.check_out or booking.check_out
+
 
 def expected_arrival(booking: Booking, db=None) -> datetime:
     """The moment the guest was expected: booked date + expected time; OTA stays are contracted
@@ -871,11 +965,21 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
 
         # Idempotent: an outbox re-flush (or double-click) just re-returns the payload
         # and repairs a missing folio.
-        if booking.status == "checked_in":
+        #
+        # v6c: a booking is `checked_in` as soon as ANY room has arrived, so this can no longer mean
+        # "there is nothing left to do" - the rest of the family may still be at the door. Short-
+        # circuit only when every room asked for is already in; otherwise fall through and check in
+        # the ones that are not.
+        _asked = {a.booking_item_id for a in data.assignments}
+        _items_by_id = {i.booking_item_id: i for i in booking.booking_items}
+        _all_asked_in = bool(_asked) and all(
+            _items_by_id.get(i) is not None and _items_by_id[i].checked_in_at is not None
+            for i in _asked)
+        if booking.status == "checked_in" and _all_asked_in:
             open_folio(FolioOpenRequest(booking_id=booking.booking_id), db, user)
             folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
             return _checkin_response(db, booking, folio, already=True)
-        if booking.status != "confirmed":
+        if booking.status not in ("confirmed", "checked_in"):
             raise HTTPException(status_code=409,
                                 detail=f"Cannot check in a '{booking.status}' booking")
 
@@ -937,11 +1041,28 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                                 detail="No payment recorded for this booking — record a desk payment first")
 
         # ---- validate the room assignments ----
+        #
+        # v6c (F-13): a SUBSET is allowed. This used to demand that the assignments cover every
+        # booking item exactly once, so a three-room family whose second car was an hour behind
+        # could not be checked in at all - the desk either made the guests who HAD arrived wait, or
+        # cut cards for people who were not in the building. Each room is now its own stay.
         items = {i.booking_item_id: i for i in booking.booking_items}
         assigned_ids = [a.booking_item_id for a in data.assignments]
-        if sorted(assigned_ids) != sorted(items.keys()):
+        if not assigned_ids:
+            raise HTTPException(status_code=400, detail="Pick at least one room to check in")
+        if len(assigned_ids) != len(set(assigned_ids)):
+            raise HTTPException(status_code=400, detail="The same room was listed twice")
+        unknown = [i for i in assigned_ids if i not in items]
+        if unknown:
             raise HTTPException(status_code=400,
-                                detail="Assignments must cover every booking item exactly once")
+                                detail=f"Booking item(s) {unknown} are not on this booking")
+        already = [items[i] for i in assigned_ids if items[i].checked_in_at]
+        if already:
+            raise HTTPException(
+                status_code=409,
+                detail="Already checked in: room(s) "
+                       + ", ".join(str(i.room.room_number if i.room else i.booking_item_id)
+                                   for i in already))
         all_room_ids = [rid for a in data.assignments for rid in a.room_ids]
         if len(all_room_ids) != len(set(all_room_ids)):
             raise HTTPException(status_code=400, detail="The same room was assigned twice")
@@ -1287,13 +1408,31 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
             except Exception as e:                      # pragma: no cover - defensive
                 logger.warning(f"could not store guest address at check-in: {e}")
 
-        booking.status = "checked_in"
-        booking.checked_in_at = now
-        # v5m: the 24h stay clock anchor per the arrival rules (expected time for an early or
-        # badly-late guest, the actual moment otherwise). OTA stays ignore it (always 12→12).
-        booking.stay_started_at = arrival["stay_start"]
+        # v6c: the ARRIVAL is recorded on the rooms that actually arrived, and the booking's own
+        # fields are then derived from them. Only the items in this request are touched, so the rest
+        # of the family stays on Arrivals until their car turns up.
+        # v5m: `stay_start` is the 24h clock anchor per the arrival rules (the expected time for an
+        # early or badly-late guest, the actual moment otherwise). OTA stays ignore it (12 -> 12).
+        _arrived_now = [items[a.booking_item_id] for a in data.assignments
+                        if a.booking_item_id in items]
+        # A quantity>1 line was split above into one row per room; pick those up too.
+        _split_rows = [i for i in booking.booking_items
+                       if i.room_id in rooms_by_id and i.checked_in_at is None]
+        for item in {id(x): x for x in (_arrived_now + _split_rows)}.values():
+            item.checked_in_at = now
+            item.stay_started_at = arrival["stay_start"]
+            if not item.expected_arrival_at:
+                item.expected_arrival_at = arrival["expected_at"]
+            if not item.check_out:
+                item.check_out = booking.check_out
+            if not item.original_check_out:
+                item.original_check_out = item.check_out
+
+        booking.checked_in_at = booking.checked_in_at or now
+        booking.stay_started_at = booking.stay_started_at or arrival["stay_start"]
         if not getattr(booking, "expected_arrival_at", None):
             booking.expected_arrival_at = arrival["expected_at"]
+        sync_booking_from_items(booking)      # status, check_out, checked_in/out_at
         for room in rooms_by_id.values():
             room.status = "occupied"
             room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
@@ -1533,6 +1672,9 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
 
         folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
 
+        # v6c: `checked_out` now means EVERY room has gone, so it is still the right short-circuit -
+        # but a booking that is `checked_in` with some rooms already departed must stay open for the
+        # rest, which it does because the status only flips when the last one leaves.
         if booking.status == "checked_out":
             return _checkout_response(db, booking, folio, override=False, already=True)
         if booking.status != "checked_in":
@@ -1556,7 +1698,35 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
                 raise HTTPException(status_code=500,
                                     detail="Failed to transfer the company balance — checkout aborted")
 
-        balance = round(float(folio.balance or 0), 2)
+        # v6c (F-15): WHICH rooms are leaving. Omitted means the whole stay, which is what a
+        # single-room booking and every existing caller sends, so nothing changes for them.
+        _in_house = [i for i in booking.booking_items if i.is_checked_in] or list(booking.booking_items)
+        if data.room_ids:
+            _wanted = set(int(r) for r in data.room_ids)
+            leaving = [i for i in _in_house if i.room_id in _wanted]
+            _unknown = _wanted - {i.room_id for i in leaving}
+            if _unknown:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Room id(s) {sorted(_unknown)} are not in-house on this booking")
+        else:
+            leaving = list(_in_house)
+        if not leaving:
+            raise HTTPException(status_code=409, detail="No rooms on this booking are in-house")
+        partial = len(leaving) < len([i for i in booking.booking_items if i.checked_out_at is None])
+
+        # The balance that must be clear. For a PARTIAL departure it is that room's own subtotal,
+        # not the family's whole bill — asking the room going home on Tuesday to settle the rooms
+        # staying until Friday would be absurd. `_room_subtotals` is the same arithmetic the folio
+        # screen shows, so the desk and the gate can never disagree.
+        if partial:
+            from routers.folio import _folio_detail
+            _detail = _folio_detail(db, folio)
+            _leaving_ids = {i.room_id for i in leaving}
+            balance = round(sum(r["balance"] for r in _detail.get("room_subtotals", [])
+                                if r["room_id"] in _leaving_ids), 2)
+        else:
+            balance = round(float(folio.balance or 0), 2)
         override_used = False
         if balance != 0:
             if not data.override:
@@ -1586,37 +1756,49 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         erased_uids = [u.strip() for u in (data.cards_erased or []) if u and u.strip()]
         # A booking made up entirely of key-lock rooms never had a card to hand back, so the
         # "no card returned" approval must not fire for it. Only gate when at least one room is a card lock.
-        has_card_room = any(
-            (r.lock_type != "key")
-            for r in (db.query(Room).filter(Room.room_id == it.room_id).first()
-                      for it in booking.booking_items if it.room_id)
-            if r is not None)
+        # v6c (F-15): per ROOM, not per booking. This used to fire only when NO card came back at
+        # all, so on a three-room stay handing back one card satisfied it completely and the other
+        # two guests walked out with keys that still opened their doors until the encoded expiry.
+        # Only the rooms LEAVING are considered — the family still upstairs keeps its cards.
+        _leaving_rooms = [db.query(Room).filter(Room.room_id == it.room_id).first()
+                          for it in leaving if it.room_id]
+        _leaving_card_rooms = [r for r in _leaving_rooms if r is not None and r.lock_type != "key"]
+        has_card_room = bool(_leaving_card_rooms)
         if has_card_room and not erased_uids \
                 and app_settings.get_fraud_config(db).get("checkout_no_card_otp_required"):
             consume_otp(db, data.owner_otp_id, data.owner_otp_code, "checkout_no_card", user)
 
         before = {"booking_status": booking.status, "folio_balance": balance}
 
-        folio.status = "settled"
-        folio.settled_at = clock.now_utc()         # F-03: an instant, stored UTC
-        booking.status = "checked_out"
-        booking.checked_out_at = datetime.now()
+        # v6c: the departure is recorded on the rooms that are leaving; the booking's own fields
+        # follow from them. The folio settles only when the LAST room has gone — a family still
+        # upstairs must be able to order dinner.
+        _depart_ts = clock.now_utc()
+        for item in leaving:
+            item.checked_out_at = _depart_ts
+        sync_booking_from_items(booking)
+        if booking.status == "checked_out":
+            folio.status = "settled"
+            folio.settled_at = _depart_ts
 
         rooms = []
-        for item in booking.booking_items:
+        for item in leaving:
             if item.room_id:
                 room = db.query(Room).filter(Room.room_id == item.room_id).first()
                 if room and room.status == "occupied":
                     room.status = "cleaning"
-                    room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
-                    on_room_dirtied(db, room, booking)          # prompt 13: dirty + auto cleaning task
+                    room.status_changed_at = clock.now_utc()  # prompt 11: cleaning-too-long detection
+                    on_room_dirtied(db, room, booking)        # prompt 13: dirty + auto cleaning task
                 if room:
                     rooms.append(room)
 
-        cards = db.query(CardIssuance).filter(
+        # Only the departing rooms' cards. A partial checkout must not kill the key of a guest who
+        # is still in the building.
+        _leaving_room_ids = {i.room_id for i in leaving if i.room_id}
+        cards = [c for c in db.query(CardIssuance).filter(
             CardIssuance.booking_id == booking.booking_id,
             CardIssuance.status == "active",
-        ).all()
+        ).all() if c.room_id in _leaving_room_ids or not _leaving_room_ids]
         # v4b4: a card the desk physically WIPED on the encoder is recorded as `erased` with
         # who did it and when — a stronger fact than `checked_out`, which only ever meant "the
         # database says this stay is over". Match on the UID read back at encode time
@@ -1760,10 +1942,17 @@ def _checkout_response(db: Session, booking: Booking, folio: Folio | None, overr
         CardIssuance.booking_id == booking.booking_id,
         CardIssuance.status == "erased",
     ).scalar() or 0
+    # v6c: a partial checkout leaves rooms behind - say which, so the desk sees at a glance that
+    # the stay is not over and whose keys are still live.
+    still_in = [{"room_id": i.room_id,
+                 "room_number": (i.room.room_number if i.room else None)}
+                for i in booking.booking_items if i.is_checked_in]
     return {
         "booking_id": booking.booking_id,
         "status": booking.status,
         "already_checked_out": already,
+        "partial": bool(still_in),
+        "rooms_still_in_house": still_in,
         "checked_out_at": booking.checked_out_at.isoformat() if booking.checked_out_at else None,
         "folio_id": folio.id if folio else None,
         "folio_status": folio.status if folio else None,
@@ -1867,7 +2056,10 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
                 item.gst_amount = round(float(item.gst_amount or 0) - (amt - base), 2)
                 item.total_amount = round(float(item.total_amount or 0) - amt, 2)
 
-        booking.check_out = new_co
+        # v6c: only the rooms leaving early move back; the rest keep their booked departure.
+        for _it in target_items(booking, getattr(data, "room_ids", None)):
+            _it.check_out = new_co
+        sync_booking_from_items(booking)
         booking.total_amount = round(float(booking.total_amount or 0) - credit, 2)
         booking.grand_total = round(float(booking.grand_total or 0) - credit, 2)
         # The stay window just got shorter — the card now outlives the stay, so it must be re-cut.
@@ -2341,6 +2533,10 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             posting_reason=room_posting.REASON_EXTEND,
             price_mode=room_posting.PRICE_QUOTE,
             override_total=(None if data.applied_amount is None else applied),
+            # v6c: price the extra nights for the rooms being extended only. `only_items` has
+            # existed since v5n for exactly this - a subset of the stay's rooms.
+            only_items=sorted({i.booking_item_id
+                               for i in target_items(booking, getattr(data, "room_ids", None))}),
             recompute=False)
 
         # Keep booking + item money in step with the folio. `grand_total` is read by the desk
@@ -2369,7 +2565,16 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         # check_out itself keeps moving, and v4b3's runaway guard reads this.
         if booking.original_check_out is None:
             booking.original_check_out = old_co
-        booking.check_out = new_co
+        # v6c: move the departure of the rooms being extended, then let the booking follow. One room
+        # can stay an extra night while the rest leave as booked; `sync_booking_from_items` sets
+        # booking.check_out to the LATEST of them, so availability and the overstay sweep still see
+        # the stay as occupied for as long as anybody is in it.
+        for _it in target_items(booking, getattr(data, "room_ids", None)):
+            if _it.original_check_out is None:
+                _it.original_check_out = _it.check_out or old_co
+            _it.check_out = new_co
+            _it.checkout_extended_until = None
+        sync_booking_from_items(booking)
         booking.card_reencode_required = True
         # v5m: a night extension supersedes any hourly one — the clock runs from the stay anchor
         # again over the new number of nights.
@@ -3072,21 +3277,39 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "arrival_preview": preview,
             **prepaid_slice(db, b, paid=paid),
             **_bill_to(b),
+            # v6c: only the rooms that have NOT arrived. The wizard opens on these, so a family
+            # arriving in two cars is checked in twice without ever offering a room that is already
+            # occupied by its own booking. A fully-pending booking behaves exactly as before.
             "items": [{
                 "booking_item_id": i.booking_item_id,
                 "room_type_id": i.room_type_id,
                 "room_type_name": i.room_type.name if i.room_type else None,
                 "quantity": i.quantity,
-            } for i in b.booking_items],
+            } for i in b.booking_items if i.checked_in_at is None],
+            "rooms_total": len(b.booking_items),
+            "rooms_pending": len(pending_items(b)),
+            "partly_arrived": bool(arrived_items(b)) and bool(pending_items(b)),
         }
 
     _arrival_q = db.query(Booking).options(
         joinedload(Booking.guest),
         joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
     ).filter(Booking.status == "confirmed")
+    # v6c: a booking is `checked_in` once ANY room has arrived, so Arrivals must also carry the
+    # bookings that are only PARTLY in - otherwise the family's second car would vanish from the
+    # desk the moment the first one was checked in, which is the F-13 bug in a new shape. The row
+    # reports `pending_rooms` so the wizard opens on the rooms that are still to come.
+    _part_q = db.query(Booking).options(
+        joinedload(Booking.guest),
+        joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
+    ).filter(Booking.status == "checked_in")
     arrivals = [_arrival_row(b) for b in _arrival_q.filter(
         Booking.check_in <= today, Booking.check_out >= today,
     ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()]
+    arrivals += [_arrival_row(b) for b in _part_q.filter(
+        Booking.check_in <= today, Booking.check_out >= today,
+    ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()
+        if pending_items(b)]
     upcoming = [_arrival_row(b) for b in _arrival_q.filter(
         Booking.check_in > today, Booking.check_in <= today + timedelta(days=7),
     ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()]

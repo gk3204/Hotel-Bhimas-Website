@@ -497,6 +497,11 @@ class CardIssueRequest(BaseModel):
 
 class CheckoutRequest(BaseModel):
     booking_id: int = Field(..., gt=0)
+    # v6c: which rooms are leaving. Empty / omitted = the whole stay, which is what a single-room
+    # booking and every existing caller sends. A multi-room family can now check out the room that
+    # is going home on Tuesday and leave the rest in-house - the owner's rule, "the same rules but
+    # for each room and not for the entire booking".
+    room_ids: Optional[List[int]] = Field(None, max_length=20)
     override: bool = False                                    # settle despite non-zero balance
     override_reason: Optional[str] = Field(None, min_length=3, max_length=200)
     client_ref: Optional[str] = Field(None, max_length=64)
@@ -542,6 +547,10 @@ class ExtendStayRequest(BaseModel):
     money is a folio charge, the same rule /reception/shift enforces.
     """
     booking_id: int = Field(..., gt=0)
+    # v6c: which rooms are being extended. Omitted = the whole stay (every existing caller).
+    # The owner's rule is that a multi-room booking follows the same rules PER ROOM, so one
+    # room can stay an extra night while the rest leave as booked.
+    room_ids: Optional[List[int]] = Field(None, max_length=20)
     new_check_out: date
     applied_amount: Optional[float] = Field(None, ge=0, le=10_000_000)
     reason: Optional[str] = Field(None, min_length=3, max_length=200)
@@ -602,6 +611,8 @@ class EarlyCheckoutRequest(BaseModel):
     resulting overpayment is settled by the normal checkout return-excess/refund flow.
     `dry_run` previews the credit without mutating. `new_check_out` defaults to today."""
     booking_id: int = Field(..., gt=0)
+    # v6c: which rooms are leaving early. Omitted = the whole stay.
+    room_ids: Optional[List[int]] = Field(None, max_length=20)
     new_check_out: Optional[date] = None
     dry_run: bool = False
 

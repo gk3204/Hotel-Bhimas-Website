@@ -290,8 +290,15 @@ def stay_events_report(db, date_from, date_to, kind: str | None = None) -> dict:
             one = db.query(Room.room_number).filter(Room.room_id == ev.room_id).scalar()
             rooms = [one] if one else []
         else:
-            rooms = [r.room_number for r, in db.query(Room).join(BookingItem, BookingItem.room_id == Room.room_id)
-                     .filter(BookingItem.booking_id == b.booking_id).with_entities(Room).all()]
+            # A stay-level event (no single room): name every room on the booking.
+            # ⚠️ `for r, in ...` was unpacking a one-column Row, and `.with_entities(Room)` returns
+            # Room OBJECTS, not tuples - so this raised `cannot unpack non-iterable Room object`
+            # the first time a booking-level event reached the report. It had never been hit
+            # because v5n's per-room fees always set `room_id`; the v6c per-room work finally
+            # produced an event without one, and the whole Arrival Exceptions page 500'd.
+            rooms = [r.room_number for r in
+                     db.query(Room).join(BookingItem, BookingItem.room_id == Room.room_id)
+                     .filter(BookingItem.booking_id == b.booking_id).all()]
         approver = None
         if ev.approved_by:
             if ev.approved_by not in users:

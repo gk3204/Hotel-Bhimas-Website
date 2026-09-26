@@ -269,6 +269,41 @@ def _charge_room(charge: FolioCharge, rooms_by_item: dict, rooms_by_id: dict) ->
             "room_number": room.room_number if room else None}
 
 
+def _room_subtotals(charges, rooms_by_item, rooms_by_id) -> list:
+    """What each room on this stay owes, and whether it is clear (F-14 / F-15).
+
+    Completes F-14: Batch A put the room on every line, this adds the arithmetic on top. It is what
+    lets ONE room settle and leave while the others stay open, which is the whole point of a
+    per-room stay - the desk can answer "what does room 12 owe?" without reading the bill sideways.
+
+    A line with no room - a folio-level discount, an advance payment against the stay - is reported
+    under `room_number: None` as the stay's own share, rather than being smeared across rooms it may
+    have nothing to do with. Deliberate: guessing would make a per-room settlement wrong in a way
+    nobody could see.
+    """
+    buckets = {}
+    for c in charges:
+        if c.void:
+            continue
+        rm = _charge_room(c, rooms_by_item, rooms_by_id)
+        key = rm["room_id"]
+        b = buckets.setdefault(key, {"room_id": key, "room_number": rm["room_number"],
+                                     "charges": 0.0, "payments": 0.0})
+        if c.type == "payment":
+            b["payments"] = round(b["payments"] + float(c.amount), 2)     # negative
+        else:
+            b["charges"] = round(b["charges"] + float(c.amount), 2)
+    out = []
+    for b in buckets.values():
+        b["balance"] = round(b["charges"] + b["payments"], 2)
+        b["settled"] = abs(b["balance"]) < 0.01
+        out.append(b)
+    # Rooms first, in room order; the stay's own unattributed share last.
+    out.sort(key=lambda r: (r["room_number"] is None,
+                            ordering.room_number_sort_key(r["room_number"] or "")))
+    return out
+
+
 def _folio_detail(db: Session, folio: Folio):
     """Shared response builder: folio + booking/guest summary + all lines + GST totals."""
     from routers.payments import prepaid_slice      # local: payments imports this module
@@ -349,6 +384,8 @@ def _folio_detail(db: Session, folio: Folio):
         } for c in charges],
         **{k: v for k, v in totals.items() if k != "gst_rows"},
         "gst_rows": totals["gst_rows"],
+        # F-14: what each room owes. The desk settles and releases one room at a time from this.
+        "room_subtotals": _room_subtotals(charges, rooms_by_item, rooms_by_id),
     }
 
 
