@@ -421,6 +421,14 @@ class CardIssuance(Base):
     # owner can see how often a card actually comes back before making it blocking.
     erased_at = Column(DateTime, nullable=True)
     erased_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    # --- Lost-card reissue (v6f, migration 050) ---------------------------------------------
+    # Which card this one replaces, and the folio line charged for losing it. The link used to
+    # exist only inside the audit blob, which meant nothing could ask "has this lost card already
+    # been charged for?" - and it has to be asked, because /cards/issue legitimately runs twice
+    # for one reissue (Card Management pre-checks with encoded=false, and a valid pre-check
+    # records a row). The fee is idempotent on the LOST card, never on the request.
+    replaces_card_id = Column(Integer, ForeignKey("card_issuances.id"), nullable=True, index=True)
+    fee_charge_id = Column(Integer, ForeignKey("folio_charges.id"), nullable=True)
 
 
 class Folio(Base):
@@ -898,6 +906,12 @@ class GuestProfile(Base):
     gstin = Column(String(20), nullable=True)                 # for company/GST invoices
     gst_legal_name = Column(String(160), nullable=True)       # v5m: name on the GST registration
     gst_state_code = Column(String(4), nullable=True)         # v5m: place of supply (GSTIN's first 2 digits)
+    # v6f (migration 050): the GST BILLING address, kept apart from `address` above. The invoice
+    # path used to write the billing address into `address` - the column KYC fills and the police
+    # register prints - so giving a company address for a GST invoice replaced the guest's home
+    # address in the statutory register. Read as `gst_address or address` so nothing on a past
+    # invoice moves.
+    gst_address = Column(String(300), nullable=True)
     vip = Column(Boolean, default=False, index=True)
     blacklist = Column(Boolean, default=False, index=True)
     blacklist_reason = Column(String(300), nullable=True)

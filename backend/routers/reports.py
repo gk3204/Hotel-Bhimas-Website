@@ -612,6 +612,49 @@ def card_audit_data(db, dfrom, dto):
     return {"from": str(dfrom), "to": str(dto), "count": len(rows), "by_type": by_type, "rows": rows}
 
 
+def lost_cards_data(db, dfrom, dto):
+    """Key cards reported lost in the range, and what was charged for them (v6f).
+
+    One row per LOST card, not per replacement: the row the guest lost is the event, and the
+    replacement carries the link back (`replaces_card_id`) and the fee (`fee_charge_id`). A fee
+    that was waived, or not configured, shows as 0 with the reason the desk gave — the owner is
+    reading this to see how often cards go missing AND how often nobody charged for it.
+    """
+    from models import FolioCharge
+    q = (db.query(CardIssuance)
+         .filter(CardIssuance.issue_type == "lost_reissue",
+                 clock.business_date_sql(CardIssuance.issued_at) >= dfrom,
+                 clock.business_date_sql(CardIssuance.issued_at) <= dto)
+         .order_by(CardIssuance.issued_at.desc()))
+    rows, charged = [], 0.0
+    for c in q.all():
+        room = db.query(Room).filter(Room.room_id == c.room_id).first() if c.room_id else None
+        booking = (db.query(Booking).filter(Booking.booking_id == c.booking_id).first()
+                   if c.booking_id else None)
+        fee = (db.query(FolioCharge).filter(FolioCharge.id == c.fee_charge_id).first()
+               if c.fee_charge_id else None)
+        # A voided fee counts as not charged — that is the whole reason the link exists.
+        amount = round(float(fee.amount or 0), 2) if (fee and not fee.void) else 0.0
+        charged = round(charged + amount, 2)
+        rows.append({
+            "reissued_at": c.issued_at.isoformat() if c.issued_at else None,
+            "room": room.room_number if room else None,
+            "guest": (booking.display_guest_name if booking else None),
+            "booking_id": c.booking_id,
+            "lost_card_id": c.replaces_card_id,
+            "new_card_id": c.id,
+            "issued_by": _user_name(db, c.issued_by),
+            "fee": amount,
+            "fee_status": ("charged" if amount else
+                           "voided" if (fee and fee.void) else "not charged"),
+        })
+    return {"from": str(dfrom), "to": str(dto), "count": len(rows),
+            "charged_total": charged,
+            "uncharged": len([r for r in rows if not r["fee"]]),
+            "rows": rows,
+            "totals": {"fee": charged}}
+
+
 def staff_performance_data(db, dfrom, dto):
     """Per-staff activity over the period (prompt 18, slice 9).
 
@@ -1332,6 +1375,7 @@ EOD_REPORT_CHOICES = {
     "room_detail": "Room Detail (HK + frauds)",
     "maintenance_detail": "Maintenance Detail",
     "daily_sales": "Daily Sales",
+    "lost_cards": "Lost Key Cards",
 }
 
 
@@ -1349,6 +1393,13 @@ def _eod_report_pdf(db, key, day):
         totals = ["TOTAL", "", "", "", "", d["totals"]["pax"], "", "", "", d["totals"]["revenue"]]
     elif key == "cashier_summary":
         cols, rows, totals = _cashier_table(cashier_summary_data(db, day))
+    elif key == "lost_cards":
+        d = lost_cards_data(db, day, day)
+        cols = ["Reissued", "Room", "Guest", "Lost card", "By", "Fee", "Status"]
+        rows = [[(r["reissued_at"] or "")[:16].replace("T", " "), r["room"] or "—",
+                 r["guest"] or "—", r["lost_card_id"] or "—", r["issued_by"] or "—",
+                 r["fee"], r["fee_status"]] for r in d["rows"]]
+        totals = ["TOTAL", "", "", "", "", d["charged_total"], f"{d['uncharged']} not charged"]
     elif key == "checkout_summary":
         d = checkout_summary_data(db, day)
         cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
@@ -1677,6 +1728,23 @@ def cashier_summary_report(day: str | None = Query(None), format: str = Query("j
     meta = {"Day": f"{d:%d-%m-%Y}", "Unsettled bills": len(data["unsettled"]), **_meta()}
     return _export_or_json(format, data, title="Front-Office Cashier Summary", columns=cols,
                            rows=rows, totals_row=totals, meta=meta, filename="cashier_summary")
+
+
+@router.get("/lost-cards", dependencies=[Depends(require_admin)])
+def lost_cards_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                      format: str = Query("json"), db: Session = Depends(get_db)):
+    """Key cards reported lost, and what was charged for each."""
+    dfrom, dto = _range(from_, to)
+    data = lost_cards_data(db, dfrom, dto)
+    cols = ["Reissued", "Room", "Guest", "Booking", "Lost card", "New card", "By", "Fee", "Status"]
+    rows = [[(r["reissued_at"] or "")[:16].replace("T", " "), r["room"] or "—",
+             r["guest"] or "—", r["booking_id"] or "—", r["lost_card_id"] or "—",
+             r["new_card_id"], r["issued_by"] or "—", r["fee"], r["fee_status"]]
+            for r in data["rows"]]
+    totals = ["TOTAL", "", "", "", "", "", "", data["charged_total"],
+              f"{data['uncharged']} not charged"]
+    return _export_or_json(format, data, title="Lost Key Cards", columns=cols, rows=rows,
+                           totals_row=totals, meta=_meta(dfrom, dto), filename="lost_cards")
 
 
 @router.get("/checkout-summary", dependencies=[Depends(require_admin)])

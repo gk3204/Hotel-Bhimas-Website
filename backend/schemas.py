@@ -498,7 +498,11 @@ class CardIssueRequest(BaseModel):
     valid_from: datetime
     valid_to: datetime
     issue_type: str = Field("checkin", pattern="^(checkin|extra|lost_reissue|shift|extend)$")
-    lost_card_id: Optional[int] = Field(None, gt=0)           # issuance to mark "lost" on lost_reissue
+    lost_card_id: Optional[int] = Field(None, gt=0)
+    # v6f: the desk may waive the lost-card fee, but never silently - the reason is recorded on
+    # the audit row, so "we let them off" is a decision somebody made rather than a gap.
+    fee_waived: bool = False
+    fee_waive_reason: Optional[str] = Field(None, min_length=3, max_length=200)           # issuance to mark "lost" on lost_reissue
     owner_otp_id: Optional[int] = Field(None, gt=0)           # owner approval for extra/lost_reissue (ALT-1)
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     station_id: Optional[str] = Field(None, max_length=50)

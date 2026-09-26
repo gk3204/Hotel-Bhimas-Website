@@ -16,9 +16,10 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import Booking, BookingItem, CardIssuance, FraudAlert, Room
+from models import Booking, BookingItem, CardIssuance, FolioCharge, FraudAlert, Room
 from schemas import CardIssueRequest
 from utils import settings as app_settings
+from services import folio_resolver
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_reception_or_admin
 from utils.owner_otp import consume_otp
@@ -61,7 +62,7 @@ def _active_count(db: Session, room_id: int) -> int:
 
 
 def _issue_response(db: Session, card: CardIssuance, duplicate=False, flagged=False,
-                    fraud_alert_id=None, reasons=None):
+                    fraud_alert_id=None, reasons=None, fee_amount=0.0, fee_skipped=None):
     room = db.query(Room).filter(Room.room_id == card.room_id).first() if card.room_id else None
     return {
         "card_id": card.id,
@@ -75,6 +76,12 @@ def _issue_response(db: Session, card: CardIssuance, duplicate=False, flagged=Fa
         "reasons": reasons or [],
         "active_cards": _active_count(db, card.room_id) if card.room_id else None,
         "max_cards": room.max_cards if room else None,
+        # v6f: what the guest was charged for losing the card, so the desk can say so out loud.
+        # `fee_skipped` names the reason when nothing was posted — a zero fee configured, a
+        # complimentary stay, a waiver, no open bill — because silence there reads as a bug.
+        "fee_amount": fee_amount,
+        "fee_charge_id": card.fee_charge_id,
+        "fee_skipped": fee_skipped,
     }
 
 
@@ -104,6 +111,9 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
         is_comp = bool(booking) and (getattr(booking, "comp_mode", "none") or "none") in ("all", "room")
         if booking and not is_comp and total_paid_including_prepaid(db, booking.booking_id) <= 0:
             reasons.append("card_without_payment")
+        # v6f: initialised, because the lost-card fee below asks which ROOM of the stay this is
+        # and the branch that sets it does not always run.
+        assigned = None
         if not room:
             reasons.append("card_without_booking")
         elif booking:
@@ -172,6 +182,66 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
         db.add(card)
         db.flush()
 
+        # ---- v6f: charge for the lost card ----------------------------------------------------
+        # The registration slip has promised "a lost/unreturned card is chargeable" since v4b1 and
+        # nothing ever billed it. Posted here, INSIDE the transaction that records the card, so a
+        # card and its fee can never exist apart.
+        #
+        # Idempotent on the LOST CARD, not on the request: /cards/issue legitimately runs twice for
+        # one reissue (Card Management pre-checks with encoded=false, and a valid pre-check records
+        # a row), and `client_ref` only dedupes an outbox re-flush. One fee per lost card, ever.
+        fee_amount, fee_skipped = 0.0, None
+        if data.issue_type == "lost_reissue" and old_card is not None:
+            card.replaces_card_id = old_card.id
+            cfg = app_settings.get_frontdesk_config(db)
+            price = round(float(cfg.get("lost_card_fee_amount") or 0), 2)
+            already = db.query(CardIssuance).filter(
+                CardIssuance.replaces_card_id == old_card.id,
+                CardIssuance.fee_charge_id.isnot(None),
+                CardIssuance.id != card.id).first()
+            if data.fee_waived:
+                if not (data.fee_waive_reason or "").strip():
+                    raise HTTPException(status_code=400,
+                                        detail="Waiving the lost-card fee needs a reason")
+                fee_skipped = "waived: " + data.fee_waive_reason.strip()
+            elif price <= 0:
+                fee_skipped = "no lost-card fee is configured"
+            elif is_comp:
+                fee_skipped = "complimentary stay"
+            elif already is not None:
+                fee_skipped = f"already charged on card {already.id}"
+            elif booking is None:
+                fee_skipped = "no booking to bill"
+            else:
+                _folio = folio_resolver.folio_for_item(db, booking, assigned) \
+                    if assigned is not None else folio_resolver.primary_folio(db, booking)
+                if _folio is None:
+                    fee_skipped = "no folio for this stay"
+                elif _folio.status != "open":
+                    # Same rule as the minibar charge: a settled bill takes no more money. The loss
+                    # is still recorded; the desk collects at the counter.
+                    fee_skipped = "the bill is already settled"
+                else:
+                    _label = f" — room {room.room_number}" if room else ""
+                    _fee = FolioCharge(
+                        folio_id=_folio.id,
+                        type="misc",
+                        description=f"Lost key card{_label}",
+                        qty=1,
+                        unit_price=price,
+                        amount=price,
+                        gst_percent=round(float(cfg.get("lost_card_fee_gst_percent") or 0), 2),
+                        posted_by=_resolve_user_id(db, user),
+                        posting_reason="lost_card",
+                        room_id=room.room_id if room else None,
+                    )
+                    db.add(_fee)
+                    db.flush()
+                    card.fee_charge_id = _fee.id
+                    fee_amount = price
+                    from routers.folio import _recompute
+                    _recompute(db, _folio)
+
         # v4b2: a stay whose dates moved (a manual extension, or v4b3's automatic overstay
         # charge) is flagged as needing its card re-cut. Recording a card for that booking is
         # what clears the flag — so the desk board stops nagging the moment the guest has a
@@ -214,13 +284,16 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
                            "station_id": data.station_id, "offline": data.offline,
                            "reasons": reasons, "fraud_alert_id": fraud_alert_id,
                            "lost_card_id": data.lost_card_id,
+                           "fee_amount": fee_amount, "fee_charge_id": card.fee_charge_id,
+                           "fee_skipped": fee_skipped,
                            "client_ref": data.client_ref},
                     client="desktop", commit=True)
         if reasons:
             logger.warning(f"⚠️ Flagged card issuance {card.id} (booking {data.booking_id}): {reasons}")
 
         return _issue_response(db, card, flagged=bool(reasons),
-                               fraud_alert_id=fraud_alert_id, reasons=reasons)
+                               fraud_alert_id=fraud_alert_id, reasons=reasons,
+                               fee_amount=fee_amount, fee_skipped=fee_skipped)
     except HTTPException:
         db.rollback()
         raise

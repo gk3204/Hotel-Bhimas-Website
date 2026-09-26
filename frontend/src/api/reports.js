@@ -70,6 +70,7 @@ export const getRoomDetail = (p) => getReport("room-detail", p);
 export const getMaintenanceDetail = (p) => getReport("maintenance-detail", p);
 export const getShiftPayments = (p) => getReport("shift-payments", p);
 export const getCardAudit = (p) => getReport("card-audit", p);
+export const getLostCards = (p) => getReport("lost-cards", p);
 export const getFraudSummary = (p) => getReport("fraud-summary", p);
 
 // ---- dashboard + trends ----

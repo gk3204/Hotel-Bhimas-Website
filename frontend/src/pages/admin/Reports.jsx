@@ -344,6 +344,21 @@ const REPORTS = {
         fmt(d.totals.variance)],
     }),
   },
+  "lost-cards": {
+    label: "Lost Key Cards",
+    path: "lost-cards",
+    range: true,
+    note: "Every card reported lost, and whether the fee was charged. Set the amount in " +
+          "Settings → Front desk; at ₹0 nothing is billed.",
+    fetch: (p) => api.getLostCards(p),
+    project: (d) => ({
+      columns: ["Reissued", "Room", "Guest", "Booking", "Lost card", "New card", "By", "Fee", "Status"],
+      rows: d.rows.map((r) => [(r.reissued_at || "").replace("T", " ").slice(0, 16), r.room,
+        r.guest, r.booking_id, r.lost_card_id, r.new_card_id, r.issued_by, r.fee, r.fee_status]),
+      totals: ["TOTAL", "", "", "", "", "", "", d.charged_total,
+        `${d.uncharged} not charged`],
+    }),
+  },
   "card-audit": {
     label: "Card Audit",
     path: "card-audit",

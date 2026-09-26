@@ -145,6 +145,8 @@ def get_frontdesk_config(db: Session = Depends(get_db)):
 @router.put("/frontdesk-config")
 def set_frontdesk_config(id_scope: str | None = Body(None),
                          agent_lead_id_only: bool | None = Body(None),
+                         lost_card_fee_amount: float | None = Body(None),
+                         lost_card_fee_gst_percent: float | None = Body(None),
                          scans_required: bool | None = Body(None),
                          no_show_from_date: str | None = Body(None),
                          blocked_guest_phones: str | None = Body(None),
@@ -161,6 +163,17 @@ def set_frontdesk_config(id_scope: str | None = Body(None),
     if agent_lead_id_only is not None:
         app_settings.set_setting(db, app_settings.AGENT_LEAD_ID_ONLY_KEY,
                                  "true" if agent_lead_id_only else "false", user=user)
+    if lost_card_fee_amount is not None:
+        if lost_card_fee_amount < 0:
+            raise HTTPException(status_code=422, detail="lost_card_fee_amount cannot be negative")
+        app_settings.set_setting(db, app_settings.LOST_CARD_FEE_KEY,
+                                 str(round(float(lost_card_fee_amount), 2)), user=user)
+    if lost_card_fee_gst_percent is not None:
+        if not 0 <= lost_card_fee_gst_percent <= 100:
+            raise HTTPException(status_code=422,
+                                detail="lost_card_fee_gst_percent must be between 0 and 100")
+        app_settings.set_setting(db, app_settings.LOST_CARD_FEE_GST_KEY,
+                                 str(round(float(lost_card_fee_gst_percent), 2)), user=user)
     if scans_required is not None:
         app_settings.set_setting(db, app_settings.CHECKIN_SCANS_REQUIRED_KEY,
                                  "true" if scans_required else "false", user=user)

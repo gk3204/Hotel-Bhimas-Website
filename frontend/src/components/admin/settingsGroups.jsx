@@ -146,6 +146,14 @@ export const SETTINGS_GROUPS = [
       { key: "scans_required", type: "toggle", label: "Require front + back ID scans",
         hint: "Applies only to the guests who must show an ID. Off = the ID number alone is accepted.",
         wide: true },
+      { key: "lost_card_fee_amount", type: "number", min: 0, step: "1",
+        label: "Lost key card fee (₹, GST inclusive)",
+        hint: "Charged to the room's bill automatically when the desk reissues a lost card. " +
+              "₹0 means no charge — which is how this ships, so nothing starts billing " +
+              "on its own. The registration slip already tells the guest a lost card is chargeable." },
+      { key: "lost_card_fee_gst_percent", type: "number", min: 0, max: 100, step: "0.5",
+        label: "GST slab for the lost card fee (%)",
+        hint: "The fee is entered inclusive of this." },
       { key: "blocked_guest_phones", type: "textarea", label: "Numbers that may never be a guest contact", wide: true,
         hint: "The OTAs' own call-centre and relay numbers. Comma or semicolon separated; paste them as " +
               "they appear on the voucher (+91 124 462 8747 and 1244628747 are treated as the same). " +

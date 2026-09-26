@@ -211,9 +211,23 @@ def compute_day_report(db, day=None) -> dict:
                           "deviation_minutes": r["deviation_minutes"], "hours": r["hours"],
                           "charge": r["charge"], "basis": r["basis_label"]} for r in rep["rows"]]}
 
+    # ---- v6f: key cards reported lost, and whether anybody charged for them ------------------
+    # The owner asked for this on the daily report. The count alone is not the useful number:
+    # `uncharged` is, because the registration slip promises the guest a lost card is chargeable
+    # and the question is how often the desk actually bills it.
+    def _lost_cards():
+        from routers.reports import lost_cards_data
+        rep = lost_cards_data(db, day, day)
+        return {"count": rep["count"], "charged_total": rep["charged_total"],
+                "uncharged": rep["uncharged"],
+                "rows": [{"room": r["room"], "guest": r["guest"], "fee": r["fee"],
+                          "status": r["fee_status"], "by": r["issued_by"]} for r in rep["rows"]]}
+
     return {
         "day": str(day),
         "headline": _safe(_headline, {}),
+        "lost_cards": _safe(_lost_cards, {"count": 0, "charged_total": 0.0, "uncharged": 0,
+                                          "rows": []}),
         "arrival_exceptions": _safe(_arrival_exceptions, {"early_checkins": 0, "early_charged": 0.0, "late_arrivals": 0,
                                                           "hourly_extensions": 0, "extension_charged": 0.0,
                                                           "no_shows": 0, "rows": []}),
@@ -267,6 +281,12 @@ def summary_text(report: dict) -> str:
                f"(₹{ae.get('extension_charged', 0):,.0f}) · No-shows {ae.get('no_shows', 0)}\n"
                if (ae := report.get("arrival_exceptions")) and any(
                    ae.get(k) for k in ("early_checkins", "late_arrivals", "hourly_extensions", "no_shows")) else "")
+            # v6f: only when a card actually went missing - a line saying "lost cards 0" every
+            # day is noise the owner learns to skip past.
+            + (f"Lost cards {lc.get('count', 0)} "
+               f"(₹{lc.get('charged_total', 0):,.0f} charged"
+               + (f", {lc['uncharged']} not charged" if lc.get("uncharged") else "") + ")\n"
+               if (lc := report.get("lost_cards")) and lc.get("count") else "")
             + "Full report attached (PDF).")
 
 
