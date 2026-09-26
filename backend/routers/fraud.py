@@ -20,6 +20,7 @@ from models import (Booking, BookingItem, CardIssuance, Folio, FraudAlert,
                     OwnerOtp, Payment, Room, RoomType)
 from schemas import AlertReview, FraudConfigUpdate, OtpRequest, OtpVerify
 from utils import settings as app_settings
+from services import folio_resolver
 from utils.audit import write_audit, _resolve_user_id
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.fraud_detection import run_reconciliation, compute_daily_digest, get_config
@@ -322,7 +323,8 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
     if data.folio_id:
         folio = db.query(Folio).filter(Folio.id == data.folio_id).first()
     elif booking is not None:
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        # Context for an alert, not money: the stay's main bill is the right thing to name.
+        folio = folio_resolver.primary_folio(db, booking)
 
     # safe_extras() drops the server-owned keys. Without it a client posting
     # {"booking": ...} in `context` would collide with build_context's own keyword

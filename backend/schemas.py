@@ -190,6 +190,11 @@ class DeskBookingCreate(BaseModel):
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     # editable list (v3 item 2, family `booking_source`); membership checked at the endpoint
     booking_source: str = Field("walk_in", pattern=CATEGORY_SLUG_RE)
+    # v6e: one bill for the group, or one per room. The desk chooses HERE, when the booking is
+    # taken, because that is when it knows: a family on one card wants a single bill; three
+    # colleagues on one corporate reservation each want their own. Default 'group' - every
+    # booking ever taken until now, and the shape nothing else has to think about.
+    billing_mode: str = Field("group", pattern="^(group|room)$")
     agent_id: Optional[int] = Field(None, gt=0)  # prompt 10: price from this travel agent's rate + accrue commission
     # prompt 17: OTA tracking — set when booking_source is an OTA channel. commission % defaults to
     # the per-OTA config (ota_channels) when not supplied; net payout is computed server-side.
@@ -305,6 +310,10 @@ class DeskPaymentRecord(BaseModel):
     method: str = Field(..., pattern="^(cash|card|upi|bank)$")
     reference: Optional[str] = Field(None, max_length=100)   # UPI ref / card-machine slip no / bank txn
     client_ref: Optional[str] = Field(None, max_length=64)   # desktop uuid (offline outbox dedupe)
+    # v6e: WHICH room is paying, when the stay bills per room. Omitted (and always, on a stay
+    # billed as a group) the money is applied across the open bills oldest-first. Naming the room
+    # is what lets room 12 settle and leave while the rest of the party stays.
+    room_id: Optional[int] = Field(None, gt=0)
 
 
 class PaymentRefundRequest(BaseModel):
@@ -514,6 +523,12 @@ class CheckoutRequest(BaseModel):
     encoder_unavailable: bool = False
     owner_otp_id: Optional[int] = Field(None, gt=0)           # approval when no card came back
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+    # v6e: raise the tax invoice for the departing room(s) as part of this checkout. The owner
+    # asked for the desk to choose at the moment of departure: a guest who wants their bill now
+    # gets it, and one who does not is not handed an invoice number they never asked for. An
+    # invoice can still be raised afterwards from the folio screen, exactly as before, so this is
+    # a convenience and never the only route.
+    invoice_now: bool = False
 
 
 class RoomShiftRequest(BaseModel):

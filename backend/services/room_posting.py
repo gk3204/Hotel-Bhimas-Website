@@ -24,6 +24,7 @@ from datetime import date, timedelta
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from services import folio_resolver
 from models import Booking, FolioCharge, RoomType
 from utils.audit import _resolve_user_id
 from utils.rate_engine import quote_stay
@@ -194,10 +195,18 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
     uid = _resolve_user_id(db, user) if user is not None else None
 
     # Which (item, night) slots are already taken. Voided rows are INCLUDED on purpose.
+    #
+    # v6e: scoped to the BOOKING's folios rather than the one passed in. A stay that bills per room
+    # has a folio per room, so a slot taken on room 62's bill is invisible from room 61's — and the
+    # idempotency this function promises would have been silently lost. The database index
+    # `uq_folio_room_night` is on (booking_item_id, charge_date) with no folio in it, so scoping the
+    # in-memory check the same way is what makes the two agree instead of turning a re-post into an
+    # IntegrityError at commit.
+    _folio_ids = [f.id for f in folio_resolver.folios_for_booking(db, booking.booking_id)]         or [folio.id]
     taken = {
         (c.booking_item_id, c.charge_date)
         for c in db.query(FolioCharge.booking_item_id, FolioCharge.charge_date).filter(
-            FolioCharge.folio_id == folio.id,
+            FolioCharge.folio_id.in_(_folio_ids),
             FolioCharge.type == "room",
             FolioCharge.reversal_of_id.is_(None),
         ).all()
@@ -209,6 +218,7 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
         chosen = [i for i in items if i.booking_item_id in wanted]
         items = chosen or items
     posted, skipped, per_item = [], [], []
+    touched = set()
     total_posted = 0.0
 
     quotes = _quote_nights(db, booking, items, nights) if price_mode == PRICE_QUOTE else {}
@@ -223,6 +233,12 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
         # has no room yet, and then the type alone is still the honest label.
         room_prefix = f"Room {item.room.room_number} · " if getattr(item, "room", None) else "Room "
         item_nightly, item_amount, item_posted = [], 0.0, []
+        # v6e: which BILL this room's nights go on. In group mode that is the folio the caller
+        # passed, for every room. When the booking bills per room it is the room's own folio, and
+        # resolving it here is what makes extend-stay, the overstay sweep and the early-arrival
+        # extra night all bill the right room without each of them having to know about the split.
+        item_folio = folio_resolver.folio_for_item(db, booking, item) or folio
+        touched.add(item_folio)
 
         if price_mode == PRICE_BOOKING_SPLIT:
             amounts = _split_booking_total(booking, item, nights)
@@ -239,7 +255,7 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
                 continue
             qty = float(item.quantity or 1)
             charge = FolioCharge(
-                folio_id=folio.id,
+                folio_id=item_folio.id,
                 type="room",
                 description=f"{room_prefix}{label} x{item.quantity} — {night:%d %b %Y}",
                 qty=item.quantity,
@@ -274,7 +290,8 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
     db.flush()   # so the caller sees ids, and so the unique index fires here not at commit
     if recompute:
         from routers.folio import _recompute      # local: routers.folio imports services
-        _recompute(db, folio)
+        for _f in (touched or {folio}):
+            _recompute(db, _f)
 
     return {
         "posted": [c.id for c in posted],

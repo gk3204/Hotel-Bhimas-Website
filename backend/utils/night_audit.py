@@ -17,6 +17,7 @@ returns a summary dict.
 import logging
 from datetime import date, datetime, timedelta
 
+from services import folio_resolver
 from models import Booking, CashShift, DayCloseSummary, Folio
 from sqlalchemy import func, text
 from utils.settings import (get_reports_config, set_setting, BUSINESS_DATE_KEY)
@@ -48,8 +49,12 @@ def ensure_folios_posted(db):
     opened = 0
     checked_in = (db.query(Booking).filter(Booking.status == "checked_in").all())
     for b in checked_in:
-        has_folio = db.query(Folio).filter(Folio.booking_id == b.booking_id).first()
-        if has_folio:
+        # v6e: "has this stay been billed" is now "does it have ALL the bills it should".
+        # A per-room stay whose third room was added after check-in has two folios and needs a
+        # third; the old check saw one folio and left that room unbilled indefinitely.
+        _have = len(folio_resolver.folios_for_booking(db, b.booking_id))
+        _need = (len(b.booking_items) if folio_resolver.is_per_room(b) else 1)
+        if _have >= _need:
             continue
         try:
             # Reuse the folio endpoint's logic directly (it commits + is idempotent). A system

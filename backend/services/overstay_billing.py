@@ -33,6 +33,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from models import Booking, CardIssuance, Folio, FraudAlert
+from services import folio_resolver
 from services import room_posting
 from utils import settings as app_settings
 from utils.audit import write_audit
@@ -124,11 +125,12 @@ def overstay_state(db: Session, booking: Booking, *, now=None, cfg=None) -> dict
 def _auto_charges(db: Session, booking: Booking):
     """Non-void room lines this job posted for a booking (for display and for the reversal)."""
     from models import FolioCharge
-    folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
-    if not folio:
+    # v6e: the automatic nights may sit on any of the stay's bills, one per room.
+    _folio_ids = [f.id for f in folio_resolver.folios_for_booking(db, booking.booking_id)]
+    if not _folio_ids:
         return []
     return (db.query(FolioCharge)
-              .filter(FolioCharge.folio_id == folio.id,
+              .filter(FolioCharge.folio_id.in_(_folio_ids),
                       FolioCharge.type == "room",
                       FolioCharge.posting_reason == room_posting.REASON_OVERSTAY,
                       FolioCharge.reversal_of_id.is_(None),
@@ -190,10 +192,14 @@ def _bill_one(db: Session, booking_id: int, *, now, cfg) -> dict:
             out["reason"] = "runaway_guard"
             return out
 
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        # v6e: the sweep bills each overdue ROOM, and room_posting puts each night on that
+        # room's own bill. A stay is billable while ANY of its bills is still open and uninvoiced -
+        # one room having settled and gone must not stop the room still overstaying being charged.
+        _folios = folio_resolver.folios_for_booking(db, booking.booking_id)
+        folio = folio_resolver.primary_folio(db, booking)
         from routers.folio import _get_invoice, _recompute
         invoice = _get_invoice(db, folio.id) if folio else None
-        billable = bool(folio) and folio.status == "open" and invoice is None
+        billable = any(f.status == "open" and _get_invoice(db, f.id) is None for f in _folios)
 
         comped = getattr(booking, "comp_mode", "none") in ("all", "room")
 
@@ -376,7 +382,7 @@ def sweep_overstays(db: Session, *, now=None, dry_run=False, generated_by="sched
 def _quote_one_night(db: Session, booking: Booking) -> float:
     """What the next night would cost — priced, then rolled back. Dry-run only."""
     try:
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        folio = folio_resolver.primary_folio(db, booking)
         if not folio:
             return 0.0
         preview = room_posting.post_room_nights(

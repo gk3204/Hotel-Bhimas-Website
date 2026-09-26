@@ -29,10 +29,11 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
-from models import Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, Invoice, Payment, RoomType
+from models import (Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, Invoice,
+                    Payment, PaymentAllocation, RoomType)
 from schemas import (FolioBillToRequest, FolioChargeCreate, FolioDiscountRequest, FolioOpenRequest,
                      FolioVoidRequest, InvoiceBuyerRequest)
-from services import company_service, room_posting
+from services import company_service, folio_resolver, room_posting
 from utils import gst
 from utils import ordering
 from utils import settings as app_settings
@@ -380,6 +381,24 @@ def _folio_detail(db: Session, folio: Folio):
         "gst_rows": totals["gst_rows"],
         # F-14: what each room owes. The desk settles and releases one room at a time from this.
         "room_subtotals": _room_subtotals(charges, rooms_by_item, rooms_by_id),
+        # v6e: which bill this is, and the others on the same stay. A desk looking at room 62's
+        # bill needs to see at a glance that rooms 61 and 63 have their own, and what they owe -
+        # otherwise a guest asking "is everything settled?" gets an answer about one room.
+        "billing_mode": (booking.billing_mode if booking else "group"),
+        "booking_item_id": folio.booking_item_id,
+        "room_number": next((i.room.room_number for i in _items
+                             if i.booking_item_id == folio.booking_item_id and i.room is not None),
+                            None),
+        "bills": [{"folio_id": f2.id,
+                   "booking_item_id": f2.booking_item_id,
+                   "room_number": next((i.room.room_number for i in _items
+                                        if i.booking_item_id == f2.booking_item_id
+                                        and i.room is not None), None),
+                   "status": f2.status,
+                   "total": float(f2.total or 0),
+                   "balance": float(f2.balance or 0),
+                   "is_this_one": f2.id == folio.id}
+                  for f2 in folio_resolver.folios_for_booking(db, folio.booking_id)],
     }
 
 
@@ -466,37 +485,98 @@ def list_folios(db: Session = Depends(get_db), user=Depends(require_reception_or
     return {"total": len(data), "data": data}
 
 
-@router.post("/open")
-def open_folio(data: FolioOpenRequest, db: Session = Depends(get_db),
-               user=Depends(require_reception_or_admin)):
-    """Open a folio for a booking (idempotent). Posts the WHOLE stay's room
-    charges (one line per night per booking item, matching the booking's stored
-    pricing exactly) plus credit lines for already-paid payments (advance)."""
-    try:
-        existing = db.query(Folio).filter(Folio.booking_id == data.booking_id).first()
-        if existing:
-            return _folio_detail(db, existing)
+def _split_amount(total: float, n: int) -> list:
+    """Split a rupee figure n ways, the last part absorbing the remainder."""
+    total = round(float(total or 0), 2)
+    if n <= 1:
+        return [total]
+    per = round(total / n, 2)
+    return [per] * (n - 1) + [round(total - per * (n - 1), 2)]
 
-        booking = db.query(Booking).options(
-            joinedload(Booking.booking_items),
-        ).filter(Booking.booking_id == data.booking_id).first()
-        if not booking:
-            raise HTTPException(status_code=404, detail="Booking not found")
-        if booking.status not in FOLIO_BOOKING_STATUSES:
-            raise HTTPException(status_code=400,
-                                detail=f"Cannot open a folio for a '{booking.status}' booking")
 
-        uid = _resolve_user_id(db, user)
-        folio = Folio(booking_id=booking.booking_id, status="open")
-        db.add(folio)
-        db.flush()
+def _item_shares(items, total: float) -> dict:
+    """Apportion `total` across booking items by what each room is worth.
 
-        # Room charges. The per-night split moved to services/room_posting (v4b1) so that
+    Used for the money that belongs to the stay rather than to one room — the online convenience
+    fee, an advance already taken, an OTA prepayment. Splitting it evenly would credit a Rs 900
+    single the same as a Rs 3,000 suite; splitting it by value is the only division that leaves
+    each room's balance meaning what it says. The last room absorbs the paisa.
+    """
+    total = round(float(total or 0), 2)
+    if not items or total == 0:
+        return {i.booking_item_id: 0.0 for i in items}
+    weights = [float(i.total_amount or 0) for i in items]
+    grand = round(sum(weights), 2)
+    if grand <= 0:
+        parts = _split_amount(total, len(items))
+        return {i.booking_item_id: parts[n] for n, i in enumerate(items)}
+    out, running = {}, 0.0
+    for n, i in enumerate(items):
+        if n == len(items) - 1:
+            out[i.booking_item_id] = round(total - running, 2)
+        else:
+            part = round(total * weights[n] / grand, 2)
+            out[i.booking_item_id] = part
+            running = round(running + part, 2)
+    return out
+
+
+def ensure_folios(db: Session, booking: Booking, user) -> list:
+    """Open the stay's bill, or bills. Idempotent — returns what is already there.
+
+    v6e (Batch D): a booking with `billing_mode='room'` gets ONE FOLIO PER ROOM, each carrying only
+    that room's nights and only its share of the stay-level money. `billing_mode='group'` — the
+    default and what every existing booking is — gets the single folio it always had, with every
+    room's charges on it.
+
+    The room lines still go through `services/room_posting.post_room_nights`, one call per folio
+    with `only_items` naming that room, so the per-night maths and the idempotency key are the same
+    in both modes. That is deliberate: two ways of pricing a night is how a per-room bill would
+    come to disagree with the group bill for the same stay.
+    """
+    per_room = folio_resolver.is_per_room(booking)
+    existing = folio_resolver.folios_for_booking(db, booking.booking_id)
+    if existing and not per_room:
+        return existing
+    items = sorted(booking.booking_items, key=lambda i: i.booking_item_id)
+    if per_room and existing and len(existing) >= len(items):
+        return existing
+    if booking.status not in FOLIO_BOOKING_STATUSES:
+        raise HTTPException(status_code=400,
+                            detail=f"Cannot open a folio for a '{booking.status}' booking")
+
+    uid = _resolve_user_id(db, user)
+
+    # The money that belongs to the stay rather than to a room, apportioned in per-room mode.
+    conv = round(float(booking.convenience_fee or 0) + float(booking.convenience_gst or 0), 2)
+    paid = db.query(Payment).filter(
+        Payment.booking_id == booking.booking_id,
+        Payment.status == "paid",
+    ).all()
+    prepaid = round(float(getattr(booking, "prepaid_amount", 0) or 0), 2)
+
+    targets = [(i, [i.booking_item_id]) for i in items] if per_room else [(None, None)]
+    conv_share = _item_shares(items, conv) if per_room else {}
+    prepaid_share = _item_shares(items, prepaid) if per_room else {}
+    pay_shares = {p.payment_id: _item_shares(items, float(p.amount or 0)) for p in paid} \
+        if per_room else {}
+
+    have = {f.booking_item_id: f for f in existing}
+    out = []
+    for item, only_items in targets:
+        key = item.booking_item_id if item is not None else None
+        folio = have.get(key)
+        if folio is None:
+            folio = Folio(booking_id=booking.booking_id, booking_item_id=key, status="open")
+            db.add(folio)
+            db.flush()
+        out.append(folio)
+
+        # Room charges. The per-night split lives in services/room_posting (v4b1) so that
         # check-in, extend-stay and the automatic overstay charge all post nights through
         # ONE implementation with one idempotency key. price_mode="booking_split" is the
         # historical maths, unchanged: the folio room total still equals booking.total_amount
         # to the paisa. A complimentary stay (v4b6) posts nothing at all.
-        nights = max(1, (booking.check_out - booking.check_in).days)
         room_posting.post_room_nights(
             db, booking, folio, booking.check_in, booking.check_out,
             user=user,
@@ -505,6 +585,7 @@ def open_folio(data: FolioOpenRequest, db: Session = Depends(get_db),
             recompute=False,
             # A brand-new folio has no lines, so there is nothing to be un-backfilled.
             enforce_backfilled=False,
+            only_items=only_items,
         )
 
         # Online (website) bookings add a convenience fee on top of the room total, and the guest
@@ -512,45 +593,48 @@ def open_folio(data: FolioOpenRequest, db: Session = Depends(get_db),
         # so without posting the fee the folio would credit more than it charged and read as an
         # overpayment the hotel must refund. Post it as a charge so the folio equals what was paid.
         # (Desk / OTA bookings carry no convenience fee, so this is a no-op for them.)
-        conv = round(float(booking.convenience_fee or 0) + float(booking.convenience_gst or 0), 2)
-        if conv > 0:
+        _conv = conv_share.get(key, 0.0) if per_room else conv
+        if _conv > 0:
             db.add(FolioCharge(
                 folio_id=folio.id,
                 type="misc",
                 description="Convenience fee (online booking)",
                 qty=1,
-                unit_price=conv,
-                amount=conv,
+                unit_price=_conv,
+                amount=_conv,
                 # v5i: the fee is convenience_fee + 18% GST on it, so it belongs in the 18% slab —
                 # leaving gst_percent NULL parked it in a spurious "0%" row on the GST invoice.
                 gst_percent=18,
                 posted_by=uid,
+                booking_item_id=key,
             ))
 
         # Advance already paid (online gateway) -> credit lines.
-        paid = db.query(Payment).filter(
-            Payment.booking_id == booking.booking_id,
-            Payment.status == "paid",
-        ).all()
         for p in paid:
+            amt = pay_shares[p.payment_id].get(key, 0.0) if per_room else float(p.amount or 0)
+            if not amt:
+                continue
             ref = p.payment_id_gateway or p.order_id or p.payment_id
             db.add(FolioCharge(
                 folio_id=folio.id,
                 type="payment",
                 description=f"Advance paid — {p.gateway or 'gateway'} {ref}",
                 qty=1,
-                unit_price=float(p.amount or 0),
-                amount=-float(p.amount or 0),
+                unit_price=amt,
+                amount=-amt,
                 posted_by=uid,
+                booking_item_id=key,
             ))
+            if per_room:
+                db.add(PaymentAllocation(payment_id=p.payment_id, folio_id=folio.id, amount=amt))
 
         # Prepaid elsewhere (OTA channel / website) -> credit line (v4b1, R9).
         # An OTA booking records NO Payment row — the channel took the money, not the hotel —
         # so without this the folio showed the full room amount due and the desk collected it
         # a SECOND time. Not modelled as a Payment on purpose: that would put money the hotel
         # never touched into collections_summary, the cash-drawer gate and the shift variance.
-        prepaid = float(getattr(booking, "prepaid_amount", 0) or 0)
-        if prepaid > 0:
+        _prepaid = prepaid_share.get(key, 0.0) if per_room else prepaid
+        if _prepaid > 0:
             # Prefer the channel NAME ("makemytrip") over the generic source ("ota") — the
             # receptionist reads this line and needs to know who is holding the money.
             src = (booking.booking_source or booking.prepaid_source or "channel")
@@ -561,20 +645,51 @@ def open_folio(data: FolioOpenRequest, db: Session = Depends(get_db),
                 type="payment",
                 description=f"Prepaid to {src} — {ref}",
                 qty=1,
-                unit_price=prepaid,
-                amount=-prepaid,
+                unit_price=_prepaid,
+                amount=-_prepaid,
                 posted_by=uid,
+                booking_item_id=key,
             ))
 
         _recompute(db, folio)
-        db.commit()
-        db.refresh(folio)
+    return out
 
-        write_audit(db, user, "folio.open", "folio", folio.id,
-                    after={"booking_id": booking.booking_id, "total": float(folio.total),
-                           "balance": float(folio.balance), "nights": nights},
-                    client="desktop", commit=True)
-        return _folio_detail(db, folio)
+
+@router.post("/open")
+def open_folio(data: FolioOpenRequest, db: Session = Depends(get_db),
+               user=Depends(require_reception_or_admin)):
+    """Open a folio for a booking (idempotent). Posts the WHOLE stay's room
+    charges (one line per night per booking item, matching the booking's stored
+    pricing exactly) plus credit lines for already-paid payments (advance).
+
+    v6e: a booking that bills per room gets one folio per room; the reply is the first of them,
+    and `booking_folios` on the detail lists them all.
+    """
+    try:
+        booking = db.query(Booking).options(
+            joinedload(Booking.booking_items),
+        ).filter(Booking.booking_id == data.booking_id).first()
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        before = {f.id for f in folio_resolver.folios_for_booking(db, booking.booking_id)}
+        folios = ensure_folios(db, booking, user)
+        if not folios:
+            raise HTTPException(status_code=400, detail="Nothing to bill on this booking")
+        nights = max(1, (booking.check_out - booking.check_in).days)
+        db.commit()
+        for f in folios:
+            db.refresh(f)
+
+        for f in folios:
+            if f.id not in before:
+                write_audit(db, user, "folio.open", "folio", f.id,
+                            after={"booking_id": booking.booking_id, "total": float(f.total),
+                                   "balance": float(f.balance), "nights": nights,
+                                   "booking_item_id": f.booking_item_id,
+                                   "billing_mode": booking.billing_mode},
+                            client="desktop", commit=True)
+        return _folio_detail(db, folios[0])
     except HTTPException:
         raise
     except Exception as e:

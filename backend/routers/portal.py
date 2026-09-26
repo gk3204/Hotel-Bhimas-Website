@@ -32,8 +32,8 @@ from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import (Booking, Folio, FolioCharge, Guest, GuestPortalSession, GuestRequest, MenuItem,
-                    Room)
+from models import (Booking, BookingItem, Folio, FolioCharge, Guest, GuestPortalSession,
+                    GuestRequest, MenuItem, Room)
 from schemas import (CabRequest, CheckoutRequestBody, MenuAvailabilityUpdate, MenuItemCreate,
                      MenuItemUpdate, PortalConfigUpdate, PortalSessionRequest, RequestActionRequest,
                      RoomServiceOrder, WakeupRequest, WifiRequestBody)
@@ -586,6 +586,26 @@ def update_config(data: PortalConfigUpdate, db: Session = Depends(get_db), user=
 # PUBLIC endpoints (no auth) — token is the only credential
 # ================================================================
 
+def _portal_folio(db, session, booking):
+    """The bill this room's guest should see (v6e).
+
+    A portal session is opened from a QR code in one room. When the stay bills per room, that
+    guest's bill is their room's - showing them the family's combined balance would be both the
+    wrong number and somebody else's business. In group mode there is one bill and this returns it.
+    """
+    from services import folio_resolver
+    room_id = getattr(session, "room_id", None)
+    item = None
+    if room_id:
+        item = (db.query(BookingItem)
+                .filter(BookingItem.booking_id == booking.booking_id,
+                        BookingItem.room_id == room_id).first())
+    if item is not None:
+        return folio_resolver.folio_for_item(db, booking, item) \
+            or folio_resolver.primary_folio(db, booking)
+    return folio_resolver.primary_folio(db, booking)
+
+
 def _feature_gate(cfg: dict, key: str):
     """Master gate + per-feature toggle. 403 (as a friendly message) when off."""
     if not cfg["enabled"]:
@@ -604,7 +624,7 @@ def portal_home(token: str, db: Session = Depends(get_db)):
     s, booking = _resolve_token(db, token, for_action=False)
     active = booking.status == "checked_in"
     guest = db.query(Guest).filter(Guest.guest_id == booking.guest_id).first()
-    folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+    folio = _portal_folio(db, s, booking)
     reqs = db.query(GuestRequest).filter(GuestRequest.booking_id == booking.booking_id).order_by(
         GuestRequest.id.desc()).limit(30).all()
     menu = []
@@ -726,7 +746,7 @@ def request_checkout(token: str, data: CheckoutRequestBody, db: Session = Depend
     cfg = app_settings.get_portal_config(db)
     _feature_gate(cfg, "contactless_checkout_enabled")
     s, booking = _resolve_token(db, token)
-    folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+    folio = _portal_folio(db, s, booking)
     r = _create_request(db, s, booking, "checkout",
                         payload={"balance": float(folio.balance or 0) if folio else 0},
                         note=data.note, client_ref=data.client_ref)

@@ -85,6 +85,12 @@ class Booking(Base):
     # normal at a desk, so a later booking renamed the earlier one, and with it a tax invoice already
     # issued, the registration slip and the police register. Read it through `display_guest_name`.
     guest_name = Column(String(100), nullable=True)
+    # v6e (migration 049): one bill for the group, or one bill per room. Chosen when the booking is
+    # taken, because that is when the desk knows: a family on one card wants a single bill, three
+    # colleagues on one corporate reservation each want their own. 'group' (the default, and what
+    # every existing booking is) means one folio for the booking; 'room' means one folio, one
+    # balance and one invoice number per room. See services/folio_resolver.
+    billing_mode = Column(String(10), nullable=False, default="group")
     check_in = Column(Date, nullable=False, index=True)
     check_in_time = Column(Time, nullable=True)  # Guest's expected arrival time
     check_out = Column(Date, nullable=False, index=True)
@@ -418,10 +424,20 @@ class CardIssuance(Base):
 
 
 class Folio(Base):
-    """Per-stay bill. One open folio per in-house booking."""
+    """A bill. One per in-house booking, or one per ROOM when the booking bills per room (v6e).
+
+    `booking_item_id` is what distinguishes the two. NULL means the booking-level folio that has
+    always existed; set means this folio is that one room's bill. The old UNIQUE on `booking_id`
+    is replaced by two PARTIAL unique indexes in migration 049 (`uq_folios_booking_group`,
+    `uq_folios_booking_item`) so the database still refuses two group folios or two folios for the
+    same room. Resolve a booking's folios through `services/folio_resolver`, never by assuming
+    there is one.
+    """
     __tablename__ = "folios"
     id = Column(Integer, primary_key=True, index=True)
-    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), unique=True, nullable=False, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=False, index=True)
+    booking_item_id = Column(Integer, ForeignKey("booking_items.booking_item_id"),
+                             nullable=True, index=True)
     status = Column(String(20), nullable=False, default="open", index=True)  # open|settled
     total = Column(Numeric(10, 2), default=0)
     balance = Column(Numeric(10, 2), default=0)
@@ -434,6 +450,22 @@ class Folio(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
     company_total = Column(Numeric(10, 2), default=0)
     company_balance = Column(Numeric(10, 2), default=0)
+
+
+class PaymentAllocation(Base):
+    """Where a payment landed when the booking bills per room (v6e, migration 049).
+
+    A guest hands over one card for the whole booking, so a payment belongs to the BOOKING. When
+    each room has its own bill, that money has to be split across them, and a refund later has to
+    be unwound from the same places. Without this row the split would only exist as folio credit
+    lines with no link back to the payment that made them.
+    """
+    __tablename__ = "payment_allocations"
+    id = Column(Integer, primary_key=True, index=True)
+    payment_id = Column(Integer, ForeignKey("payments.payment_id"), nullable=False, index=True)
+    folio_id = Column(Integer, ForeignKey("folios.id"), nullable=False, index=True)
+    amount = Column(Numeric(10, 2), nullable=False, default=0)
+    created_at = Column(TIMESTAMP, server_default=func.now())
 
 
 class FolioCharge(Base):

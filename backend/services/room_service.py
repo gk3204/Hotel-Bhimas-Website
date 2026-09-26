@@ -17,6 +17,7 @@ from decimal import Decimal
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
+from services import folio_resolver
 from models import (Booking, BookingItem, Folio, FolioCharge, Guest, GuestRequest,
                     InvoiceCounter, MenuItem, Room, StockItem)
 from utils import ordering
@@ -123,7 +124,14 @@ def post_to_folio(db: Session, r: GuestRequest, user):
     """Post an order's lines to the stay's OPEN folio — one FolioCharge per menu line so each
     keeps its own GST slab — and decrement any linked stock. Does not commit; the caller owns
     the transaction. Raises 409 if there is no open folio to bill."""
-    folio = db.query(Folio).filter(Folio.booking_id == r.booking_id).first()
+    # v6e: a delivered order belongs to the room it was delivered to. `GuestRequest.room_id` is
+    # what the kitchen docket is printed from, so it is also what decides whose bill this is.
+    _bk = db.query(Booking).filter(Booking.booking_id == r.booking_id).first()
+    _item = (db.query(BookingItem)
+             .filter(BookingItem.booking_id == r.booking_id,
+                     BookingItem.room_id == r.room_id).first()) if getattr(r, "room_id", None) else None
+    folio = (folio_resolver.folio_for_item(db, _bk, _item) if (_bk is not None and _item is not None)
+             else (folio_resolver.primary_folio(db, _bk) if _bk is not None else None))
     if not folio:
         raise HTTPException(status_code=409, detail="No folio for this stay")
     if folio.status != "open":
@@ -290,7 +298,9 @@ def in_house_rooms(db: Session) -> list:
          .filter(Booking.status == "checked_in", BookingItem.room_id.isnot(None))
          .order_by(*ordering.room_number_key(Room.room_number)))
     for booking, _item, room, guest in q.all():
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        # One row per in-house ROOM, so the bill named is that room's own when there is one.
+        folio = folio_resolver.folio_for_item(db, booking, _item) \
+            or folio_resolver.primary_folio(db, booking)
         rows.append({
             "booking_id": booking.booking_id,
             "room_id": room.room_id,

@@ -32,6 +32,7 @@ from schemas import (GuestProfileUpdate, VipUpdate, BlacklistUpdate, LoyaltyRede
                      PreArrivalCreate, PreArrivalSubmit, FolioDiscountRequest)
 from utils import ordering
 from utils.auth_utils import require_reception_or_admin, require_admin
+from services import folio_resolver
 from utils.audit import write_audit, _resolve_user_id
 from utils.settings import get_crm_config, set_setting, get_setting, validate_category
 from utils import storage
@@ -249,8 +250,12 @@ def accrue_loyalty_on_checkout(db: Session, booking: Booking, user=None) -> int:
     rate = cfg["loyalty_points_per_rupee"]
     if rate <= 0:
         return 0
-    folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
-    spend = float(folio.total) if folio and folio.total is not None else float(booking.grand_total or 0)
+    # v6e: what the guest spent is the sum of every bill on the stay. A per-room stay has one
+    # folio per room, and accruing on the first of them would pay points on a fraction of the
+    # spend - the guest's own loyalty statement would not match their bill.
+    _folios = folio_resolver.folios_for_booking(db, booking.booking_id)
+    _billed = round(sum(float(f.total or 0) for f in _folios), 2)
+    spend = _billed if _folios else float(booking.grand_total or 0)
     points = int(round(spend * rate))
     if points <= 0:
         return 0
@@ -577,6 +582,10 @@ def redeem_loyalty(guest_id: int, data: LoyaltyRedeem, db: Session = Depends(get
         Booking.guest_id == guest_id, Folio.status == "open")
     if data.booking_id:
         folio_q = folio_q.filter(Folio.booking_id == data.booking_id)
+    # v6e: on a per-room stay this picks the most recently opened OPEN bill. Points are redeemed
+    # by one person at the desk against one bill; spreading a redemption across a family's
+    # separate bills is not something anyone has asked for, and guessing would be worse than the
+    # clear behaviour of crediting the bill the desk is looking at.
     folio = folio_q.order_by(Folio.id.desc()).first()
     if not folio:
         raise HTTPException(status_code=409,

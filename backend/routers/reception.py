@@ -43,7 +43,7 @@ from routers.folio import (open_folio, _recompute, _get_invoice, _active_charges
                            _ensure_editable as _ensure_editable_folio, _void_charge_row)
 from routers.crm import check_guest_gate, match_guest, accrue_loyalty_on_checkout
 from scripts.expire_booking_jobs import expire_pending_bookings
-from services import company_service, ota_service, room_posting
+from services import folio_resolver, company_service, ota_service, room_posting
 from utils.owner_otp import consume_otp
 from utils import clock          # F-03: one clock - see utils/clock.py
 
@@ -276,6 +276,8 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             adults=data.adults,
             children=data.children,
             booking_source=booking_source,
+            # v6e: one bill for the party, or one per room. Chosen at the desk, now.
+            billing_mode=getattr(data, "billing_mode", "group") or "group",
             status="confirmed",
             base_amount=round(total_base, 2),
             gst_amount=round(total_gst, 2),
@@ -387,6 +389,7 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             "guest_name": guest.name,
             "status": booking.status,
             "booking_source": booking.booking_source,
+            "billing_mode": booking.billing_mode,   # v6e
             "agent_id": booking.agent_id,
             "check_in": str(booking.check_in),
             "check_out": str(booking.check_out),
@@ -585,6 +588,19 @@ def target_items(booking: Booking, room_ids=None, *, in_house_only=True) -> list
         raise HTTPException(status_code=409,
                             detail=f"Room id(s) {sorted(missing)} are not part of this stay")
     return chosen
+
+
+def recompute_stay(db, booking) -> None:
+    """Recompute every bill on the stay (v6e).
+
+    A stay can now carry one folio per room, and a charge posted through `room_posting` lands on
+    the room's own bill rather than on the folio the caller happened to be holding. Recomputing
+    only that one left the others' totals stale - visibly wrong on the desk board, and wrong on
+    the gate that decides whether a guest may leave.
+    """
+    from routers.folio import _recompute
+    for _f in folio_resolver.folios_for_booking(db, booking.booking_id):
+        _recompute(db, _f)
 
 
 def sync_booking_from_items(booking: Booking) -> None:
@@ -977,7 +993,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
             for i in _asked)
         if booking.status == "checked_in" and _all_asked_in:
             open_folio(FolioOpenRequest(booking_id=booking.booking_id), db, user)
-            folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+            folio = folio_resolver.primary_folio(db, booking)
             return _checkin_response(db, booking, folio, already=True)
         if booking.status not in ("confirmed", "checked_in"):
             raise HTTPException(status_code=409,
@@ -1455,7 +1471,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
 
         # Folio (idempotent; posts room charges + advance payment credits, own commit).
         open_folio(FolioOpenRequest(booking_id=booking.booking_id), db, user)
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        folio = folio_resolver.primary_folio(db, booking)
 
         # ---- v5m/v5n: early / late arrival — fee or extra night PER ROOM, one event per room ----
         # v5n: a fee is a room's fee, not a booking's. Only the rooms whose guests actually arrived
@@ -1509,8 +1525,11 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                     amounts = [per] * (n - 1) + [round(fee_applied - per * (n - 1), 2)]
                     for (item, _rid), room, amount in zip(selection, sel_rooms, amounts):
                         label = f" — Room {room.room_number}" if room else ""
+                        # v6e: the fee goes on the ROOM's bill when the stay bills per room.
+                        # It was already charged per room (v5n); this is where it lands.
+                        _fee_folio = folio_resolver.folio_for_item(db, booking, item) or folio
                         charge = FolioCharge(
-                            folio_id=folio.id, type="room",
+                            folio_id=_fee_folio.id, type="room",
                             description=(f"Early check-in fee{label} — "
                                          f"{_fmt_dev(arrival['deviation_minutes'])} before {exp:%H:%M}"),
                             qty=1, unit_price=amount, amount=amount,
@@ -1547,7 +1566,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                         approved_by=uid if arrival_approval != "none" else None,
                         folio_charge_id=charge_id,
                         created_by=uid))
-                _recompute(db, folio)
+                recompute_stay(db, booking)   # v6e: every bill on the stay
                 db.commit()
             except HTTPException:
                 raise
@@ -1572,7 +1591,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                     folio.company_id = company.id
                     company_routing = company_service.route_charges(
                         db, folio, company, charge_ids=room_ids)
-                    _recompute(db, folio)
+                    recompute_stay(db, booking)   # v6e: every bill on the stay
                     db.commit()
                     company_routing["company_name"] = company.name
                     company_routing["credit"] = company_service.check_credit(db, company)
@@ -1670,7 +1689,10 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         if not booking:
             raise HTTPException(status_code=404, detail="Booking not found")
 
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        # v6e: a stay can carry one bill per room. `folio` remains the stay's main bill - the
+        # company transfer and the response quote it - while `_folios` is every bill on the stay.
+        _folios = folio_resolver.folios_for_booking(db, booking.booking_id)
+        folio = folio_resolver.primary_folio(db, booking)
 
         # v6c: `checked_out` now means EVERY room has gone, so it is still the right short-circuit -
         # but a booking that is `checked_in` with some rooms already departed must stay open for the
@@ -1692,7 +1714,7 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
             try:
                 company_transfer = company_service.transfer_folio_to_company(db, folio, user=user)
                 if company_transfer:
-                    _recompute(db, folio)
+                    recompute_stay(db, booking)   # v6e: every bill on the stay
             except Exception as e:
                 logger.error(f"company transfer failed for folio {folio.id}: {e}", exc_info=True)
                 raise HTTPException(status_code=500,
@@ -1719,14 +1741,22 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         # not the family's whole bill — asking the room going home on Tuesday to settle the rooms
         # staying until Friday would be absurd. `_room_subtotals` is the same arithmetic the folio
         # screen shows, so the desk and the gate can never disagree.
-        if partial:
+        # v6e: when each room has its own bill, "what must this room settle" is simply that
+        # bill's balance - no apportioning, no subtotals, because the money was never pooled.
+        # The subtotal arithmetic below is still what a GROUP-billed stay uses, where one bill
+        # carries every room and the departing room's share has to be worked out.
+        _leaving_folios = [f for f in _folios
+                           if f.booking_item_id in {i.booking_item_id for i in leaving}]
+        if folio_resolver.is_per_room(booking) and _leaving_folios:
+            balance = round(sum(float(f.balance or 0) for f in _leaving_folios), 2)
+        elif partial:
             from routers.folio import _folio_detail
             _detail = _folio_detail(db, folio)
             _leaving_ids = {i.room_id for i in leaving}
             balance = round(sum(r["balance"] for r in _detail.get("room_subtotals", [])
                                 if r["room_id"] in _leaving_ids), 2)
         else:
-            balance = round(float(folio.balance or 0), 2)
+            balance = round(sum(float(f.balance or 0) for f in _folios), 2)
         override_used = False
         if balance != 0:
             if not data.override:
@@ -1777,9 +1807,22 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         for item in leaving:
             item.checked_out_at = _depart_ts
         sync_booking_from_items(booking)
-        if booking.status == "checked_out":
-            folio.status = "settled"
-            folio.settled_at = _depart_ts
+        # v6e: a room's own bill closes when that room leaves - that is the whole point of billing
+        # per room, and it is what lets its invoice be raised while the rest of the party is still
+        # in the building. A GROUP bill closes only when the last room has gone.
+        _settled_folios = []
+        if folio_resolver.is_per_room(booking):
+            for _f in _leaving_folios:
+                if _f.status == "open":
+                    _f.status = "settled"
+                    _f.settled_at = _depart_ts
+                    _settled_folios.append(_f)
+        elif booking.status == "checked_out":
+            for _f in _folios:
+                if _f.status == "open":
+                    _f.status = "settled"
+                    _f.settled_at = _depart_ts
+                    _settled_folios.append(_f)
 
         rooms = []
         for item in leaving:
@@ -1819,6 +1862,24 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
             else:
                 c.status = "checked_out"
         cards_erased_count = len(matched)
+
+        # v6e: the desk's choice - raise the departing room's tax invoice now, or leave it to be
+        # raised from the folio screen later. Deliberately never automatic: an invoice number is
+        # sequential and permanent, and issuing one for a guest who did not ask burns a number and
+        # commits a figure. A failure here must not undo a checkout that has otherwise happened,
+        # so it is caught and reported rather than raised.
+        invoices_raised, invoice_error = [], None
+        if getattr(data, "invoice_now", False) and _settled_folios:
+            from routers.folio import ensure_invoice
+            for _f in _settled_folios:
+                try:
+                    _inv, _created = ensure_invoice(db, _f, user, client="desktop")
+                    if _inv is not None:
+                        invoices_raised.append({"folio_id": _f.id, "invoice_no": _inv.invoice_no,
+                                                "created": bool(_created)})
+                except Exception as e:
+                    logger.error(f"invoice at checkout failed for folio {_f.id}: {e}", exc_info=True)
+                    invoice_error = str(e)
 
         # Loyalty accrual (prompt 14): award points for the completed stay. Idempotent
         # (one accrual per booking); joins this transaction. Never blocks checkout.
@@ -1910,7 +1971,8 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
             logger.error(f"AC-off ticket at checkout failed for booking {booking.booking_id}: {e}")
             db.rollback()
 
-        resp = _checkout_response(db, booking, folio, override=override_used, already=False)
+        resp = _checkout_response(db, booking, folio, override=override_used, already=False,
+                                  invoices=invoices_raised, invoice_error=invoice_error)
         resp["loyalty_awarded"] = points_awarded
         resp["company_transfer"] = company_transfer
         resp["invoice_no"] = invoice_no
@@ -1924,7 +1986,8 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         raise HTTPException(status_code=500, detail="Checkout failed")
 
 
-def _checkout_response(db: Session, booking: Booking, folio: Folio | None, override: bool, already: bool):
+def _checkout_response(db: Session, booking: Booking, folio: Folio | None, override: bool,
+                       already: bool, invoices=None, invoice_error=None):
     rooms = []
     for item in booking.booking_items:
         if item.room_id:
@@ -1953,6 +2016,13 @@ def _checkout_response(db: Session, booking: Booking, folio: Folio | None, overr
         "already_checked_out": already,
         "partial": bool(still_in),
         "rooms_still_in_house": still_in,
+        # v6e: the bills this stay carries, and any invoice raised as part of this checkout.
+        "billing_mode": booking.billing_mode,
+        "bills": [{"folio_id": f.id, "booking_item_id": f.booking_item_id,
+                   "status": f.status, "balance": float(f.balance or 0)}
+                  for f in folio_resolver.folios_for_booking(db, booking.booking_id)],
+        "invoices_raised": invoices or [],
+        "invoice_error": invoice_error,
         "checked_out_at": booking.checked_out_at.isoformat() if booking.checked_out_at else None,
         "folio_id": folio.id if folio else None,
         "folio_status": folio.status if folio else None,
@@ -2005,10 +2075,14 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
             raise HTTPException(
                 status_code=409,
                 detail=f"Only an in-house stay can be checked out early (this one is '{booking.status}')")
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        # v6e: a stay can have a bill per room. The unused nights being credited are found
+        # across ALL of them, and each credit lands back on the bill that carried the charge.
+        _folios = folio_resolver.folios_for_booking(db, booking.booking_id)
+        folio = folio_resolver.primary_folio(db, booking)
         if not folio:
             raise HTTPException(status_code=409, detail="No folio for this stay")
-        _ensure_editable_folio(db, folio)
+        for _f in _folios:
+            _ensure_editable_folio(db, _f)
 
         # Default (desk sends none): bill through the day the guest actually leaves. If they've
         # already passed today's check-out deadline (time + grace), tonight is kept — the cut
@@ -2025,14 +2099,14 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
         nights_dropped = (booking.check_out - new_co).days
         # Unused booked room-nights: non-voided room lines dated on/after the new check-out.
         lines = (db.query(FolioCharge)
-                   .filter(FolioCharge.folio_id == folio.id,
+                   .filter(FolioCharge.folio_id.in_([_f.id for _f in _folios]),
                            FolioCharge.type == "room",
                            FolioCharge.charge_date >= new_co,
                            FolioCharge.reversal_of_id.is_(None),
                            FolioCharge.void == False)  # noqa: E712
                    .all())
         credit = round(sum(float(l.amount or 0) for l in lines), 2)
-        bal_before = float(folio.balance or 0)
+        bal_before = round(sum(float(_f.balance or 0) for _f in _folios), 2)
 
         if data.dry_run:
             return {"booking_id": booking.booking_id, "dry_run": True,
@@ -2065,7 +2139,7 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
         # The stay window just got shorter — the card now outlives the stay, so it must be re-cut.
         booking.card_reencode_required = True
 
-        _recompute(db, folio)
+        recompute_stay(db, booking)   # v6e: every bill on the stay
         db.commit()
         db.refresh(folio)
 
@@ -2208,7 +2282,9 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             raise HTTPException(status_code=403,
                                 detail="Charging less than the computed difference requires an admin login")
 
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        # v6e: a shift moves ONE room, so the rate difference belongs on that room's bill.
+        folio = folio_resolver.folio_for_item(db, booking, item) \
+            or folio_resolver.primary_folio(db, booking)
         if not folio:
             raise HTTPException(status_code=409, detail="No folio for this booking — open it first")
         if applied != 0 and (folio.status != "open" or _get_invoice(db, folio.id)):
@@ -2315,7 +2391,7 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
                 gst_percent=float(new_type.gst_percent) if applied > 0 else float(old_type.gst_percent),
                 posted_by=_resolve_user_id(db, user),
             ))
-            _recompute(db, folio)
+            recompute_stay(db, booking)   # v6e: every bill on the stay
         db.commit()
 
         write_audit(db, user, "reception.shift", "booking", booking.booking_id,
@@ -2398,7 +2474,10 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         old_co = booking.check_out
         new_co = data.new_check_out
 
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        # v6e: the extra nights are posted by room_posting, which puts each room's night on that
+        # room's own bill when the stay bills per room. This folio is the one the reply quotes a
+        # balance from, and `_extend_folios` is what gets recomputed.
+        folio = folio_resolver.primary_folio(db, booking)
         if not folio:
             raise HTTPException(status_code=409, detail="No folio for this stay — open it first")
 
@@ -2517,7 +2596,7 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         # Re-lock after the rollback (see the note above on FOR UPDATE + outer joins).
         booking = (db.query(Booking)
                      .filter(Booking.booking_id == data.booking_id).with_for_update().first())
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        folio = folio_resolver.primary_folio(db, booking)
 
         # ⚠️ Consume the owner code AFTER that rollback, never before it. consume_otp only
         # flushes — it joins the caller's transaction so the code is spent only if the action
@@ -2587,7 +2666,7 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             c.status = "superseded"      # frees the max_cards slot for the re-cut
         superseded_ids = [c.id for c in cards]
 
-        _recompute(db, folio)
+        recompute_stay(db, booking)   # v6e: every bill on the stay
         db.commit()
 
         write_audit(db, user, "reception.extend", "booking", booking.booking_id,
@@ -2674,7 +2753,7 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
             raise HTTPException(
                 status_code=409,
                 detail=f"Only an in-house stay can be extended (this one is '{booking.status}')")
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        folio = folio_resolver.primary_folio(db, booking)
         if not folio:
             raise HTTPException(status_code=409, detail="No folio for this stay — open it first")
         inv = _get_invoice(db, folio.id)
@@ -2763,8 +2842,10 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
             amounts = [per] * (n - 1) + [round(applied - per * (n - 1), 2)]
             for (item, _rid), room, amount in zip(selection, sel_rooms, amounts):
                 label = f" — Room {room.room_number}" if room else ""
+                # v6e: the late-checkout fee is that room's, so it goes on that room's bill.
+                _fee_folio = folio_resolver.folio_for_item(db, booking, item) or folio
                 charge = FolioCharge(
-                    folio_id=folio.id, type="room",
+                    folio_id=_fee_folio.id, type="room",
                     description=f"Late checkout +{data.hours} h{label} (until {until:%H:%M %d %b})",
                     qty=1, unit_price=amount, amount=amount,
                     gst_percent=_item_gst_percent(db, item),
@@ -2801,7 +2882,7 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
         for c in cards:
             c.status = "superseded"
         superseded_ids = [c.id for c in cards]
-        _recompute(db, folio)
+        recompute_stay(db, booking)   # v6e: every bill on the stay
         db.commit()
 
         write_audit(db, user, "reception.extend_hours", "booking", booking.booking_id,
@@ -2924,8 +3005,10 @@ def set_complimentary(booking_id: int, data: ComplimentaryRequest,
                 detail=f"A '{booking.status}' stay cannot be made complimentary — the bill is "
                        f"closed. Refund or credit it instead.")
 
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
-        invoice = _get_invoice(db, folio.id) if folio else None
+        # v6e: making a stay complimentary voids the charges on EVERY bill it has.
+        _folios = folio_resolver.folios_for_booking(db, booking.booking_id)
+        folio = _folios[0] if _folios else None
+        invoice = next((inv for inv in (_get_invoice(db, f.id) for f in _folios) if inv), None)
         if invoice:
             raise HTTPException(
                 status_code=409,
@@ -2973,7 +3056,7 @@ def set_complimentary(booking_id: int, data: ComplimentaryRequest,
 
         advance_to_refund = 0.0
         if folio:
-            _recompute(db, folio)
+            recompute_stay(db, booking)   # v6e: every bill on the stay
             # A comped stay that took an advance now has a NEGATIVE balance, and checkout
             # correctly refuses to settle an overpayment. Tell the desk now, while the guest
             # is still reachable, rather than letting it surface at checkout.
@@ -3113,10 +3196,13 @@ def reverse_overstay(booking_id: int, data: ReverseOverstayRequest,
             raise HTTPException(status_code=409,
                                 detail="Only an in-house stay's overstay charge can be reversed")
 
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        # v6e: the overstay night may have been charged to any of the stay's bills.
+        _folios = folio_resolver.folios_for_booking(db, booking.booking_id)
+        folio = folio_resolver.primary_folio(db, booking)
         if not folio:
             raise HTTPException(status_code=409, detail="No folio for this stay")
-        _ensure_editable_folio(db, folio)
+        for _f in _folios:
+            _ensure_editable_folio(db, _f)
 
         # Only the TRAILING night. Reversing a middle one would hole the contiguous-nights
         # invariant that makes the whole posting spine idempotent.
@@ -3128,7 +3214,7 @@ def reverse_overstay(booking_id: int, data: ReverseOverstayRequest,
                        f"Reverse {last_night:%d %b %Y} first.")
 
         lines = (db.query(FolioCharge)
-                   .filter(FolioCharge.folio_id == folio.id,
+                   .filter(FolioCharge.folio_id.in_([_f.id for _f in _folios]),
                            FolioCharge.type == "room",
                            FolioCharge.charge_date == data.night_date,
                            FolioCharge.reversal_of_id.is_(None),
@@ -3175,7 +3261,7 @@ def reverse_overstay(booking_id: int, data: ReverseOverstayRequest,
         # the direction that actually matters for security.
         booking.card_reencode_required = True
 
-        _recompute(db, folio)
+        recompute_stay(db, booking)   # v6e: every bill on the stay
         db.commit()
         db.refresh(folio)
 
@@ -3214,10 +3300,14 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
     today = date.today()
 
     def _paid_and_folio(booking_id):
-        folio = db.query(Folio).filter(Folio.booking_id == booking_id).first()
+        # v6e: a stay can have more than one bill. The board shows what the WHOLE stay still owes —
+        # a desk asking "what does room 12 owe" is asking about a room, and gets that from the
+        # folio screen. Reporting only the first folio's balance would have quietly understated
+        # every per-room stay on the board the desk works from.
+        folios = folio_resolver.folios_for_booking(db, booking_id)
         return (total_paid(db, booking_id),
-                folio.id if folio else None,
-                float(folio.balance or 0) if folio else None)
+                folios[0].id if folios else None,
+                round(sum(float(f.balance or 0) for f in folios), 2) if folios else None)
 
     # Corporate bill-to (prompt 18 slice 7) — cached per board build, not per row.
     _company_names = {c.id: c.name for c in db.query(Company).all()}
@@ -3261,6 +3351,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "check_in_time": str(b.check_in_time) if b.check_in_time else None,
             "check_out": str(b.check_out),
             "booking_source": b.booking_source,
+            "billing_mode": b.billing_mode,   # v6e
             # v5r: the desk needs the channel reference to recognise (and refuse) the placeholder phone
             # that was stamped from it at check-in.
             "ota_booking_id": b.ota_booking_id,
@@ -3366,6 +3457,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             # ARRIVING guest came from but not an in-house one — and the two boards are read by
             # the same person minutes apart.
             "booking_source": b.booking_source,
+            "billing_mode": b.billing_mode,   # v6e
             # Expected arrival vs what actually happened (FE-1) — both on the row so the
             # in-house board can show a late/early arrival at a glance.
             "check_in_time": str(b.check_in_time) if b.check_in_time else None,
@@ -3713,7 +3805,7 @@ def registration_slip(booking_id: int, db: Session = Depends(get_db),
     if booking.status not in ("checked_in", "checked_out"):
         raise HTTPException(status_code=409, detail="Registration slip is available after check-in")
 
-    folio = db.query(Folio).filter(Folio.booking_id == booking_id).first()
+    folio = folio_resolver.primary_folio(db, booking)
     rooms = []
     for i in booking.booking_items:
         if i.room_id:

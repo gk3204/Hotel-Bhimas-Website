@@ -34,6 +34,7 @@ from utils.auth_utils import (require_admin, require_housekeeper_or_admin,
 
 # Housekeeping board is readable by the housekeeper who works it, plus admin.
 _board_viewer = require_roles("admin", "housekeeper")
+from services import folio_resolver
 from utils.audit import write_audit, _resolve_user_id
 from utils.housekeeping import (set_hk_status, cleaning_card_state, active_cleaning_card,
                                 open_checkout_clean_task)
@@ -484,7 +485,10 @@ def minibar_restock(data: MinibarRestockRequest, db: Session = Depends(get_db),
     ).order_by(Booking.checked_in_at.desc()).first()
     if not item:
         raise HTTPException(status_code=409, detail="No in-house guest in this room")
-    folio = db.query(Folio).filter(Folio.booking_id == item.booking_id).first()
+    # v6e: a minibar line is unambiguously the ROOM's - housekeeping posts it from inside the
+    # room. `item` is that room's booking item, so on a per-room stay it goes on that room's bill.
+    _bk = db.query(Booking).filter(Booking.booking_id == item.booking_id).first()
+    folio = folio_resolver.folio_for_item(db, _bk, item) if _bk is not None else None
     if not folio:
         raise HTTPException(status_code=409, detail="No folio for this stay")
     if folio.status != "open":

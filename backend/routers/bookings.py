@@ -445,6 +445,7 @@ def read_all_bookings(
             # start and every revenue report groups by it, but the list a human actually reads
             # omitted it — so "how many did MakeMyTrip send us?" meant running a report.
             "booking_source": booking.booking_source,
+            "billing_mode": booking.billing_mode,   # v6e: one bill, or one per room
             "ota_booking_id": getattr(booking, "ota_booking_id", None),
             # v4b9 R9: a prepaid stay is the one a receptionist must NOT chase for room money.
             "prepaid_amount": float(getattr(booking, "prepaid_amount", 0) or 0),
@@ -565,6 +566,7 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
 
         "status": booking.status,
         "booking_source": booking.booking_source,
+        "billing_mode": booking.billing_mode,   # v6e: one bill, or one per room
         # v4b9 R13/R9: the channel's own reference and what the guest already paid it — the two
         # things someone opening this modal about an OTA stay is actually looking for.
         "ota_booking_id": getattr(booking, "ota_booking_id", None),

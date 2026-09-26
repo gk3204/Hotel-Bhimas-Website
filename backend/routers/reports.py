@@ -36,6 +36,7 @@ from utils.audit import write_audit
 from utils.auth_utils import require_admin
 from utils.settings import get_reports_config
 from services import ota_service
+from services import folio_resolver
 from utils import clock, gst          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
@@ -490,7 +491,9 @@ def in_house_data(db):
                 r = db.query(Room).filter(Room.room_id == it.room_id).first()
                 if r:
                     room_labels.append(r.room_number)
-        folio = db.query(Folio).filter(Folio.booking_id == b.booking_id).first()
+        # v6e: a stay can carry one bill per room; this list names the first of them.
+        _folios = folio_resolver.folios_for_booking(db, b.booking_id)
+        folio = _folios[0] if _folios else None
         nights = max(1, (b.check_out - b.check_in).days)
         rows.append({
             "booking_id": b.booking_id,
@@ -939,7 +942,8 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
     def _ctx(p):
         b = db.query(Booking).filter(Booking.booking_id == p.booking_id).first() if p.booking_id else None
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first() if b else None
-        folio = db.query(Folio).filter(Folio.booking_id == p.booking_id).first() if p.booking_id else None
+        # A receipt names the stay's main bill; the money itself is tracked on Payment.
+        folio = folio_resolver.primary_folio(db, p.booking_id) if p.booking_id else None
         room = _booking_room_label(db, p.booking_id, rcache) if p.booking_id else "—"
         return b, guest, folio, room
 
@@ -1014,18 +1018,21 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
                                           func.date(Booking.checked_out_at) == checkouts_day).all()
                  if checkouts_day else [])
     for b in checkouts:
-        f = db.query(Folio).filter(Folio.booking_id == b.booking_id).first()
+        # v6e: ONE ROW PER BILL. A stay that bills per room leaves three bills behind, and this is
+        # the report the owner uses to chase what was not settled — collapsing them to the first
+        # would hide exactly the unpaid one they are looking for.
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
-        room = _booking_room_label(db, b.booking_id, rcache)
-        bal = round(float(f.balance or 0), 2) if f else 0.0
-        inv = _get_invoice(db, f.id) if f else None
-        rowc = {"bill_no": (inv.invoice_no if inv else f"F{f.id}" if f else "—"),
-                "room": room, "guest": (b.display_guest_name or None),
-                "booking_id": b.booking_id, "balance": bal}
-        if bal != 0:
-            unsettled.append(rowc)
-        elif b.booking_id not in receipted_bookings:
-            nil_checkouts.append(rowc)
+        for f in (folio_resolver.folios_for_booking(db, b.booking_id) or [None]):
+            room = _booking_room_label(db, b.booking_id, rcache)
+            bal = round(float(f.balance or 0), 2) if f else 0.0
+            inv = _get_invoice(db, f.id) if f else None
+            rowc = {"bill_no": (inv.invoice_no if inv else f"F{f.id}" if f else "—"),
+                    "room": room, "guest": (b.display_guest_name or None),
+                    "booking_id": b.booking_id, "balance": bal}
+            if bal != 0:
+                unsettled.append(rowc)
+            elif b.booking_id not in receipted_bookings:
+                nil_checkouts.append(rowc)
 
     return {"modes": mode_rows, "grand": grand,
             "unsettled": unsettled, "nil_checkouts": nil_checkouts}
@@ -1078,10 +1085,14 @@ def checkout_summary_data(db, day):
     bookings = (db.query(Booking).filter(Booking.status == "checked_out",
                                          func.date(Booking.checked_out_at) == day)
                 .order_by(Booking.checked_out_at).all())
-    for b in bookings:
-        f = db.query(Folio).filter(Folio.booking_id == b.booking_id).first()
-        if not f:
-            continue
+    # v6e: ONE ROW PER BILL. A per-room stay issues a bill per room, each with its own invoice
+    # number, and this report is read as the day's list of bills. `advance` and `refund` belong to
+    # the BOOKING, so they are shown against its first bill only — a card payment split across
+    # bills is recorded in payment_allocations, and inventing a second split here would
+    # double-count the money.
+    _bills = [(b, n, fo) for b in bookings
+              for n, fo in enumerate(folio_resolver.folios_for_booking(db, b.booking_id))]
+    for b, _n, f in _bills:
         charges = [c for c in db.query(FolioCharge).filter(FolioCharge.folio_id == f.id,
                                                            FolioCharge.void == False).all()]  # noqa: E712
 
@@ -1098,13 +1109,19 @@ def checkout_summary_data(db, day):
         advance = round(sum(float(p.amount or 0) for p in
                             db.query(Payment).filter(Payment.booking_id == b.booking_id,
                                                      Payment.status == "paid").all()
-                            if not (b.checked_out_at and p.created_at and p.created_at >= b.checked_out_at)), 2)
+                            if not (b.checked_out_at and p.created_at
+                                    and p.created_at >= b.checked_out_at)), 2) if _n == 0 else 0.0
         refund = round(sum(float(p.refund_amount or 0) for p in
                            db.query(Payment).filter(Payment.booking_id == b.booking_id,
-                                                    Payment.refund_status == "completed").all()), 2)
+                                                    Payment.refund_status == "completed").all()),
+                       2) if _n == 0 else 0.0
+        # A room's bill names its own room; the group bill names them all.
+        _its = ([db.query(BookingItem).filter(
+                     BookingItem.booking_item_id == f.booking_item_id).first()]
+                if f.booking_item_id else
+                db.query(BookingItem).filter(BookingItem.booking_id == b.booking_id).all())
         rooms = [db.query(Room).filter(Room.room_id == it.room_id).first()
-                 for it in db.query(BookingItem).filter(BookingItem.booking_id == b.booking_id).all()
-                 if it.room_id]
+                 for it in _its if it is not None and it.room_id]
         inv = _get_invoice(db, f.id)
         rows.append({
             "bill_no": (inv.invoice_no if inv else f"F{f.id}"),

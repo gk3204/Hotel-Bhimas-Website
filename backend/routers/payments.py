@@ -18,6 +18,7 @@ from schemas import DeskPaymentRecord, PaymentRefundRequest, ExcessReturnRequest
 from utils.pdf_generator import generate_booking_pdf, generate_payment_receipt_pdf
 from utils.email_service import send_booking_email
 from utils.auth_utils import require_reception_or_admin, require_admin, get_current_user
+from services import folio_resolver, payment_split
 from utils.audit import write_audit, _resolve_user_id
 from utils.owner_otp import consume_otp
 from utils.settings import (get_desk_pay_config, set_setting,
@@ -891,7 +892,10 @@ def _mark_payment_paid(db: Session, payment: Payment, gateway_payment_id, method
     payment.status = "paid"
     if method:                       # desk QR/link already carry method='upi'; website path passes None
         payment.method = method
-    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    # v6e: the gateway settles the BOOKING, so with a bill per room the money is spread across
+    # the open bills. The convenience fee is the gateway's, not a room's, and stays on the first.
+    _bk = db.query(Booking).filter(Booking.booking_id == payment.booking_id).first()
+    folio = folio_resolver.primary_folio(db, _bk) if _bk is not None else None
     if folio and folio.status == "open":
         fee = float(payment.convenience_fee_amount or 0)
         if fee > 0:
@@ -1031,22 +1035,25 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
 
         # Post a credit line on the open folio (payments stay allowed after invoicing;
         # a settled folio takes no more money).
-        folio = db.query(Folio).filter(Folio.booking_id == booking.booking_id).first()
+        #
+        # v6e: a stay can have a bill per room. `payment_split.post` puts the money on the room
+        # the desk named, or spreads it across the open bills oldest-first, and records where it
+        # landed so a refund can be unwound from the same places. In group mode it posts the one
+        # credit line this has always posted.
+        folio = folio_resolver.primary_folio(db, booking)
         if folio:
-            if folio.status != "open":
+            _open = [f for f in folio_resolver.folios_for_booking(db, booking.booking_id)
+                     if f.status == "open"]
+            if not _open:
                 raise HTTPException(status_code=409, detail="Folio is settled — no further payments")
             ref = f" ({data.reference})" if data.reference else ""
-            db.add(FolioCharge(
-                folio_id=folio.id,
-                type="payment",
+            _splits = payment_split.post(
+                db, booking, payment, round(data.amount, 2),
                 description=f"Desk payment — {data.method}{ref}",
-                qty=1,
-                unit_price=-round(data.amount, 2),
-                amount=-round(data.amount, 2),
-                gst_percent=0,
                 posted_by=_resolve_user_id(db, user),
-            ))
-            _folio_recompute(db, folio)
+                room_id=getattr(data, "room_id", None))
+            for _f, _amt in _splits:
+                _folio_recompute(db, _f)
 
         db.commit()
         write_audit(db, user, "payment.desk_record", "payment", payment.payment_id,
@@ -1113,7 +1120,7 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
 
 
 def _desk_payment_response(db: Session, payment: Payment, duplicate: bool = False):
-    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    folio = folio_resolver.primary_folio(db, payment.booking_id)
     return {
         "payment_id": payment.payment_id,
         "booking_id": payment.booking_id,
@@ -1131,7 +1138,7 @@ def _desk_payment_response(db: Session, payment: Payment, duplicate: bool = Fals
 # --------------------------------------------------- desk collect (UPI QR / link)
 
 def _desk_collect_response(db: Session, payment: Payment, short_url=None, expires_at=None):
-    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    folio = folio_resolver.primary_folio(db, payment.booking_id)
     return {
         "payment_id": payment.payment_id,
         "booking_id": payment.booking_id,
@@ -1410,7 +1417,7 @@ def payment_status(payment_id: int, db: Session = Depends(get_db),
                                         or payment.gateway == "phonepe"):
         _try_live_reconcile(db, payment)
         payment = db.query(Payment).filter(Payment.payment_id == payment_id).first()
-    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    folio = folio_resolver.primary_folio(db, payment.booking_id)
     return {
         "payment_id": payment.payment_id,
         "booking_id": payment.booking_id,
@@ -1523,7 +1530,7 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
     if app_settings.get_fraud_config(db)["refund_requires_owner_otp"]:
         consume_otp(db, data.owner_otp_id, data.owner_otp_code, "refund", user)
 
-    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    folio = folio_resolver.primary_folio(db, payment.booking_id)
     # Backlog v2 TBC-1: post the credit line to the folio even once the folio is
     # SETTLED. The common refund happens after checkout, and the old open-folio
     # guard meant those refunds never touched the folio at all — the ledger and the
@@ -1556,17 +1563,22 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
     folio_posting_failed = False
     try:
         if post_to_folio:
-            db.add(FolioCharge(
-                folio_id=folio.id,
-                type="payment",
-                description=f"Refund — {data.reason} ({refund_id})",
-                qty=1,
-                unit_price=amount,
-                amount=amount,
-                gst_percent=0,
-                posted_by=_resolve_user_id(db, user),
-            ))
-            _folio_recompute(db, folio)
+            # v6e: the refund comes off the bills the payment went on, pro-rata, using the
+            # allocations recorded when it was taken. Refunding a family's separate bills by
+            # guesswork would credit the wrong person, and nobody would notice until they did.
+            for _f, _part in payment_split.refund_targets(db, payment, amount):
+                db.add(FolioCharge(
+                    folio_id=_f.id,
+                    type="payment",
+                    description=f"Refund — {data.reason} ({refund_id})",
+                    qty=1,
+                    unit_price=_part,
+                    amount=_part,
+                    gst_percent=0,
+                    posted_by=_resolve_user_id(db, user),
+                    booking_item_id=_f.booking_item_id,
+                ))
+                _folio_recompute(db, _f)
         db.commit()
         write_audit(db, user, "payment.refund", "payment", payment.payment_id,
                     before={"refund_status": None},
@@ -1590,7 +1602,7 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
 
     db.expire_all()
     payment = db.query(Payment).filter(Payment.payment_id == data.payment_id).first()
-    folio = db.query(Folio).filter(Folio.booking_id == payment.booking_id).first()
+    folio = folio_resolver.primary_folio(db, payment.booking_id)
     logger.info(f"✅ Refund ₹{amount} recorded for payment {payment.payment_id} "
                 f"(booking {payment.booking_id}, {refund_id})")
     return {
@@ -1619,11 +1631,15 @@ def return_excess(data: ExcessReturnRequest, db: Session = Depends(get_db),
     booking = db.query(Booking).filter(Booking.booking_id == data.booking_id).first()
     if not booking:
         raise HTTPException(status_code=404, detail="Booking not found")
-    folio = db.query(Folio).filter(Folio.booking_id == data.booking_id).first()
-    if not folio or folio.status != "open":
+    # v6e: "excess" is judged over the WHOLE stay. With a bill per room, one room can be in
+    # credit while another still owes, and returning cash on the first while the second is unpaid
+    # would hand back money the hotel is still owed.
+    _folios = folio_resolver.folios_for_booking(db, data.booking_id)
+    folio = next((f for f in _folios if f.status == "open"), None)
+    if not folio:
         raise HTTPException(status_code=409, detail="No open folio for this booking")
 
-    balance = round(float(folio.balance or 0), 2)
+    balance = round(sum(float(f.balance or 0) for f in _folios), 2)
     excess = round(-balance, 2)
     if excess <= 0:
         raise HTTPException(status_code=409,

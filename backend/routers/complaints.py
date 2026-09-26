@@ -21,10 +21,12 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import Booking, Folio, FolioCharge, MaintenanceTicket, Room, TicketEscalation
+from models import (Booking, BookingItem, Folio, FolioCharge, MaintenanceTicket, Room,
+                    TicketEscalation)
 from schemas import (ComplaintBulkResolve, ComplaintCompensate, ComplaintConfigUpdate,
                      ComplaintCreate, ComplaintEscalate, ComplaintResolve, ComplaintRespond)
 from utils import settings as app_settings
+from services import folio_resolver
 from utils.audit import _resolve_user_id, write_audit
 from utils.auth_utils import require_admin, require_roles
 
@@ -380,7 +382,17 @@ def compensate_complaint(complaint_id: int, data: ComplaintCompensate, db: Sessi
         if not t.booking_id:
             raise HTTPException(status_code=409,
                                 detail="Complaint is not linked to a booking — cannot compensate")
-        folio = db.query(Folio).filter(Folio.booking_id == t.booking_id).first()
+        # v6e: when the stay bills per room, a service-recovery credit belongs on the bill of
+        # the room that was complained about. Putting it on the group bill would compensate
+        # whoever happens to settle first, which is not who was let down.
+        _bk = db.query(Booking).filter(Booking.booking_id == t.booking_id).first()
+        folio = None
+        if _bk is not None:
+            _item = (db.query(BookingItem)
+                     .filter(BookingItem.booking_id == t.booking_id,
+                             BookingItem.room_id == t.room_id).first()) if t.room_id else None
+            folio = (folio_resolver.folio_for_item(db, _bk, _item) if _item is not None
+                     else folio_resolver.primary_folio(db, _bk))
         if not folio:
             raise HTTPException(status_code=409, detail="No folio for this stay")
         if folio.status != "open":
