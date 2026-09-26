@@ -976,8 +976,11 @@ def _profile_buyer(db: Session, folio: Folio) -> dict:
     p = db.query(GuestProfile).filter(GuestProfile.guest_id == guest.guest_id).first()
     if not p or not p.gstin:
         return {}
+    # v6f: the GST BILLING address, falling back to the residential one for profiles saved
+    # before `gst_address` existed - so nothing on a past invoice moves.
     return {"buyer_gstin": p.gstin, "buyer_name": p.gst_legal_name or guest.name,
-            "buyer_address": p.address, "buyer_state_code": p.gst_state_code or p.gstin[:2]}
+            "buyer_address": p.gst_address or p.address,
+            "buyer_state_code": p.gst_state_code or p.gstin[:2]}
 
 
 def apply_buyer(invoice: Invoice, buyer: dict | None):
@@ -1075,11 +1078,26 @@ def create_invoice(folio_id: int, data: InvoiceBuyerRequest | None = None,
             gstin = normalise_gstin(data.buyer_gstin)
             buyer = {"buyer_gstin": gstin, "buyer_name": data.buyer_name,
                      "buyer_address": data.buyer_address, "buyer_state_code": data.buyer_state_code}
-            if gstin and data.save_to_profile:
+            # v6f: `gstin` may be None here, which is the guest saying "no GST invoice" - and
+            # that has to reach the profile too, or the next stay re-applies the old one.
+            if data.save_to_profile:
                 _save_gst_to_profile(db, folio, buyer)
         invoice, _created = ensure_invoice(db, folio, user, buyer=buyer)
         if invoice is None:
             raise HTTPException(status_code=400, detail="Folio has no charges to invoice")
+        # v6f: `ensure_invoice` is idempotent and returns an ALREADY-EXISTING invoice untouched and
+        # uncommitted. Two things were therefore lost whenever the invoice had already been raised
+        # - which is the common case, because checkout can raise it automatically:
+        #   * GST details sent with this call were silently ignored (the desk saw "invoice
+        #     created", with no buyer on it);
+        #   * the profile write above was only flushed, never committed, so the guest's GSTIN was
+        #     not remembered either.
+        # Stamping the buyer on an existing invoice is not a new liberty - PATCH .../invoice/buyer
+        # has always allowed exactly that - and the amounts never move.
+        if buyer is not None and not _created:
+            apply_buyer(invoice, buyer)
+        db.commit()
+        db.refresh(invoice)
         return _invoice_summary(invoice)
     except HTTPException:
         raise
@@ -1103,8 +1121,19 @@ def _save_gst_to_profile(db: Session, folio: Folio, buyer: dict):
     if buyer.get("buyer_name"):
         p.gst_legal_name = buyer["buyer_name"]
     if buyer.get("buyer_address"):
-        p.address = buyer["buyer_address"]
+        # ⚠️ v6f: `gst_address`, NOT `address`. This used to write the invoice's billing address
+        # into the column KYC fills and the POLICE REGISTER prints - so a guest who gave their
+        # company's address to get a GST invoice had their home address in the statutory register
+        # replaced by their office, silently, at checkout.
+        p.gst_address = buyer["buyer_address"]
     p.gst_state_code = buyer.get("buyer_state_code") or (p.gstin[:2] if p.gstin else None)
+    if not p.gstin:
+        # v6f: an explicitly emptied GSTIN means "this guest is not a business any more". The old
+        # code only ever wrote a GSTIN, never cleared one, so making an invoice B2C left the
+        # profile intact and the NEXT stay silently put the old GSTIN back on the bill.
+        p.gst_legal_name = None
+        p.gst_state_code = None
+        p.gst_address = None
     db.flush()
 
 
@@ -1125,7 +1154,8 @@ def set_invoice_buyer(folio_id: int, data: InvoiceBuyerRequest, db: Session = De
         buyer = {"buyer_gstin": gstin, "buyer_name": data.buyer_name,
                  "buyer_address": data.buyer_address, "buyer_state_code": data.buyer_state_code}
         apply_buyer(invoice, buyer)
-        if gstin and data.save_to_profile:
+        # v6f: an emptied GSTIN clears the profile as well - see _save_gst_to_profile.
+        if data.save_to_profile:
             _save_gst_to_profile(db, folio, buyer)
         db.commit()
         write_audit(db, user, "folio.invoice_buyer_update", "folio", folio.id,

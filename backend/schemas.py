@@ -1002,6 +1002,9 @@ class GuestProfileUpdate(BaseModel):
     # the invoice's "Bill to" block. The state code is derived from the GSTIN when omitted.
     gst_legal_name: Optional[str] = Field(None, max_length=160)
     gst_state_code: Optional[str] = Field(None, max_length=4)
+    # v6f: the GST BILLING address, kept apart from `address` above - which is the
+    # residential one the police register prints. Blank falls back to it on the invoice.
+    gst_address: Optional[str] = Field(None, max_length=300)
     marketing_optin: Optional[bool] = None
     notes: Optional[str] = Field(None, max_length=2000)
     # --- Form C / FRRO fields (prompt 18; passport/visa numbers masked server-side) ---

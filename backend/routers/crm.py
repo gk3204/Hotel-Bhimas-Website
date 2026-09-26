@@ -85,6 +85,8 @@ def _apply_gst_identity(p: GuestProfile, data):
         p.gst_legal_name = (data.gst_legal_name or "").strip() or None
     if getattr(data, "gst_state_code", None) is not None:
         p.gst_state_code = (data.gst_state_code or "").strip() or None
+    if getattr(data, "gst_address", None) is not None:
+        p.gst_address = (data.gst_address or "").strip() or None
     if p.gstin and not p.gst_state_code:
         p.gst_state_code = p.gstin[:2]
 
@@ -99,7 +101,7 @@ def _profile_dict(p: GuestProfile | None) -> dict:
                 "loyalty_points": 0, "marketing_optin": False, "id_type": None,
                 "id_number_masked": None, "id_photo_url": None, "guest_photo_url": None,
                 "address": None, "dob": None, "gstin": None, "notes": None,
-                "gst_legal_name": None, "gst_state_code": None,
+                "gst_legal_name": None, "gst_state_code": None, "gst_address": None,
                 "nationality": None, "is_foreign_national": False,
                 "passport_number_masked": None, "passport_place_of_issue": None,
                 "passport_expiry": None, "visa_number_masked": None, "visa_type": None,
@@ -112,6 +114,7 @@ def _profile_dict(p: GuestProfile | None) -> dict:
         "guest_photo_url": p.guest_photo_url, "address": p.address,
         "dob": p.dob.isoformat() if p.dob else None, "gstin": p.gstin, "notes": p.notes,
         "gst_legal_name": p.gst_legal_name, "gst_state_code": p.gst_state_code,
+        "gst_address": p.gst_address,
         "nationality": p.nationality, "is_foreign_national": bool(p.is_foreign_national),
         "passport_number_masked": p.passport_number_masked,
         "passport_place_of_issue": p.passport_place_of_issue,

@@ -85,6 +85,7 @@ const GuestDirectory = () => {
     gstin: g.profile?.gstin || "",
     gst_legal_name: g.profile?.gst_legal_name || "",
     gst_state_code: g.profile?.gst_state_code || "",
+    gst_address: g.profile?.gst_address || "",
     notes: g.profile?.notes || "",
     marketing_optin: !!g.profile?.marketing_optin,
   });
@@ -321,6 +322,10 @@ const GuestDirectory = () => {
                     {/* v5m B2B invoice identity: printed in the invoice's Bill-to block. */}
                     <Field label="GST legal name" value={selected.form.gst_legal_name} onChange={(v) => setForm(setSelected, "gst_legal_name", v)} />
                     <Field label="Place of supply (state code, from GSTIN if blank)" value={selected.form.gst_state_code} onChange={(v) => setForm(setSelected, "gst_state_code", v)} />
+                    {/* v6f: the BILLING address. Kept apart from the address above, which is the
+                        residential one the police register prints — the invoice path used to
+                        overwrite that with whatever company address the guest gave. */}
+                    <Field label="GST billing address (blank = use the address above)" value={selected.form.gst_address} onChange={(v) => setForm(setSelected, "gst_address", v)} />
                   </div>
                 </section>
                 <section>
