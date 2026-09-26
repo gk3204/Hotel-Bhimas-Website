@@ -33,6 +33,7 @@ from models import Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, 
 from schemas import (FolioBillToRequest, FolioChargeCreate, FolioDiscountRequest, FolioOpenRequest,
                      FolioVoidRequest, InvoiceBuyerRequest)
 from services import company_service, room_posting
+from utils import gst
 from utils import ordering
 from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
@@ -199,41 +200,34 @@ def _get_folio(db: Session, folio_id: int) -> Folio:
 
 def _invoice_totals(charges):
     """GST math over NON-VOID lines. Amounts are GST-inclusive; CGST = SGST = slab GST / 2.
-    Discounts are a non-taxable adjustment (promo discounts are already inside room lines)."""
+
+    v6d (F-11): a discount now reduces the **taxable value**, apportioned across the slabs, rather
+    than being knocked off after tax — the treatment the owner's accountant confirmed. The
+    arithmetic lives in `utils/gst.split` because the GST report, the Tally export and the
+    corporate bill must produce the same figures as this invoice; see that module for why.
+    """
     charge_lines = [c for c in charges if c.type not in ("payment", "discount")]
     discount_lines = [c for c in charges if c.type == "discount"]
     payment_lines = [c for c in charges if c.type == "payment"]
 
-    slabs = {}
-    for c in charge_lines:
-        g = float(c.gst_percent or 0)
-        slabs[g] = round(slabs.get(g, 0) + float(c.amount), 2)
-
-    gst_rows = []
-    taxable_total = cgst_total = sgst_total = 0.0
-    for g in sorted(slabs):
-        gross = slabs[g]
-        taxable = round(gross / (1 + g / 100), 2)
-        gst = round(gross - taxable, 2)
-        sgst = round(gst / 2, 2)
-        cgst = round(gst - sgst, 2)   # absorbs the odd paisa so cgst+sgst == gst exactly
-        gst_rows.append({"gst_percent": g, "taxable": taxable, "cgst": cgst, "sgst": sgst, "total": gross})
-        taxable_total = round(taxable_total + taxable, 2)
-        cgst_total = round(cgst_total + cgst, 2)
-        sgst_total = round(sgst_total + sgst, 2)
-
     charges_total = round(sum(float(c.amount) for c in charge_lines), 2)
     discount_total = round(sum(float(c.amount) for c in discount_lines), 2)   # negative
     payments_total = round(sum(float(c.amount) for c in payment_lines), 2)    # negative
-    grand_total = round(charges_total + discount_total, 2)
+
+    split = gst.split(((c.gst_percent, c.amount) for c in charge_lines),
+                      discount=discount_total)
+
+    # The grand total is taken from the split rather than `charges_total + discount_total` so that
+    # the per-slab rows printed on the invoice always add up to the amount demanded, to the paisa.
+    grand_total = split["net_total"]
     balance_due = round(grand_total + payments_total, 2)
     return {
-        "gst_rows": gst_rows,
+        "gst_rows": split["rows"],
         "charges_total": charges_total,
         "discount_total": discount_total,
-        "taxable_total": taxable_total,
-        "cgst_total": cgst_total,
-        "sgst_total": sgst_total,
+        "taxable_total": split["taxable_total"],
+        "cgst_total": split["cgst_total"],
+        "sgst_total": split["sgst_total"],
         "grand_total": grand_total,
         "payments_total": payments_total,
         "balance_due": balance_due,
@@ -707,8 +701,13 @@ def void_charge(folio_id: int, charge_id: int, data: FolioVoidRequest,
 @router.post("/{folio_id}/discount")
 def apply_discount(folio_id: int, data: FolioDiscountRequest, db: Session = Depends(get_db),
                    user=Depends(require_reception_or_admin)):
-    """Apply a folio-level discount (non-taxable adjustment; reason mandatory).
-    Below-floor discounts get admin OTP approval in prompt 11."""
+    """Apply a folio-level discount (reason mandatory).
+    Below-floor discounts get admin OTP approval in prompt 11.
+
+    v6d (F-11): this is no longer a "non-taxable adjustment" knocked off after tax. A discount
+    shown on the invoice reduces the transaction value, so it reduces the TAXABLE value and the
+    tax with it, apportioned across the slabs by `utils/gst.split`. The hotel was paying GST on
+    money it never received."""
     try:
         folio = _get_folio(db, folio_id)
         _ensure_editable(db, folio)
@@ -1062,6 +1061,41 @@ def _invoice_summary(invoice: Invoice):
     }
 
 
+def _frozen_totals(invoice: Invoice, charges) -> dict:
+    """The totals to PRINT for an issued invoice: the ones it was issued with.
+
+    v6d (F-11): an invoice is a filed document. Its taxable value and tax were written to
+    `invoices` (and its per-slab breakup to `gst_breakup`) at the moment it was raised, and a
+    reprint must show those figures even if the way we compute tax has changed since — which it
+    just did. Recomputing meant every reprint of every past invoice would silently restate the
+    tax the hotel had already filed, and nobody would see it happen.
+
+    Only the tax block is frozen. The lines, the payments and what is still owed are recomputed,
+    because money genuinely does move after an invoice is raised and the guest should see it;
+    `_invoice_payload` already lists anything settled after issue separately.
+    """
+    live = _invoice_totals(charges)
+    try:
+        rows = json.loads(invoice.gst_breakup) if invoice.gst_breakup else []
+    except (ValueError, TypeError):
+        rows = []
+    if not rows and not invoice.taxable_total:
+        # Nothing was stored (an invoice from before the snapshot existed) — the live figures are
+        # the only ones there are.
+        return live
+    frozen_grand = float(invoice.grand_total or 0)
+    live.update({
+        "gst_rows": rows or live["gst_rows"],
+        "taxable_total": float(invoice.taxable_total or 0),
+        "cgst_total": float(invoice.cgst_total or 0),
+        "sgst_total": float(invoice.sgst_total or 0),
+        "grand_total": frozen_grand,
+        # Still owed against the frozen total, using today's payments.
+        "balance_due": round(frozen_grand + live["payments_total"], 2),
+    })
+    return live
+
+
 def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
     """Everything the PDF/email needs. Charges are frozen once invoiced, so
     recomputing line groups here always matches the stored snapshot."""
@@ -1069,7 +1103,7 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
         Booking.booking_id == folio.booking_id).first()
     guest = booking.guest if booking else None
     charges = _active_charges(db, folio.id)
-    totals = _invoice_totals(charges)
+    totals = _frozen_totals(invoice, charges)
 
     def _line(c):
         # v5i: the invoice shows Rate WITHOUT GST and Amount WITH it. Both derive from the

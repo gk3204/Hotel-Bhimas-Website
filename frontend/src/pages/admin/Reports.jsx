@@ -118,13 +118,16 @@ const REPORTS = {
     note: "Room Service is the part of Other Revenue that came from the menu — it is included in that column, not additional to it.",
     fetch: (p) => api.getDailySales(p),
     project: (d) => ({
+      // v6d (F-11): Net Sales sits between the discount and the tax, because that is the figure
+      // the tax is now charged on. Without it the row reads as if Taxable + CGST + SGST should
+      // add up to Gross Sales, and on a discounted day it does not.
       columns: ["Date", "Room Revenue", "Other Revenue", "of which Room Service", "Discount",
-        "Gross Sales", "Taxable", "CGST", "SGST"],
+        "Gross Sales", "Net Sales", "Taxable", "CGST", "SGST"],
       rows: d.rows.map((r) => [r.date, fmt(r.room_revenue), fmt(r.other_revenue), fmt(r.room_service),
-        fmt(r.discount), fmt(r.gross_sales), fmt(r.taxable), fmt(r.cgst), fmt(r.sgst)]),
+        fmt(r.discount), fmt(r.gross_sales), fmt(r.net_sales), fmt(r.taxable), fmt(r.cgst), fmt(r.sgst)]),
       totals: ["TOTAL", fmt(d.totals.room_revenue), fmt(d.totals.other_revenue), fmt(d.totals.room_service),
-        fmt(d.totals.discount), fmt(d.totals.gross_sales), fmt(d.totals.taxable), fmt(d.totals.cgst),
-        fmt(d.totals.sgst)],
+        fmt(d.totals.discount), fmt(d.totals.gross_sales), fmt(d.totals.net_sales),
+        fmt(d.totals.taxable), fmt(d.totals.cgst), fmt(d.totals.sgst)],
     }),
   },
   "room-service/daily": {
@@ -315,9 +318,14 @@ const REPORTS = {
     range: true,
     fetch: (p) => api.getGst(p),
     project: (d) => ({
-      columns: ["GST Slab %", "Taxable Value", "CGST", "SGST", "Gross"],
-      rows: d.slabs.map((r) => [`${r.gst_percent}%`, fmt(r.taxable), fmt(r.cgst), fmt(r.sgst), fmt(r.gross)]),
-      totals: ["TOTAL", fmt(d.taxable_total), fmt(d.cgst_total), fmt(d.sgst_total), fmt(d.gross_total)],
+      // v6d (F-11): the filing report now shows the working, slab by slab — billed, the share of
+      // the discount that came off this slab, the net it was taxed on, and the tax. An assessing
+      // officer asking "why is the taxable value lower than the billing" can read the answer here.
+      columns: ["GST Slab %", "Gross Billed", "Discount", "Net (taxed on)", "Taxable Value", "CGST", "SGST"],
+      rows: d.slabs.map((r) => [`${r.gst_percent}%`, fmt(r.gross), fmt(r.discount), fmt(r.total),
+        fmt(r.taxable), fmt(r.cgst), fmt(r.sgst)]),
+      totals: ["TOTAL", fmt(d.gross_total), fmt(d.discount_total), fmt(d.net_total),
+        fmt(d.taxable_total), fmt(d.cgst_total), fmt(d.sgst_total)],
     }),
   },
   "cash-shift": {

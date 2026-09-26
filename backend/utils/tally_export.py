@@ -7,7 +7,9 @@ Turns the day's recognised sales + collections into an accountant-importable fil
 Totals reconcile with the Reports screen because the numbers come from the SAME helpers
 (`routers.reports.sales_by_date` / `_gst_split`) — this satisfies the "totals match reports"
 acceptance criterion. Voucher kinds per day:
-  * **Sales** — Dr Debtors (gross), Cr Sales (taxable) + Cr CGST + Cr SGST (revenue recognition).
+  * **Sales** — Dr Debtors (net of discount), Cr Sales (taxable) + Cr CGST + Cr SGST.
+    v6d (F-11): both sides are computed on the DISCOUNTED value, via `utils/gst.split`, the
+    same helper the invoice uses — so what the accountant imports is what the guest was given.
   * **Receipt** — Dr Cash/Bank (amount), Cr Debtors (payments collected, by method).
   * **Receipt (corporate)** — Dr Cash/Bank, Cr Debtors, for settlements a COMPANY paid against its
     city ledger (prompt 18 slice 7). Corporate stays recognise revenue through the Sales voucher
@@ -86,17 +88,26 @@ def build_journal(db, dfrom, dto, cfg: dict):
     vouchers = []
     sales = sales_by_date(db, dfrom, dto)
     for r in sales["rows"]:
-        gross = round(r["gross_sales"], 2)
-        if gross == 0 and r["taxable"] == 0:
+        # v6d (F-11): the Sales voucher is raised on the DISCOUNTED value. It used to debit
+        # Debtors with the gross and credit Sales + CGST + SGST computed on that same gross, so a
+        # discounted stay overstated both the receivable and the output tax — the discount never
+        # appeared in Tally at all. Now Dr Debtors = Cr Sales + CGST + SGST = what the guest
+        # actually owes, and the voucher balances on the figure the invoice printed.
+        net = round(r["net_sales"], 2)
+        if net == 0 and r["taxable"] == 0:
             continue
         d = r["date"]
+        _disc = round(abs(r.get("discount") or 0), 2)
+        _narr = f"Room & services sales {d}"
+        if _disc:
+            _narr += f" (net of Rs. {_disc:,.2f} discount)"
         vouchers.append({
             "vtype": "Sales",
             "date_iso": d,
             "number": f"S-{_tdate(d)}",
-            "narration": f"Room & services sales {d}",
+            "narration": _narr,
             "lines": [
-                {"ledger": cfg["tally_debtors_ledger"], "drcr": "Dr", "amount": gross},
+                {"ledger": cfg["tally_debtors_ledger"], "drcr": "Dr", "amount": net},
                 {"ledger": cfg["tally_sales_ledger"], "drcr": "Cr", "amount": round(r["taxable"], 2)},
                 {"ledger": cfg["tally_cgst_ledger"], "drcr": "Cr", "amount": round(r["cgst"], 2)},
                 {"ledger": cfg["tally_sgst_ledger"], "drcr": "Cr", "amount": round(r["sgst"], 2)},

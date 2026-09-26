@@ -535,7 +535,10 @@ def generate_folio_invoice_pdf(invoice_data):
         f"Rs. {invoice_data['taxable_total']:,.2f}",
         f"Rs. {invoice_data['cgst_total']:,.2f}",
         f"Rs. {invoice_data['sgst_total']:,.2f}",
-        f"Rs. {invoice_data['charges_total']:,.2f}",
+        # v6d (F-11): the slab rows are now NET of discount, so this column totals them with
+        # the grand total. It printed `charges_total` (the pre-discount gross), which on a
+        # discounted bill did not equal the rows above it or the amount demanded below it.
+        f"Rs. {invoice_data['grand_total']:,.2f}",
     ])
     gst_table = Table(gst_data, colWidths=[60, 110, 110, 110, 90])
     gst_table.setStyle(TableStyle([
@@ -554,7 +557,10 @@ def generate_folio_invoice_pdf(invoice_data):
     # Totals
     totals_data = [["Total Charges", f"Rs. {invoice_data['charges_total']:,.2f}"]]
     if invoice_data["discount_total"]:
-        totals_data.append(["Discount", f"- Rs. {abs(invoice_data['discount_total']):,.2f}"])
+        # v6d (F-11): labelled so the guest and the assessing officer can both see that the tax
+        # above was charged on the reduced value, which is what makes the deduction admissible.
+        totals_data.append(["Discount (before tax)",
+                            f"- Rs. {abs(invoice_data['discount_total']):,.2f}"])
     totals_data.append(["GRAND TOTAL", f"Rs. {invoice_data['grand_total']:,.2f}"])
     if invoice_data["payments_total"]:
         totals_data.append(["Advance / Payments", f"- Rs. {abs(invoice_data['payments_total']):,.2f}"])

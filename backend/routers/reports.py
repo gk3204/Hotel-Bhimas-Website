@@ -36,7 +36,7 @@ from utils.audit import write_audit
 from utils.auth_utils import require_admin
 from utils.settings import get_reports_config
 from services import ota_service
-from utils import clock          # F-03: one clock - see utils/clock.py
+from utils import clock, gst          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
@@ -92,28 +92,19 @@ def _days(dfrom, dto):
         d += timedelta(days=1)
 
 
-def _gst_split(pairs):
-    """Split a list of (gst_percent, gross_inclusive_amount) into taxable/cgst/sgst per slab.
-    Mirrors folio._invoice_totals: taxable = gross/(1+g/100); cgst = sgst = gst/2 (cgst absorbs
-    the odd paisa). Returns (rows_by_slab, taxable_total, cgst_total, sgst_total, gross_total)."""
-    slabs = {}
-    for g, amt in pairs:
-        g = float(g or 0)
-        slabs[g] = round(slabs.get(g, 0.0) + float(amt or 0), 2)
-    rows = []
-    taxable_total = cgst_total = sgst_total = gross_total = 0.0
-    for g in sorted(slabs):
-        gross = slabs[g]
-        taxable = round(gross / (1 + g / 100), 2)
-        gst = round(gross - taxable, 2)
-        sgst = round(gst / 2, 2)
-        cgst = round(gst - sgst, 2)
-        rows.append({"gst_percent": g, "taxable": taxable, "cgst": cgst, "sgst": sgst, "gross": gross})
-        taxable_total = round(taxable_total + taxable, 2)
-        cgst_total = round(cgst_total + cgst, 2)
-        sgst_total = round(sgst_total + sgst, 2)
-        gross_total = round(gross_total + gross, 2)
-    return rows, taxable_total, cgst_total, sgst_total, gross_total
+def _gst_split(pairs, discount=0.0):
+    """Split (gst_percent, gross_inclusive) sale lines into taxable/CGST/SGST per slab.
+
+    v6d (F-11): this is now a thin wrapper over `utils/gst.split`, which the invoice uses too.
+    It used to be a second copy of the same arithmetic kept "in sync" by a comment — and the
+    moment the discount treatment changed, that is exactly the pair that would have drifted and
+    left the filing disagreeing with the documents. `discount` is a POSITIVE rupee figure and
+    reduces the taxable value, apportioned across the slabs.
+
+    Returns the full `utils.gst.split` dict: rows plus `taxable_total`, `cgst_total`,
+    `sgst_total`, `gross_total` (before discount) and `net_total` (after it).
+    """
+    return gst.split(pairs, discount=discount)
 
 
 def _active_room_count(db):
@@ -237,11 +228,16 @@ def sales_by_date(db, dfrom, dto):
         other_rev = round(_sum_charges(db, day, exclude=("room", "payment", "discount")), 2)
         rs_rev = round(_room_service_revenue(db, day), 2)
         discount = round(_sum_charges(db, day, types=("discount",)), 2)  # negative
-        _rows, taxable, cgst, sgst, gross = _gst_split(_charge_pairs(db, day))
+        sp = _gst_split(_charge_pairs(db, day), discount=discount)
         rows.append({"date": str(day), "room_revenue": room_rev, "other_revenue": other_rev,
                      "room_service": rs_rev,
-                     "discount": discount, "gross_sales": gross, "taxable": taxable,
-                     "cgst": cgst, "sgst": sgst,
+                     # v6d (F-11): `gross_sales` is still what was billed BEFORE the discount, and
+                     # `discount` is still shown separately — the owner reads those two as they
+                     # always did. What changed is that taxable/cgst/sgst are now computed on the
+                     # DISCOUNTED value, so `net_sales` (not `gross_sales`) is what they add up to.
+                     "discount": discount, "gross_sales": sp["gross_total"],
+                     "net_sales": sp["net_total"], "taxable": sp["taxable_total"],
+                     "cgst": sp["cgst_total"], "sgst": sp["sgst_total"],
                      # v4b6 — see comp_room_value() below. NOT part of gross_sales.
                      "comp_room_value": round(comp_room_value(db, day), 2)})
     totals = {
@@ -250,6 +246,7 @@ def sales_by_date(db, dfrom, dto):
         "room_service": round(sum(r["room_service"] for r in rows), 2),
         "discount": round(sum(r["discount"] for r in rows), 2),
         "gross_sales": round(sum(r["gross_sales"] for r in rows), 2),
+        "net_sales": round(sum(r["net_sales"] for r in rows), 2),
         "taxable": round(sum(r["taxable"] for r in rows), 2),
         "cgst": round(sum(r["cgst"] for r in rows), 2),
         "sgst": round(sum(r["sgst"] for r in rows), 2),
@@ -331,7 +328,12 @@ def room_service_by_date(db, dfrom, dto):
         pairs = [(g, a) for g, a in
                  db.query(FolioCharge.gst_percent, FolioCharge.amount)
                  .filter(*_room_service_filters(day=day)).all()]
-        _r, taxable, cgst, sgst, gross = _gst_split(pairs)
+        # No discount term: a folio-level discount belongs to the whole stay, not to the
+        # room-service slice of it, and apportioning part of it here would double-count against
+        # the sales report.
+        sp = _gst_split(pairs)
+        taxable, cgst, sgst, gross = (sp["taxable_total"], sp["cgst_total"],
+                                      sp["sgst_total"], sp["gross_total"])
         items = float(db.query(func.coalesce(func.sum(FolioCharge.qty), 0))
                       .filter(*_room_service_filters(day=day)).scalar() or 0)
         # An order posts all its lines in one transaction and stores its FIRST charge id, so
@@ -429,12 +431,19 @@ def gst_data(db, dfrom, dto):
     """GST filing report: taxable value + CGST/SGST per slab over non-void sale charges posted
     in the range."""
     pairs = []
+    discount = 0.0
     for day in _days(dfrom, dto):
         pairs.extend(_charge_pairs(db, day))
-    slab_rows, taxable, cgst, sgst, gross = _gst_split(pairs)
-    return {"from": str(dfrom), "to": str(dto), "slabs": slab_rows,
-            "taxable_total": taxable, "cgst_total": cgst, "sgst_total": sgst,
-            "gross_total": gross}
+        # v6d (F-11): the discounts given in the period reduce the taxable value. Summed over the
+        # whole range and apportioned once, which is the same answer as apportioning per day only
+        # because apportionment is linear in gross — worth stating, because it is why this report
+        # and the day-by-day sales report still reconcile.
+        discount += abs(_sum_charges(db, day, types=("discount",)))
+    sp = _gst_split(pairs, discount=discount)
+    return {"from": str(dfrom), "to": str(dto), "slabs": sp["rows"],
+            "taxable_total": sp["taxable_total"], "cgst_total": sp["cgst_total"],
+            "sgst_total": sp["sgst_total"], "gross_total": sp["gross_total"],
+            "discount_total": sp["discount_total"], "net_total": sp["net_total"]}
 
 
 def arrivals_departures_data(db, dfrom, dto):
@@ -1084,7 +1093,8 @@ def checkout_summary_data(db, day):
         misc = _sum(("misc", "extra_bed"))
         discount = _sum(("discount",))
         pairs = [(c.gst_percent, c.amount) for c in charges if c.type not in ("payment", "discount")]
-        _r, taxable, cgst, sgst, gross = _gst_split(pairs)
+        sp = _gst_split(pairs, discount=discount)   # v6d (F-11): tax on the discounted value
+        taxable, cgst, sgst = sp["taxable_total"], sp["cgst_total"], sp["sgst_total"]
         advance = round(sum(float(p.amount or 0) for p in
                             db.query(Payment).filter(Payment.booking_id == b.booking_id,
                                                      Payment.status == "paid").all()

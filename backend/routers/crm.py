@@ -551,7 +551,10 @@ def guest_loyalty(guest_id: int, db: Session = Depends(get_db)):
 @router.post("/guests/{guest_id}/loyalty/redeem")
 def redeem_loyalty(guest_id: int, data: LoyaltyRedeem, db: Session = Depends(get_db),
                    user=Depends(require_reception_or_admin)):
-    """Redeem points as a non-taxable folio discount on the guest's open folio.
+    """Redeem points as a folio discount on the guest's open folio.
+
+    v6d (F-11): the redemption now reduces the taxable value like any other discount shown
+    on the invoice — it goes through `folio.apply_discount`, so it follows whatever that does.
     Points -> ₹ via loyalty_rupee_per_point. Debits points + writes a ledger row."""
     from routers.folio import apply_discount  # local import avoids a circular module load
     if not get_crm_config(db).get("loyalty_enabled", True):
