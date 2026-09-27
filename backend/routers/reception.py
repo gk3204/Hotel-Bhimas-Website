@@ -678,8 +678,27 @@ def arrived_items(booking: Booking) -> list:
 
 
 def pending_items(booking: Booking) -> list:
-    """Rooms on this booking that have not arrived yet - what Arrivals still owes."""
+    """Rows on this booking that have not arrived yet - what Arrivals still owes.
+
+    ⚠️ These are ROWS, not rooms: an unsplit line carries `quantity` rooms. Use `pending_rooms`
+    for anything a human counts.
+    """
     return [i for i in (booking.booking_items or []) if i.checked_in_at is None]
+
+
+def pending_rooms(booking: Booking) -> int:
+    """How many ROOMS are still to arrive (v6g).
+
+    A two-room booking at this property is ONE line with `quantity = 2` - there is a single room
+    type - so counting rows told the desk "1 room to check in" for a stay that owed two. Rows only
+    become one-per-room when they are split at check-in.
+    """
+    return sum(int(i.quantity or 1) for i in pending_items(booking))
+
+
+def total_rooms(booking: Booking) -> int:
+    """How many rooms the stay is, counting an unsplit line by its quantity."""
+    return sum(int(i.quantity or 1) for i in (booking.booking_items or []))
 
 
 def item_check_out(item: BookingItem, booking: Booking):
@@ -1115,10 +1134,21 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         alt_sales = []          # v4b7: (item, room) pairs sold as the room's ALTERNATE type
         for a in data.assignments:
             item = items[a.booking_item_id]
-            if len(a.room_ids) != (item.quantity or 1):
+            # v6g: FEWER rooms than the line was booked for is the normal case now - a family of
+            # two rooms arriving in two cars checks in one room at a time, and at this property
+            # every multi-room booking is a single line with a quantity (there is one room type).
+            # Demanding all of them is what forced the desk to pick a room for a guest who had not
+            # turned up, which then put that room on the registration slip with somebody else's
+            # arrival time. Only MORE rooms than were booked is still an error.
+            if len(a.room_ids) > (item.quantity or 1):
                 raise HTTPException(
                     status_code=400,
-                    detail=f"Booking item {a.booking_item_id} needs {item.quantity} room(s), got {len(a.room_ids)}")
+                    detail=f"Booking item {a.booking_item_id} is {item.quantity} room(s), "
+                           f"but {len(a.room_ids)} were assigned")
+            if not a.room_ids:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Booking item {a.booking_item_id} was sent with no room")
             for rid in a.room_ids:
                 room = db.query(Room).filter(Room.room_id == rid).with_for_update().first()
                 if not room:
@@ -1157,19 +1187,27 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         if alt_sales and app_settings.get_fraud_config(db).get("alt_room_type_otp_required"):
             consume_otp(db, data.owner_otp_id, data.owner_otp_code, "room_assignment", user)
 
-        # ---- assign rooms (split multi-quantity items into one row per room) ----
+        # ---- assign rooms (split a multi-room line into one row per ARRIVING room) ----
+        # v6g: k of the line's n rooms are arriving now. The line becomes k rows of one room each,
+        # plus - when k < n - a REMAINDER row of (n - k) rooms with NO room_id, which is what keeps
+        # the rest on Arrivals for the next car. Giving the absent rooms a room_id is the bug that
+        # put room 29 on a slip with room 5's arrival time.
+        #
+        # Amounts are split n ways, not k ways: each arriving room takes one share and the
+        # remainder keeps the rest, so the line still totals what the guest was quoted however many
+        # times it is split. The last share absorbs the rounding, as the folio room lines do.
+        _new_rows = []
         for a in data.assignments:
             item = items[a.booking_item_id]
             qty = item.quantity or 1
+            k = len(a.room_ids)
             if qty == 1:
                 item.room_id = a.room_ids[0]
             else:
-                # Split amounts per room, last row absorbs the rounding remainder
-                # (same paisa-exact approach as folio room lines).
-                def _split(total):
+                def _split(total, parts=qty):
                     total = float(total or 0)
-                    per = round(total / qty, 2)
-                    return [per] * (qty - 1) + [round(total - per * (qty - 1), 2)]
+                    per = round(total / parts, 2)
+                    return [per] * (parts - 1) + [round(total - per * (parts - 1), 2)]
                 bases, gsts = _split(item.base_amount), _split(item.gst_amount)
                 discs, totals = _split(item.discount_amount), _split(item.total_amount)
                 item.quantity = 1
@@ -1177,13 +1215,30 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 item.base_amount, item.gst_amount = bases[0], gsts[0]
                 item.discount_amount, item.total_amount = discs[0], totals[0]
                 for n, rid in enumerate(a.room_ids[1:], start=1):
-                    db.add(BookingItem(
+                    _row = BookingItem(
                         booking_id=booking.booking_id,
                         room_type_id=item.room_type_id,
                         room_id=rid,
                         quantity=1,
                         base_amount=bases[n], gst_amount=gsts[n],
                         discount_amount=discs[n], total_amount=totals[n],
+                    )
+                    db.add(_row)
+                    _new_rows.append(_row)
+                if k < qty:
+                    # The rooms still to come: one row, no room, carrying the shares nobody has
+                    # claimed yet. It is what Arrivals counts and what the second car checks in.
+                    _rest = qty - k
+                    db.add(BookingItem(
+                        booking_id=booking.booking_id,
+                        room_type_id=item.room_type_id,
+                        room_id=None,
+                        quantity=_rest,
+                        base_amount=round(sum(bases[k:]), 2),
+                        gst_amount=round(sum(gsts[k:]), 2),
+                        discount_amount=round(sum(discs[k:]), 2),
+                        total_amount=round(sum(totals[k:]), 2),
+                        check_out=item.check_out or booking.check_out,
                     ))
 
         # v4b7: record which stays were sold as a room's ALTERNATE type. `room_type_id` is
@@ -1203,9 +1258,23 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # ---- KYC (masked; the raw ID number is never stored) ----
         # ID types are an admin-editable list (v3 item 2). Every occupant's type is checked,
         # not just the lead's — a companion row is a government ID record too.
-        lead_id_type = validate_category(db, "id_type", data.id_type)
-        booking.guest.id_type = lead_id_type
-        booking.guest.id_number_masked = "****" + data.id_number[-4:]
+        # v6g: the lead is identified ONCE per stay. A family or an agent group arriving in two
+        # cars used to be asked for the lead's ID again on the second visit - and the owner's own
+        # test shows what that costs: the same person filed twice as "****1234" and "****1243",
+        # one digit transposed, with the second room left without a phone. If the booking already
+        # has an identified lead, this call may omit the ID and inherit it.
+        _on_file = bool(booking.guest and booking.guest.id_number_masked)
+        if data.id_number:
+            lead_id_type = validate_category(db, "id_type", data.id_type) if data.id_type \
+                else booking.guest.id_type
+            booking.guest.id_type = lead_id_type
+            booking.guest.id_number_masked = "****" + data.id_number[-4:]
+        elif _on_file:
+            lead_id_type = booking.guest.id_type
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Capture the lead guest's ID before check-in.")
 
         # Per-occupant KYC roster (FE-3): rebuild booking_guests (lead + companions). The desk sends
         # the full roster in `additional_guests` (each row incl. the primary); an empty list keeps the
@@ -1253,8 +1322,9 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
             required_ids = 1
 
         identified = [g for g in roster if not g.is_minor and g.id_number]
-        # The lead's ID always arrives on the request itself (schema-mandatory), so an empty roster
-        # still means exactly one identified guest.
+        # An empty roster still means exactly one identified guest: either the lead's ID arrived on
+        # this request, or (v6g) it was already on file from the car that arrived earlier - the
+        # block above raises if neither is true, so by here the lead is always identified.
         identified_count = len(identified) if roster else 1
 
         # With `per_room` the IDs must be spread ACROSS the rooms, and naming the rooms still short of
@@ -1484,10 +1554,12 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # early or badly-late guest, the actual moment otherwise). OTA stays ignore it (12 -> 12).
         _arrived_now = [items[a.booking_item_id] for a in data.assignments
                         if a.booking_item_id in items]
-        # A quantity>1 line was split above into one row per room; pick those up too.
-        _split_rows = [i for i in booking.booking_items
-                       if i.room_id in rooms_by_id and i.checked_in_at is None]
-        for item in {id(x): x for x in (_arrived_now + _split_rows)}.values():
+        # v6g: the rows the split just created, taken from the split itself. This used to re-read
+        # `booking.booking_items` and filter on `room_id` - a relationship already loaded, which
+        # does NOT contain a row just db.add-ed, so the split rows escaped being stamped by
+        # accident. That accident was holding the feature together; the remainder row now has no
+        # room_id by design, and the arriving rows are stamped because we know which they are.
+        for item in {id(x): x for x in (_arrived_now + _new_rows)}.values():
             item.checked_in_at = now
             item.stay_started_at = arrival["stay_start"]
             if not item.expected_arrival_at:
@@ -1656,7 +1728,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
 
         write_audit(db, user, "reception.checkin", "booking", booking.booking_id,
                     after={"rooms": [r.room_number for r in rooms_by_id.values()],
-                           "id_type": data.id_type,
+                           "id_type": lead_id_type,
+                           "lead_id_source": ("captured" if data.id_number else "already on file"),
                            "id_number_masked": booking.guest.id_number_masked,
                            "paid_total": total_paid(db, booking.booking_id),
                            "company_routing": company_routing,
@@ -3429,6 +3502,10 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             # re-resolves the same thing at check-in and that is the one that decides.
             "agent_id": b.agent_id,
             "kyc_scope": _effective_id_scope(db, b, cfg=_fd_cfg),
+            # v6g: has this stay's lead already shown an ID? The second car does not need to
+            # produce it again, so the wizard shows it rather than demanding it.
+            "lead_identified": bool(b.guest and b.guest.id_number_masked),
+            "lead_id_masked": (b.guest.id_number_masked if b.guest else None),
             # v5r: the desk needs the channel reference to recognise (and refuse) the placeholder phone
             # that was stamped from it at check-in.
             "ota_booking_id": b.ota_booking_id,
@@ -3454,8 +3531,9 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
                 "room_type_name": i.room_type.name if i.room_type else None,
                 "quantity": i.quantity,
             } for i in b.booking_items if i.checked_in_at is None],
-            "rooms_total": len(b.booking_items),
-            "rooms_pending": len(pending_items(b)),
+            # v6g: ROOMS, not rows. An unsplit 2-room line reported "1".
+            "rooms_total": total_rooms(b),
+            "rooms_pending": pending_rooms(b),
             "partly_arrived": bool(arrived_items(b)) and bool(pending_items(b)),
         }
 
@@ -3507,7 +3585,8 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         valid_from, valid_to = _card_window(b)
         rooms = []
         for i in b.booking_items:
-            if i.room_id:
+            # v6g: in-house means ARRIVED. A row can carry a room number before its guest is here.
+            if i.room_id and i.checked_in_at:
                 room = db.query(Room).filter(Room.room_id == i.room_id).first()
                 if room:
                     # v6f: this ROOM's own clock. On a stay whose rooms arrived at different
@@ -3903,8 +3982,13 @@ def registration_slip(booking_id: int, room_ids: str = Query(None),
             _wanted = {int(x) for x in str(room_ids).split(",") if x.strip()}
         except ValueError:
             raise HTTPException(status_code=400, detail="room_ids must be comma-separated numbers")
+    # v6g: a room is on the slip once its guest has ARRIVED, not merely once a room number has
+    # been attached to the row. Those used to be the same thing; the quantity>1 split made them
+    # different, and the slip printed a room nobody was in. `checked_in_at` is the fact the slip
+    # is actually asserting, so it is what it now filters on.
     slip_items = [i for i in booking.booking_items
-                  if i.room_id and (_wanted is None or i.room_id in _wanted)]
+                  if i.room_id and i.checked_in_at
+                  and (_wanted is None or i.room_id in _wanted)]
     if _wanted and not slip_items:
         raise HTTPException(status_code=404,
                             detail="None of those rooms are checked in on this booking")
@@ -3918,7 +4002,10 @@ def registration_slip(booking_id: int, room_ids: str = Query(None),
             # for all of them is wrong for every room but the first.
             room_stays.append({
                 "room_number": room.room_number,
-                "checked_in_at": i.checked_in_at or booking.checked_in_at,
+                # No `or booking.checked_in_at` fallback: every row here has arrived (see the
+                # filter above), and that fallback is what printed the FIRST room's arrival time
+                # against a room that had not arrived at all.
+                "checked_in_at": i.checked_in_at,
                 "expected_check_out": booking_checkout_moment(booking, item=i),
             })
 

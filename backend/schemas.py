@@ -420,8 +420,12 @@ class GuestKycEntry(BaseModel):
 class CheckinRequest(BaseModel):
     booking_id: int = Field(..., gt=0)
     assignments: list[CheckinAssignment] = Field(..., min_length=1, max_length=20)
-    id_type: str = Field(..., pattern=CATEGORY_SLUG_RE)   # editable list; checked at the endpoint
-    id_number: str = Field(..., min_length=4, max_length=30)  # stored masked; raw value never persisted
+    # v6g: optional ONLY because a stay can now be checked in more than once - the second car on
+    # a booking whose lead was identified hours ago should not have to retype his ID. The endpoint
+    # falls back to what is already on file and still refuses a FIRST check-in with no ID at all;
+    # omitting these on a booking nobody has been identified for is a 400.
+    id_type: str | None = Field(None, pattern=CATEGORY_SLUG_RE)   # editable list; checked at the endpoint
+    id_number: str | None = Field(None, min_length=4, max_length=30)  # stored masked; raw never persisted
     # F-07: the lead guest's address for the police register. Optional here deliberately - whether
     # the local station requires it is the owner's call, and refusing a check-in over it would be a
     # worse failure than a blank column.
