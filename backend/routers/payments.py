@@ -1645,6 +1645,26 @@ def return_excess(data: ExcessReturnRequest, db: Session = Depends(get_db),
         raise HTTPException(status_code=409,
                             detail=f"No excess to return — folio balance is ₹{balance:,.2f}")
 
+    # v6h: WHICH BILL the money comes off. Until now the whole return was posted to `folio`
+    # alone - the oldest open one - while the excess was measured across every bill on the stay.
+    # On a per-room stay that moved one room's credit onto another room's bill: the owner's
+    # booking #38 read `room 5: +1,050.00` and `room 10: -1,050.00` afterwards, which is the same
+    # money counted twice and the reason the folio screen was unreadable. Repay each bill the
+    # credit it is actually holding, pro-rata, so every one of them lands on zero.
+    _in_credit = [(f, round(-float(f.balance or 0), 2)) for f in _folios
+                  if float(f.balance or 0) < 0]
+    _credit_total = round(sum(c for _f, c in _in_credit), 2)
+    if _credit_total <= 0:
+        raise HTTPException(status_code=409,
+                            detail=f"No excess to return - folio balance is {RS}{balance:,.2f}")
+    _postings, _run = [], 0.0
+    for _n, (_f, _c) in enumerate(_in_credit):
+        _part = (round(excess - _run, 2) if _n == len(_in_credit) - 1
+                 else round(excess * _c / _credit_total, 2))
+        _run = round(_run + _part, 2)
+        if _part:
+            _postings.append((_f, _part))
+
     # Plan the allocation first (no side effects until it fully covers the excess).
     candidates = (db.query(Payment)
                   .filter(Payment.booking_id == data.booking_id,
@@ -1683,21 +1703,24 @@ def return_excess(data: ExcessReturnRequest, db: Session = Depends(get_db),
                 p.refund_shift_id = shift.id if shift else None
             alloc_out.append({"payment_id": p.payment_id, "amount": take, "refund_id": p.refund_id})
 
-        db.add(FolioCharge(
-            folio_id=folio.id,
-            type="payment",
-            description=f"Deposit return — {data.mode}",
-            qty=1,
-            unit_price=excess,
-            amount=excess,
-            gst_percent=0,
-            posted_by=_resolve_user_id(db, user),
-        ))
-        _folio_recompute(db, folio)
+        _returned = []
+        for _f, _part in _postings:
+            db.add(FolioCharge(
+                folio_id=_f.id,
+                type="payment",
+                description=f"Deposit return — {data.mode}",
+                qty=1,
+                unit_price=_part,
+                amount=_part,
+                gst_percent=0,
+                posted_by=_resolve_user_id(db, user),
+            ))
+            _folio_recompute(db, _f)
+            _returned.append({"folio_id": _f.id, "amount": _part})
         db.commit()
         write_audit(db, user, "payment.return_excess", "booking", booking.booking_id,
                     after={"excess": excess, "mode": data.mode, "reference": data.reference,
-                           "allocations": alloc_out},
+                           "allocations": alloc_out, "returned_to": _returned},
                     client="desktop", commit=True)
     except Exception as e:
         db.rollback()
@@ -1711,6 +1734,9 @@ def return_excess(data: ExcessReturnRequest, db: Session = Depends(get_db),
         "returned": excess,
         "mode": data.mode,
         "allocations": alloc_out,
+        # v6h: which BILLS were repaid, so the desk can say so per room instead of showing one
+        # room in credit and another in debit for the same money.
+        "returned_to": _returned,
         "folio_id": folio.id,
         "folio_balance": float(folio.balance or 0),
         "total_paid": total_paid(db, booking.booking_id),

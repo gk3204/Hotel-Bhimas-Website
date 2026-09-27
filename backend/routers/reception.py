@@ -1264,6 +1264,14 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # one digit transposed, with the second room left without a phone. If the booking already
         # has an identified lead, this call may omit the ID and inherit it.
         _on_file = bool(booking.guest and booking.guest.id_number_masked)
+        # v6h: and are his SCANS already archived from that earlier car? Read before the roster
+        # rebuild below deletes the arriving rooms' rows - an earlier car's row is in a different
+        # room and survives, but reading first means this does not depend on that.
+        _lead_scans_on_file = db.query(BookingGuest).filter(
+            BookingGuest.booking_id == booking.booking_id,
+            BookingGuest.is_primary.is_(True),
+            BookingGuest.id_scan_ref.isnot(None),
+            BookingGuest.id_scan_back_ref.isnot(None)).first() is not None
         if data.id_number:
             lead_id_type = validate_category(db, "id_type", data.id_type) if data.id_type \
                 else booking.guest.id_type
@@ -1325,7 +1333,19 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # An empty roster still means exactly one identified guest: either the lead's ID arrived on
         # this request, or (v6g) it was already on file from the car that arrived earlier - the
         # block above raises if neither is true, so by here the lead is always identified.
-        identified_count = len(identified) if roster else 1
+        #
+        # v6h: ...but the desk does NOT send an empty roster. It always names the lead, and on the
+        # second car it has no ID number to put in that row - the whole point is that it is not
+        # asking for one again. So `len(identified)` scored the stay 0, and the count gate below
+        # refused with "Capture the lead guest's ID" the moment the wizard stopped asking for it.
+        # That is what the owner saw: a box saying the lead was on file, above a screen still
+        # demanding his ID. The lead is identified for this STAY; credit him once, against the row
+        # that names him, wherever that row is.
+        _lead_identified = bool(data.id_number) or _on_file
+        _lead_row = next((g for g in roster
+                          if g.is_primary and not g.is_minor and not g.id_number), None)
+        _credit_lead = bool(roster) and _lead_identified and _lead_row is not None
+        identified_count = (len(identified) + (1 if _credit_lead else 0)) if roster else 1
 
         # With `per_room` the IDs must be spread ACROSS the rooms, and naming the rooms still short of
         # one is the only message the desk can act on — so this runs BEFORE the bare count check
@@ -1333,6 +1353,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # 301 satisfies a count while leaving two rooms with nobody accountable for them.
         if id_scope == "per_room" and roster:
             rooms_with_id = {g.room_id for g in identified if g.room_id}
+            if _credit_lead and _lead_row.room_id:
+                rooms_with_id.add(_lead_row.room_id)   # v6h: his ID is on file, for this room
             missing = [rid for rid in room_ids_being_assigned if rid not in rooms_with_id]
             if missing:
                 labels = ", ".join(sorted(rooms_by_id[rid].room_number for rid in missing))
@@ -1455,6 +1477,11 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # a record). Guests who were never required to identify themselves are not asked for scans.
         if roster and scans_required:
             with_scans = sum(1 for g in identified if g.id_scan_ref and g.id_scan_back_ref)
+            # v6h: the second gate behind the same door. A lead whose ID is on file has his scans
+            # in the archive too - re-scanning the same passport for the same stay is exactly the
+            # duplicate record v6g set out to stop.
+            if _credit_lead and _lead_scans_on_file:
+                with_scans += 1
             if with_scans < required_ids:
                 raise HTTPException(
                     status_code=400,
@@ -1743,7 +1770,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                            "alt_type_otp_id": data.owner_otp_id if alt_sales else None,
                            # v5m: how the arrival rules were applied (the report reads stay_events).
                            "kyc": {"id_scope": id_scope, "required_ids": required_ids,
-                                   "identified": identified_count, "scans_required": scans_required},
+                                   "identified": identified_count, "scans_required": scans_required,
+                                   "lead_inherited": bool(_credit_lead and not data.id_number)},
                            "arrival": {"kind": arrival["kind"], "deviation_minutes": arrival["deviation_minutes"],
                                        "quoted": fee_quoted, "applied": fee_applied,
                                        "basis": arrival["basis"], "approval": arrival_approval,
@@ -3535,6 +3563,23 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "rooms_total": total_rooms(b),
             "rooms_pending": pending_rooms(b),
             "partly_arrived": bool(arrived_items(b)) and bool(pending_items(b)),
+            # v6h: the rooms of this booking that ALREADY arrived, in the same shape the in-house
+            # board uses. A partly-arrived booking sits on Arrivals owing the rooms still to come,
+            # and until now the desk could see the count but not WHICH rooms were already in, when
+            # they arrived or when they are due out - so "one row per booking" was the only view
+            # there was of a stay that is really several rooms on separate clocks.
+            "rooms": sorted([{
+                "room_id": i.room.room_id,
+                "room_number": i.room.room_number,
+                "building": i.room.building,
+                "floor": i.room.floor,
+                "max_cards": i.room.max_cards,
+                "active_cards": _active_cards(db, i.room.room_id),
+                "lock_type": i.room.lock_type,
+                "checked_in_at": i.checked_in_at.isoformat(),
+                "expected_check_out": booking_checkout_moment(b, item=i).isoformat(),
+            } for i in b.booking_items if i.checked_in_at and i.room is not None],
+                key=lambda r: ordering.room_number_sort_key(r["room_number"])),
         }
 
     _arrival_q = db.query(Booking).options(

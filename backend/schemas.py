@@ -244,7 +244,7 @@ class OtaSettlementCreate(BaseModel):
 class OtaDraftRoomLine(BaseModel):
     """One room type on a mixed-type OTA voucher (F-18): which PMS type, and how many rooms of it."""
     room_type_id: int = Field(..., gt=0)
-    quantity: int = Field(1, ge=1, le=10)
+    quantity: int = Field(1, ge=1, le=40)   # v6h: per-type cap, same reason as the line total
 
 
 class OtaDraftConfirm(BaseModel):
@@ -252,7 +252,10 @@ class OtaDraftConfirm(BaseModel):
     chosen (the OTA's room name can't be reliably auto-mapped). Guest/date/commission fields default
     to the draft's parsed values but may be corrected here."""
     room_type_id: int = Field(..., gt=0)
-    quantity: int = Field(1, ge=1, le=5)  # matches BookingItemCreate cap
+    # v6h: was 5, and the comment claiming it matched BookingItemCreate stopped being true when
+    # v6f raised that to 40. A six-room voucher could not be confirmed by ANYONE - desk or admin -
+    # and the error said nothing about a cap.
+    quantity: int = Field(1, ge=1, le=40)  # matches BookingItemCreate
     guest_name: Optional[str] = Field(None, min_length=2, max_length=100)
     phone: Optional[str] = Field(None, min_length=7, max_length=15)
     email: Optional[EmailStr] = None
@@ -395,6 +398,20 @@ class GuestKycEntry(BaseModel):
     # raised a 422 before the endpoint ever ran, which made a lead-only roster impossible whatever
     # the setting said. The LEAD's own ID stays mandatory via CheckinRequest.id_type / id_number.
 
+    # v6h: an empty box is an empty box, not a malformed ID. The desk renders every roster row
+    # with the same control set, so a companion nobody is identifying arrives as
+    # `id_number: ""` - and `min_length=4` turned that into a 422 whose message ("String should
+    # have at least 4 characters") named no field, blocking the whole check-in. Blank means
+    # "not given"; whether a row was REQUIRED to give one is the endpoint's policy call, and it
+    # already makes it. Applied before validation so the length rules never see the empty string.
+    @field_validator("id_type", "id_number", "id_scan_ref", "id_scan_mime", "id_scan_back_ref",
+                     "id_scan_back_mime", "phone", "address", mode="before")
+    @classmethod
+    def _blank_is_absent(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
+
     @model_validator(mode="after")
     def _scan_fields_are_wellformed(self):
         """Both scan refs must have the stored shape, and both mimes must be on the allowlist.
@@ -426,6 +443,15 @@ class CheckinRequest(BaseModel):
     # omitting these on a booking nobody has been identified for is a 400.
     id_type: str | None = Field(None, pattern=CATEGORY_SLUG_RE)   # editable list; checked at the endpoint
     id_number: str | None = Field(None, min_length=4, max_length=30)  # stored masked; raw never persisted
+
+    # v6h: same rule as the roster rows - a blank box means the field was not filled in, and the
+    # endpoint decides whether it had to be. See GuestKycEntry._blank_is_absent.
+    @field_validator("id_type", "id_number", mode="before")
+    @classmethod
+    def _blank_is_absent(cls, v):
+        if isinstance(v, str) and not v.strip():
+            return None
+        return v
     # F-07: the lead guest's address for the police register. Optional here deliberately - whether
     # the local station requires it is the owner's call, and refusing a check-in over it would be a
     # worse failure than a blank column.

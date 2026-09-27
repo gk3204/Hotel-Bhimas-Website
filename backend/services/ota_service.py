@@ -1166,6 +1166,13 @@ def auto_confirm_draft(db, d, user=None):
     rooms_wanted = int(d.rooms or 1)
     if cfg["auto_confirm_mode"] == "off":
         return _hold_draft(db, d, "Auto-confirm is switched off — confirm from the drafts screen.")
+    # v6h: an unparsed room count is NOT one room. `int(d.rooms or 1)` quietly turned "we could
+    # not read how many rooms this is" into a confident single-room booking - which on a 3-room
+    # voucher books one room, prices it against three rooms' money and leaves the other two
+    # unsold with the guest holding a confirmation. Unknown means a human looks at it.
+    if d.rooms is None:
+        return _hold_draft(db, d, "The voucher did not say how many rooms — read it and confirm "
+                                  "with the right quantity.")
     if rooms_wanted > 1 and cfg["auto_confirm_mode"] != "all":
         return _hold_draft(db, d, f"Voucher is for {rooms_wanted} rooms — set to confirm multi-room "
                                   f"bookings by hand. Check the rooms and the money, then confirm.")

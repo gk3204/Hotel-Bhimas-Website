@@ -214,6 +214,11 @@ def _invoice_totals(charges):
     charges_total = round(sum(float(c.amount) for c in charge_lines), 2)
     discount_total = round(sum(float(c.amount) for c in discount_lines), 2)   # negative
     payments_total = round(sum(float(c.amount) for c in payment_lines), 2)    # negative
+    # v6h: "Payments" is a NET figure - money in is negative, a deposit return is positive - so a
+    # guest who overpaid and was refunded showed "Payments Rs 0.00" beside a bill they had in fact
+    # paid twice over. A true number under a false label. Split it, and show both.
+    paid_in_total = round(-sum(float(c.amount) for c in payment_lines if float(c.amount) < 0), 2)
+    returned_total = round(sum(float(c.amount) for c in payment_lines if float(c.amount) > 0), 2)
 
     split = gst.split(((c.gst_percent, c.amount) for c in charge_lines),
                       discount=discount_total)
@@ -231,6 +236,8 @@ def _invoice_totals(charges):
         "sgst_total": split["sgst_total"],
         "grand_total": grand_total,
         "payments_total": payments_total,
+        "paid_in_total": paid_in_total,
+        "returned_total": returned_total,
         "balance_due": balance_due,
     }
 
@@ -336,8 +343,10 @@ def _folio_detail(db: Session, folio: Folio):
         "email": booking.guest.email if booking and booking.guest else None,
         # v3 item 7: the room number is the first thing the desk looks for when a guest
         # queries their bill. List + pre-joined label (a stay can hold several rooms).
+        # v6h: `room_number` is NOT set here - this bill belongs to ONE room and the key is set
+        # below from `folio.booking_item_id`. Setting it here as well was dead (a later key of the
+        # same name in the same literal wins) and read as though the header named every room.
         "room_numbers": _room_numbers(booking),
-        "room_number": ", ".join(_room_numbers(booking)) or None,
         "check_in": str(booking.check_in) if booking else None,
         "check_out": str(booking.check_out) if booking else None,
         # Expected arrival vs what actually happened (FE-1) — the folio header is where the
@@ -456,6 +465,15 @@ def list_folios(db: Session = Depends(get_db), user=Depends(require_reception_or
             f"{bi.room_type.name} x{bi.quantity}" for bi in booking.booking_items if bi.room_type
         )
         rooms = _room_numbers(booking)
+        # v6h: on a per-room stay this endpoint returns one row PER BILL, and every one of them
+        # was labelled with every room on the booking - so a two-room stay showed two identical
+        # rows both reading "5, 10" and the desk could not tell which bill it was opening. A bill
+        # tied to a booking item names that item's room and nothing else. Group-billed stays
+        # (booking_item_id is NULL) still name the whole stay, which is what they are.
+        _own = next((bi.room.room_number for bi in booking.booking_items
+                     if folio is not None and bi.booking_item_id == folio.booking_item_id
+                     and bi.room is not None), None)
+        _label = [_own] if _own else rooms
         data.append({
             "booking_id": booking.booking_id,
             "guest_name": booking.display_guest_name,
@@ -470,8 +488,15 @@ def list_folios(db: Session = Depends(get_db), user=Depends(require_reception_or
             "room_types": room_types,
             # v3 item 7 — room NUMBER, distinct from room_types above (which is the room-type
             # name). The desk sorts and searches its stays list by this.
-            "room_numbers": rooms,
-            "room_number": ", ".join(rooms) or None,
+            "room_numbers": _label,
+            "room_number": ", ".join(_label) or None,
+            # v6h: which room's bill this row IS, and whether the stay is billed per room at all -
+            # the desk needs both to label the picker and to restore a selection by BILL rather
+            # than by booking (two rows share a booking_id, so restoring by it always snapped the
+            # highlight back to the first row while the detail pane showed the other).
+            "booking_item_id": folio.booking_item_id if folio else None,
+            "billing_mode": getattr(booking, "billing_mode", "group") or "group",
+            "all_room_numbers": rooms,
             "grand_total": float(booking.grand_total or 0),
             "folio_id": folio.id if folio else None,
             "folio_status": folio.status if folio else None,
