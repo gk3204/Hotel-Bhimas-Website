@@ -1349,7 +1349,15 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         _lead_identified = bool(data.id_number) or _on_file
         _lead_row = next((g for g in roster
                           if g.is_primary and not g.is_minor and not g.id_number), None)
-        _credit_lead = bool(roster) and _lead_identified and _lead_row is not None
+        # ⚠️ v6h.4: ONLY under `lead` scope. That is the whole premise of the credit - the group
+        # leader's ID covers the group, which is what a travel-agent booking resolves to and what
+        # v6g built this for. Under `per_room` (this property's setting) and `all_adults` every
+        # room must produce its OWN identified guest, so a lead identified for an earlier room
+        # must not satisfy a later one. v6h credited him whatever the scope, which let the second
+        # room of a WALK-IN or OTA booking check in with nobody identified for it at all - the
+        # opposite of the rule, and invisible because it silently succeeded.
+        _credit_lead = (id_scope == "lead" and bool(roster)
+                        and _lead_identified and _lead_row is not None)
         identified_count = (len(identified) + (1 if _credit_lead else 0)) if roster else 1
 
         # With `per_room` the IDs must be spread ACROSS the rooms, and naming the rooms still short of
