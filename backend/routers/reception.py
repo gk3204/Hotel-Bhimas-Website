@@ -1263,15 +1263,20 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # test shows what that costs: the same person filed twice as "****1234" and "****1243",
         # one digit transposed, with the second room left without a phone. If the booking already
         # has an identified lead, this call may omit the ID and inherit it.
-        _on_file = bool(booking.guest and booking.guest.id_number_masked)
-        # v6h: and are his SCANS already archived from that earlier car? Read before the roster
-        # rebuild below deletes the arriving rooms' rows - an earlier car's row is in a different
-        # room and survives, but reading first means this does not depend on that.
-        _lead_scans_on_file = db.query(BookingGuest).filter(
+        # ⚠️ v6h.2: "on file" means IDENTIFIED ON THIS STAY - an earlier car of THIS booking
+        # arrived and its ID was captured. It does NOT mean `booking.guest.id_number_masked`,
+        # which is the GUEST PROFILE and survives from stay to stay: v6g read that, so a
+        # returning guest (the owner's "aksh", 15 previous stays) looked already-identified on a
+        # brand-new booking. The desk then hid the ID card saying "nothing more is needed", the
+        # count gate below was satisfied by the profile, and the SCANS gate - which correctly
+        # looks for this stay's scans - refused with "1 needed, 0 with both scans on file". A
+        # dead end with no control on screen that could clear it. Read from booking_guests,
+        # which is per stay, and read it BEFORE the roster rebuild deletes those rows.
+        _prior_leads = db.query(BookingGuest).filter(
             BookingGuest.booking_id == booking.booking_id,
-            BookingGuest.is_primary.is_(True),
-            BookingGuest.id_scan_ref.isnot(None),
-            BookingGuest.id_scan_back_ref.isnot(None)).first() is not None
+            BookingGuest.is_primary.is_(True)).all()
+        _on_file = any(g.id_number_masked for g in _prior_leads)
+        _lead_scans_on_file = any(g.id_scan_ref and g.id_scan_back_ref for g in _prior_leads)
         if data.id_number:
             lead_id_type = validate_category(db, "id_type", data.id_type) if data.id_type \
                 else booking.guest.id_type
@@ -1486,7 +1491,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 raise HTTPException(
                     status_code=400,
                     detail=f"Scan the front AND back of the ID for every guest who must show one — "
-                           f"{required_ids} needed, {with_scans} with both scans on file.")
+                           f"{required_ids} needed, {with_scans} with both scans on file. "
+                           f"Go back to the Guest ID step and scan them there.")
 
         # Every scan ref must belong to THIS booking, and no two occupants may share one.
         # The refs come back to us on this payload, and nothing tied them to the booking they were
@@ -3504,6 +3510,17 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
 
     _fd_cfg = app_settings.get_frontdesk_config(db)   # v6f: once for the board, not per row
 
+    # ⚠️ v6h.2: which bookings already hold an identified lead FOR THIS STAY. One query for the
+    # whole board rather than one per row. v6g asked `booking.guest.id_number_masked` instead,
+    # which is the guest PROFILE and persists between stays - so every returning guest was
+    # reported as already identified on a booking nobody had checked into yet, and the wizard
+    # duly stopped asking for the ID that the scans gate then refused the check-in for.
+    _lead_on_file_ids = {
+        row[0] for row in db.query(BookingGuest.booking_id).filter(
+            BookingGuest.is_primary.is_(True),
+            BookingGuest.id_number_masked.isnot(None)).distinct().all()
+    }
+
     def _arrival_row(b):
         paid, folio_id, folio_balance = _paid_and_folio(b.booking_id)
         try:
@@ -3532,8 +3549,10 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "kyc_scope": _effective_id_scope(db, b, cfg=_fd_cfg),
             # v6g: has this stay's lead already shown an ID? The second car does not need to
             # produce it again, so the wizard shows it rather than demanding it.
-            "lead_identified": bool(b.guest and b.guest.id_number_masked),
-            "lead_id_masked": (b.guest.id_number_masked if b.guest else None),
+            # v6h.2: judged on THIS booking's guest rows, not on the guest's profile.
+            "lead_identified": b.booking_id in _lead_on_file_ids,
+            "lead_id_masked": ((b.guest.id_number_masked if b.guest else None)
+                               if b.booking_id in _lead_on_file_ids else None),
             # v5r: the desk needs the channel reference to recognise (and refuse) the placeholder phone
             # that was stamped from it at check-in.
             "ota_booking_id": b.ota_booking_id,
