@@ -82,10 +82,10 @@ def _match_recent_checkout(db, review: GoogleReview) -> int | None:
 
 
 def _schedule_post_at(cfg: dict) -> datetime:
-    """A randomized time in [now+min, now+max] hours so auto-replies don't look robotic."""
-    lo, hi = cfg["delay_min_hours"], cfg["delay_max_hours"]
-    hours = lo if hi <= lo else random.uniform(lo, hi)
-    return datetime.utcnow() + timedelta(hours=hours)
+    """A randomized time in [now+min, now+max] MINUTES so auto-replies don't look robotic."""
+    lo, hi = cfg["delay_min_minutes"], cfg["delay_max_minutes"]
+    minutes = lo if hi <= lo else random.uniform(lo, hi)
+    return datetime.utcnow() + timedelta(minutes=minutes)
 
 
 def generate_pending(db) -> int:

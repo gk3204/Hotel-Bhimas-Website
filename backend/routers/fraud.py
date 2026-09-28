@@ -226,9 +226,9 @@ def update_config(data: FraudConfigUpdate, db: Session = Depends(get_db),
         return get_config(db)
 
     key_map = {
-        "cleaning_max_hours": app_settings.FRAUD_CLEANING_MAX_HOURS_KEY,
+        "cleaning_max_minutes": app_settings.FRAUD_CLEANING_MAX_MINUTES_KEY,
         "cleaning_min_minutes": app_settings.FRAUD_CLEANING_MIN_MINUTES_KEY,
-        "inspection_max_hours": app_settings.FRAUD_INSPECTION_MAX_HOURS_KEY,
+        "inspection_max_minutes": app_settings.FRAUD_INSPECTION_MAX_MINUTES_KEY,
         "allowed_issue_hours": app_settings.FRAUD_ALLOWED_ISSUE_HOURS_KEY,
         "allowed_stations": app_settings.FRAUD_ALLOWED_STATIONS_KEY,
         "repeat_refund_threshold": app_settings.FRAUD_REPEAT_REFUND_THRESHOLD_KEY,

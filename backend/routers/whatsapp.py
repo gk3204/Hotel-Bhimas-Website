@@ -85,14 +85,14 @@ def get_config_ep(db: Session = Depends(get_db), user=Depends(require_admin)):
 
 _CONFIG_KEYS = {
     "checkout_reminder_enabled": app_settings.WA_CHECKOUT_REMINDER_KEY,
-    "checkout_reminder_lead_hours": app_settings.WA_CHECKOUT_LEAD_HOURS_KEY,
+    "checkout_reminder_lead_minutes": app_settings.WA_CHECKOUT_LEAD_MINUTES_KEY,
     "overstay_enabled": app_settings.WA_OVERSTAY_KEY,
     "confirmation_enabled": app_settings.WA_CONFIRMATION_KEY,
     "receipt_enabled": app_settings.WA_RECEIPT_KEY,
     "room_ready_enabled": app_settings.WA_ROOM_READY_KEY,
     "portal_link_enabled": app_settings.WA_PORTAL_LINK_KEY,
     "review_enabled": app_settings.WA_REVIEW_KEY,
-    "review_delay_hours": app_settings.WA_REVIEW_DELAY_HOURS_KEY,
+    "review_delay_minutes": app_settings.WA_REVIEW_DELAY_MINUTES_KEY,
     "owner_alerts_enabled": app_settings.WA_OWNER_ALERTS_KEY,
     "owner_whatsapp": app_settings.WA_OWNER_NUMBER_KEY,
     "owner_email": app_settings.OWNER_EMAIL_KEY,      # email fallback (FE-11)

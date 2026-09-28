@@ -60,7 +60,7 @@ def send_checkout_reminders(db) -> int:
     cfg = app_settings.get_whatsapp_config(db)
     if not cfg["checkout_reminder_enabled"]:
         return 0
-    lead = timedelta(hours=cfg["checkout_reminder_lead_hours"])
+    lead = timedelta(minutes=cfg["checkout_reminder_lead_minutes"])
     now = datetime.now()
     sent = 0
     bookings = db.query(Booking).filter(Booking.status == "checked_in").all()
@@ -146,7 +146,7 @@ def send_review_requests(db) -> int:
         # message with (#131008). Hold the requests until the owner configures the URL.
         logger.info("review requests skipped: google_review_url not configured")
         return 0
-    delay = timedelta(hours=cfg["review_delay_hours"])
+    delay = timedelta(minutes=cfg["review_delay_minutes"])
     now = datetime.utcnow()
     # Window: checked out at least `delay` ago, but not older than delay + 2 days (don't backfill
     # ancient stays when the feature is first switched on). Idempotency guards double-send anyway.

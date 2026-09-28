@@ -135,7 +135,7 @@ def _auto_close_stale(db: Session, user_id: int) -> int:
     Without this a single forgotten clock-out would make every later hours figure meaningless.
     The cap is recorded in the note so the admin can see it was a system close, not a real one."""
     cfg = get_backoffice_config(db)
-    cap = timedelta(hours=cfg["attendance_auto_close_hours"])
+    cap = timedelta(minutes=cfg["attendance_auto_close_minutes"])
     cutoff = datetime.utcnow() - cap
     stale = db.query(StaffAttendance).filter(
         StaffAttendance.user_id == user_id,
@@ -146,7 +146,7 @@ def _auto_close_stale(db: Session, user_id: int) -> int:
         row.clock_out = row.clock_in + cap
         row.minutes_worked = int(cap.total_seconds() // 60)
         row.note = ((row.note + " | ") if row.note else "") + \
-            f"auto-closed after {cfg['attendance_auto_close_hours']}h (no clock-out recorded)"
+            f"auto-closed after {cfg['attendance_auto_close_minutes']} min (no clock-out recorded)"
     if stale:
         # SessionLocal has autoflush=False: without this flush the caller's _open_session()
         # re-read would still see clock_out IS NULL and clock the stale row out normally,

@@ -59,12 +59,12 @@ export const SETTINGS_GROUPS = [
         hint: "An OTA booking is only treated as prepaid once verified. If the confirming OTA email hasn't arrived, the desk needs your approval — this blocks a fabricated ‘OTA prepaid’ walk-in. Ships ON." },
       { key: "owner_otp_ttl_minutes", type: "number", min: 1, max: 1440, label: "Approval code valid for (minutes)",
         hint: "How long a code stays usable before it expires." },
-      { key: "cleaning_max_hours", type: "number", min: 0, max: 168, label: "Alert if a room sits in cleaning for (hours)",
-        hint: "A room held in cleaning this long with nobody checked in raises an alert. Also bounds how long a housekeeping cleaning card stays valid." },
+      { key: "cleaning_max_minutes", type: "number", min: 0, max: 10080, label: "Alert if a room sits in cleaning for (minutes)",
+        hint: "A room held in cleaning this long with nobody checked in raises an alert. Also bounds how long a housekeeping cleaning card stays valid. 60 = one hour; 0 switches it off." },
       { key: "cleaning_min_minutes", type: "number", min: 0, max: 1440, label: "Alert if a room is cleaned in under (minutes)",
         hint: "A room marked clean faster than this is flagged as probably not cleaned. Set 0 to switch this off." },
-      { key: "inspection_max_hours", type: "number", min: 0, max: 168, label: "Alert if a cleaned room is not inspected for (hours)",
-        hint: "A room cleaned but not signed-off (inspected) within this many hours raises an alert." },
+      { key: "inspection_max_minutes", type: "number", min: 0, max: 10080, label: "Alert if a cleaned room is not inspected for (minutes)",
+        hint: "A room cleaned but not signed-off (inspected) within this long raises an alert. 360 = six hours; 0 switches it off." },
       { key: "repeat_refund_threshold", type: "number", min: 1, max: 100, label: "Alert after this many refunds to one reference" },
       { key: "allowed_issue_hours", type: "text", placeholder: "06-23", label: "Cards may normally be cut between (HH-HH)",
         hint: "A card cut outside this window is flagged for review — it is not blocked." },
@@ -207,7 +207,7 @@ export const SETTINGS_GROUPS = [
     label: "Housekeeping",
     title: "Housekeeping",
     load: getHkConfig,
-    // The GET also returns cleaning_max_hours, which is edited on the Fraud tab; only
+    // The GET also returns cleaning_max_minutes, which is edited on the Fraud tab; only
     // send what this endpoint actually accepts.
     save: (patch) => updateHkConfig({ auto_inspect: !!patch.auto_inspect }),
     readOnlyNote:
@@ -264,8 +264,8 @@ export const SETTINGS_GROUPS = [
         complaint_auto_compensation_enabled: c.auto_compensation_enabled,
       };
       for (const p of PRIORITIES) {
-        flat[`complaint_sla_response_hours_${p}`] = c.sla_response_hours?.[p];
-        flat[`complaint_sla_resolve_hours_${p}`] = c.sla_resolve_hours?.[p];
+        flat[`complaint_sla_response_minutes_${p}`] = c.sla_response_minutes?.[p];
+        flat[`complaint_sla_resolve_minutes_${p}`] = c.sla_resolve_minutes?.[p];
       }
       return flat;
     },
@@ -277,12 +277,12 @@ export const SETTINGS_GROUPS = [
         label: "Allow automatic goodwill compensation",
         hint: "Off (recommended): compensation stays a reason-required admin action.", wide: true },
       ...PRIORITIES.map((p) => ({
-        key: `complaint_sla_response_hours_${p}`, type: "number", min: 1,
-        label: `${cap(p)} — respond within (hours)`,
+        key: `complaint_sla_response_minutes_${p}`, type: "number", min: 1, max: 10080,
+        label: `${cap(p)} — respond within (minutes)`,
       })),
       ...PRIORITIES.map((p) => ({
-        key: `complaint_sla_resolve_hours_${p}`, type: "number", min: 1,
-        label: `${cap(p)} — resolve within (hours)`,
+        key: `complaint_sla_resolve_minutes_${p}`, type: "number", min: 1, max: 43200,
+        label: `${cap(p)} — resolve within (minutes)`,
       })),
     ],
   },
@@ -314,8 +314,9 @@ export const SETTINGS_GROUPS = [
       { key: "vendor_renewal_lead_days", type: "number", min: 1, max: 365, label: "Renewal reminder lead (days)" },
       { key: "roster_default_shift_type", type: "text", label: "Default roster shift type" },
       { key: "attendance_pin_enabled", type: "toggle", label: "Staff may clock in with a PIN" },
-      { key: "attendance_auto_close_hours", type: "number", min: 1, max: 48,
-        label: "Auto-close a forgotten clock-out after (hours)" },
+      { key: "attendance_auto_close_minutes", type: "number", min: 1, max: 2880,
+        label: "Auto-close a forgotten clock-out after (minutes)",
+        hint: "960 = sixteen hours." },
       // v4b8 (R20): tickets land on a person, not in a queue nobody owns. Options are the
       // active `maintenance` logins, loaded at render — a new technician appears here the
       // moment they are created, with no redeploy.
@@ -349,12 +350,14 @@ export const SETTINGS_GROUPS = [
       { key: "room_ready_enabled", type: "toggle", label: "Room ready" },
       { key: "portal_link_enabled", type: "toggle", label: "In-room portal link at check-in" },
       { key: "checkout_reminder_enabled", type: "toggle", label: "Check-out reminder" },
-      { key: "checkout_reminder_lead_hours", type: "number", min: 0.5, max: 48, step: "0.5",
-        label: "Send the check-out reminder this many hours before" },
+      { key: "checkout_reminder_lead_minutes", type: "number", min: 1, max: 2880,
+        label: "Send the check-out reminder this many minutes before",
+        hint: "120 = two hours. Down to a single minute if you want it." },
       { key: "overstay_enabled", type: "toggle", label: "Overstay notice" },
       { key: "review_enabled", type: "toggle", label: "Ask for a review after check-out" },
-      { key: "review_delay_hours", type: "number", min: 0, max: 168, step: "0.5",
-        label: "Wait this many hours before asking for a review" },
+      { key: "review_delay_minutes", type: "number", min: 0, max: 10080,
+        label: "Wait this many minutes before asking for a review",
+        hint: "180 = three hours." },
       { key: "owner_alerts_enabled", type: "toggle", label: "Send owner alerts (approval codes, fraud, digest)" },
       { key: "owner_whatsapp", type: "text", label: "Owner WhatsApp number(s)", wide: true,
         hint: "Approval codes and alerts go here. Comma-separate for more than one owner — each is notified. Leave blank to use the on-screen inbox only." },
@@ -384,8 +387,9 @@ export const SETTINGS_GROUPS = [
       { key: "low_band_split", type: "number", min: 1, max: 5, label: "Treat reviews at or below this as poor" },
       { key: "low_auto_send", type: "toggle", label: "Send replies to poor reviews without approval",
         hint: "Off (recommended): a poor review's reply waits in the approval queue." },
-      { key: "delay_min_hours", type: "number", min: 0, step: "0.5", label: "Wait at least (hours) before replying" },
-      { key: "delay_max_hours", type: "number", min: 0, step: "0.5", label: "…and at most (hours)" },
+      { key: "delay_min_minutes", type: "number", min: 0, max: 10080, label: "Wait at least (minutes) before replying" },
+      { key: "delay_max_minutes", type: "number", min: 0, max: 10080, label: "…and at most (minutes)",
+        hint: "Defaults are 120 and 360 — between two and six hours." },
       { key: "llm_enabled", type: "toggle", label: "Write replies with AI",
         hint: "Off = rotate through the built-in templates." },
       { key: "owner_alerts_enabled", type: "toggle", label: "Alert the owner about a poor review" },

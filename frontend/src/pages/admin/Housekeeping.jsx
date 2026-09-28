@@ -23,7 +23,7 @@ export default function Housekeeping() {
   const [rooms, setRooms] = useState([]);
   // v5s: click any header to sort; a third click returns to the API's order.
   const sortedRooms = useTableSort(rooms);
-  const [config, setConfig] = useState({ auto_inspect: false, cleaning_max_hours: 6 });
+  const [config, setConfig] = useState({ auto_inspect: false, cleaning_max_minutes: 360 });
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [busyId, setBusyId] = useState(null);
@@ -121,7 +121,11 @@ export default function Housekeeping() {
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-6 backdrop-blur">
           <div className="flex flex-wrap items-center gap-6">
             <div className="text-slate-400 text-sm">
-              Cleaning-too-long alert after <b className="text-slate-200">{config.cleaning_max_hours}h</b>
+              {/* v6i: settings are in minutes now; show hours too when it is a round number of
+                  them, so "360" does not read as meaningless to someone scanning the page. */}
+              Cleaning-too-long alert after <b className="text-slate-200">{config.cleaning_max_minutes} min
+              {config.cleaning_max_minutes >= 60 && config.cleaning_max_minutes % 60 === 0
+                ? ` (${config.cleaning_max_minutes / 60}h)` : ""}</b>
             </div>
             <button onClick={load} className="bg-slate-700 hover:bg-slate-600 font-semibold px-6 py-2.5 rounded-lg transition flex items-center gap-2">
               <FaSyncAlt size={13} /> Refresh

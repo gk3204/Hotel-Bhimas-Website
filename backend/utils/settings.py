@@ -35,20 +35,26 @@ LOYALTY_ENABLED_KEY = "loyalty_enabled"                     # master on/off for 
 LOYALTY_POINTS_PER_RUPEE_KEY = "loyalty_points_per_rupee"   # points earned per ₹1 of stay spend
 LOYALTY_RUPEE_PER_POINT_KEY = "loyalty_rupee_per_point"     # ₹ value of 1 point on redemption
 BLACKLIST_ENFORCEMENT_KEY = "blacklist_enforcement"         # warn | block
-CRM_LINK_TTL_HOURS_KEY = "crm_registration_link_ttl_hours"
+# v6i: durations are stored in MINUTES. Minutes can express an hour; hours could not express
+# ten minutes, and several of these were whole-hour integers so a half hour was not merely
+# awkward to type but unrepresentable. `fraud_cleaning_min_minutes` was already in minutes for
+# exactly that reason; this brings the rest into line so the settings screen has ONE unit.
+# ⚠️ `fraud_allowed_issue_hours` (a clock RANGE) and `wa_daily_digest_hour` (an hour OF THE DAY)
+# are NOT durations and keep their names. Migration 051 renames the keys and x60s the values.
+CRM_LINK_TTL_MINUTES_KEY = "crm_registration_link_ttl_minutes"
 
 # WhatsApp automation config keys + defaults (prompt 15; seeded in migration 013).
 # Message-provider SECRETS live in ENV (WHATSAPP_*), not here — these are the admin-editable
 # business toggles: which automations are on, their timing, the owner recipient, review link.
 WA_CHECKOUT_REMINDER_KEY = "wa_checkout_reminder_enabled"
-WA_CHECKOUT_LEAD_HOURS_KEY = "wa_checkout_reminder_lead_hours"
+WA_CHECKOUT_LEAD_MINUTES_KEY = "wa_checkout_reminder_lead_minutes"
 WA_OVERSTAY_KEY = "wa_overstay_enabled"
 WA_CONFIRMATION_KEY = "wa_confirmation_enabled"
 WA_RECEIPT_KEY = "wa_receipt_enabled"
 WA_ROOM_READY_KEY = "wa_room_ready_enabled"
 WA_PORTAL_LINK_KEY = "wa_portal_link_enabled"
 WA_REVIEW_KEY = "wa_review_enabled"
-WA_REVIEW_DELAY_HOURS_KEY = "wa_review_delay_hours"
+WA_REVIEW_DELAY_MINUTES_KEY = "wa_review_delay_minutes"
 WA_OWNER_ALERTS_KEY = "wa_owner_alerts_enabled"
 WA_OWNER_NUMBER_KEY = "owner_whatsapp"
 # Owner's email — the fallback when WhatsApp is unavailable (backlog v2 FE-11). There is
@@ -133,8 +139,8 @@ NO_SHOW_FROM_DATE_KEY = "no_show_from_date"            # ISO date; the sweep ign
 REVIEW_AUTO_REPLY_KEY = "review_auto_reply_enabled"          # master toggle for auto-posting thank-yous
 REVIEW_THRESHOLD_KEY = "review_auto_reply_threshold"        # rating >= this auto-posts; below -> approval queue
 REVIEW_LOW_BAND_SPLIT_KEY = "review_low_band_split"          # ratings <= this use the 1-2 apology band vs the 3 band
-REVIEW_DELAY_MIN_HOURS_KEY = "review_post_delay_min_hours"   # randomized posting delay (lower bound)
-REVIEW_DELAY_MAX_HOURS_KEY = "review_post_delay_max_hours"   # randomized posting delay (upper bound)
+REVIEW_DELAY_MIN_MINUTES_KEY = "review_post_delay_min_minutes"   # randomized posting delay (lower)
+REVIEW_DELAY_MAX_MINUTES_KEY = "review_post_delay_max_minutes"   # randomized posting delay (upper)
 REVIEW_LOW_AUTO_SEND_KEY = "review_low_auto_send"            # auto-send low-rating drafts (default off = approval)
 REVIEW_LLM_ENABLED_KEY = "review_llm_enabled"               # Claude generation on (still needs ANTHROPIC_API_KEY)
 REVIEW_POLL_INTERVAL_KEY = "review_poll_interval_minutes"    # GBP poller cadence
@@ -149,7 +155,7 @@ VENDOR_RENEWAL_ALERTS_KEY = "vendor_renewal_alerts_enabled"
 VENDOR_RENEWAL_LEAD_DAYS_KEY = "vendor_renewal_lead_days"    # fallback when a contract sets no window
 ROSTER_DEFAULT_SHIFT_TYPE_KEY = "roster_default_shift_type"
 ATTENDANCE_PIN_ENABLED_KEY = "attendance_pin_enabled"        # allow PIN clock-in/out at the desk
-ATTENDANCE_AUTO_CLOSE_HOURS_KEY = "attendance_auto_close_hours"  # forgotten clock-out safety cap
+ATTENDANCE_AUTO_CLOSE_MINUTES_KEY = "attendance_auto_close_minutes"  # forgotten clock-out cap
 
 # Inventory / stock config keys + defaults (prompt 18c slice 8; seeded in migration 020).
 LOW_STOCK_ALERTS_ENABLED_KEY = "low_stock_alerts_enabled"        # owner WhatsApp on a low-stock episode
@@ -159,8 +165,8 @@ LOW_STOCK_DEFAULT_THRESHOLD_KEY = "low_stock_default_threshold"  # fallback reor
 # SLA hours are per-priority (respond-by + resolve-by), used to stamp due-times at create and to
 # drive the escalation sweep. Auto-compensation is OFF by default — compensation is always an
 # admin, reason-required, audited action.
-COMPLAINT_SLA_RESPONSE_PREFIX = "complaint_sla_response_hours_"   # + urgent|high|normal|low
-COMPLAINT_SLA_RESOLVE_PREFIX = "complaint_sla_resolve_hours_"     # + urgent|high|normal|low
+COMPLAINT_SLA_RESPONSE_PREFIX = "complaint_sla_response_minutes_"   # + urgent|high|normal|low
+COMPLAINT_SLA_RESOLVE_PREFIX = "complaint_sla_resolve_minutes_"     # + urgent|high|normal|low
 COMPLAINT_ESCALATION_ENABLED_KEY = "complaint_escalation_enabled"
 COMPLAINT_AUTO_COMPENSATION_ENABLED_KEY = "complaint_auto_compensation_enabled"
 
@@ -187,16 +193,16 @@ _DEFAULTS = {
     LOYALTY_POINTS_PER_RUPEE_KEY: "0.01",
     LOYALTY_RUPEE_PER_POINT_KEY: "1",
     BLACKLIST_ENFORCEMENT_KEY: "warn",
-    CRM_LINK_TTL_HOURS_KEY: "72",
+    CRM_LINK_TTL_MINUTES_KEY: "4320",        # 72 h
     WA_CHECKOUT_REMINDER_KEY: "true",
-    WA_CHECKOUT_LEAD_HOURS_KEY: "2",
+    WA_CHECKOUT_LEAD_MINUTES_KEY: "120",     # 2 h
     WA_OVERSTAY_KEY: "true",
     WA_CONFIRMATION_KEY: "true",
     WA_RECEIPT_KEY: "true",
     WA_ROOM_READY_KEY: "true",
     WA_PORTAL_LINK_KEY: "true",
     WA_REVIEW_KEY: "true",
-    WA_REVIEW_DELAY_HOURS_KEY: "3",
+    WA_REVIEW_DELAY_MINUTES_KEY: "180",      # 3 h
     WA_OWNER_ALERTS_KEY: "true",
     WA_OWNER_NUMBER_KEY: "",
     WA_REVIEW_URL_KEY: "",
@@ -237,8 +243,8 @@ _DEFAULTS = {
     REVIEW_AUTO_REPLY_KEY: "true",
     REVIEW_THRESHOLD_KEY: "4",
     REVIEW_LOW_BAND_SPLIT_KEY: "2",
-    REVIEW_DELAY_MIN_HOURS_KEY: "2",
-    REVIEW_DELAY_MAX_HOURS_KEY: "6",
+    REVIEW_DELAY_MIN_MINUTES_KEY: "120",     # 2 h
+    REVIEW_DELAY_MAX_MINUTES_KEY: "360",     # 6 h
     REVIEW_LOW_AUTO_SEND_KEY: "false",
     REVIEW_LLM_ENABLED_KEY: "false",
     REVIEW_POLL_INTERVAL_KEY: "15",
@@ -250,7 +256,7 @@ _DEFAULTS = {
     VENDOR_RENEWAL_LEAD_DAYS_KEY: "30",
     ROSTER_DEFAULT_SHIFT_TYPE_KEY: "general",
     ATTENDANCE_PIN_ENABLED_KEY: "true",
-    ATTENDANCE_AUTO_CLOSE_HOURS_KEY: "16",
+    ATTENDANCE_AUTO_CLOSE_MINUTES_KEY: "960",   # 16 h
     LOW_STOCK_ALERTS_ENABLED_KEY: "true",
     LOW_STOCK_DEFAULT_THRESHOLD_KEY: "5",
     COMPLAINT_SLA_RESPONSE_PREFIX + "urgent": "1",
@@ -410,7 +416,7 @@ def get_housekeeping_config(db) -> dict:
         "auto_inspect": _as_bool(get_setting(db, HK_AUTO_INSPECT_KEY, "false")),
         # Surfaced read-only so the admin UI can show the fraud threshold. It is EDITED on
         # the fraud tab; read it from the same place so the two screens can't disagree (FE-12).
-        "cleaning_max_hours": float(get_fraud_config(db)["cleaning_max_hours"]),
+        "cleaning_max_minutes": float(get_fraud_config(db)["cleaning_max_minutes"]),
     }
 
 
@@ -430,13 +436,13 @@ def get_crm_config(db) -> dict:
     enforcement = (get_setting(db, BLACKLIST_ENFORCEMENT_KEY) or "warn").strip().lower()
     if enforcement not in ("warn", "block"):
         enforcement = "warn"
-    ttl = _as_float(get_setting(db, CRM_LINK_TTL_HOURS_KEY), 72.0)
+    ttl = _as_float(get_setting(db, CRM_LINK_TTL_MINUTES_KEY), 4320.0)
     return {
         "loyalty_enabled": _bool_or(get_setting(db, LOYALTY_ENABLED_KEY), True),
         "loyalty_points_per_rupee": max(0.0, ppr),
         "loyalty_rupee_per_point": max(0.0, rpp),
         "blacklist_enforcement": enforcement,
-        "registration_link_ttl_hours": max(1.0, ttl),
+        "registration_link_ttl_minutes": max(1.0, ttl),
     }
 
 
@@ -453,14 +459,14 @@ def get_whatsapp_config(db) -> dict:
     credentials are ENV-owned (WHATSAPP_*) and surfaced read-only via whatsapp_service.provider_status()."""
     return {
         "checkout_reminder_enabled": _as_bool(get_setting(db, WA_CHECKOUT_REMINDER_KEY, "true")),
-        "checkout_reminder_lead_hours": max(0.5, _as_float(get_setting(db, WA_CHECKOUT_LEAD_HOURS_KEY), 2.0)),
+        "checkout_reminder_lead_minutes": max(1.0, _as_float(get_setting(db, WA_CHECKOUT_LEAD_MINUTES_KEY), 120.0)),
         "overstay_enabled": _as_bool(get_setting(db, WA_OVERSTAY_KEY, "true")),
         "confirmation_enabled": _as_bool(get_setting(db, WA_CONFIRMATION_KEY, "true")),
         "receipt_enabled": _as_bool(get_setting(db, WA_RECEIPT_KEY, "true")),
         "room_ready_enabled": _as_bool(get_setting(db, WA_ROOM_READY_KEY, "true")),
         "portal_link_enabled": _as_bool(get_setting(db, WA_PORTAL_LINK_KEY, "true")),
         "review_enabled": _as_bool(get_setting(db, WA_REVIEW_KEY, "true")),
-        "review_delay_hours": max(0.0, _as_float(get_setting(db, WA_REVIEW_DELAY_HOURS_KEY), 3.0)),
+        "review_delay_minutes": max(0.0, _as_float(get_setting(db, WA_REVIEW_DELAY_MINUTES_KEY), 180.0)),
         "owner_alerts_enabled": _as_bool(get_setting(db, WA_OWNER_ALERTS_KEY, "true")),
         "owner_whatsapp": (get_setting(db, WA_OWNER_NUMBER_KEY, "") or "").strip(),
         # Fallback address for owner alerts when WhatsApp is unavailable (FE-11).
@@ -570,7 +576,7 @@ DESK_PAY_EDITABLE_KEYS = (
 # Keys an admin may edit through PUT /reviews/config (GBP OAuth + Claude secrets stay in ENV).
 REVIEW_EDITABLE_KEYS = (
     REVIEW_AUTO_REPLY_KEY, REVIEW_THRESHOLD_KEY, REVIEW_LOW_BAND_SPLIT_KEY,
-    REVIEW_DELAY_MIN_HOURS_KEY, REVIEW_DELAY_MAX_HOURS_KEY, REVIEW_LOW_AUTO_SEND_KEY,
+    REVIEW_DELAY_MIN_MINUTES_KEY, REVIEW_DELAY_MAX_MINUTES_KEY, REVIEW_LOW_AUTO_SEND_KEY,
     REVIEW_LLM_ENABLED_KEY, REVIEW_POLL_INTERVAL_KEY, REVIEW_OWNER_ALERTS_KEY,
 )
 
@@ -581,17 +587,17 @@ def get_review_config(db) -> dict:
     auto-send (default off = approval queue), optional Claude LLM generation, the poller cadence,
     and owner alerts. GBP OAuth + ANTHROPIC_API_KEY are ENV-owned and never live here.
 
-    `delay_min_hours`/`delay_max_hours` are clamped so max >= min (a 0-width window = post-now)."""
+    `delay_min_minutes`/`delay_max_minutes` are clamped so max >= min (a 0-width window = post-now)."""
     threshold = min(5, max(1, _as_int(get_setting(db, REVIEW_THRESHOLD_KEY), 4)))
     split = min(5, max(1, _as_int(get_setting(db, REVIEW_LOW_BAND_SPLIT_KEY), 2)))
-    dmin = max(0.0, _as_float(get_setting(db, REVIEW_DELAY_MIN_HOURS_KEY), 2.0))
-    dmax = max(dmin, _as_float(get_setting(db, REVIEW_DELAY_MAX_HOURS_KEY), 6.0))
+    dmin = max(0.0, _as_float(get_setting(db, REVIEW_DELAY_MIN_MINUTES_KEY), 120.0))
+    dmax = max(dmin, _as_float(get_setting(db, REVIEW_DELAY_MAX_MINUTES_KEY), 360.0))
     return {
         "auto_reply_enabled": _as_bool(get_setting(db, REVIEW_AUTO_REPLY_KEY, "true")),
         "auto_reply_threshold": threshold,
         "low_band_split": split,
-        "delay_min_hours": dmin,
-        "delay_max_hours": dmax,
+        "delay_min_minutes": dmin,
+        "delay_max_minutes": dmax,
         "low_auto_send": _as_bool(get_setting(db, REVIEW_LOW_AUTO_SEND_KEY, "false")),
         "llm_enabled": _as_bool(get_setting(db, REVIEW_LLM_ENABLED_KEY, "false")),
         "poll_interval_minutes": max(1, _as_int(get_setting(db, REVIEW_POLL_INTERVAL_KEY), 15)),
@@ -607,7 +613,7 @@ MAINTENANCE_DEFAULT_ASSIGNEE_KEY = "maintenance_default_assignee_id"
 BACKOFFICE_EDITABLE_KEYS = (
     COMPANY_CREDIT_BLOCK_KEY, COMPANY_DEFAULT_CREDIT_DAYS_KEY, COMPANY_INVOICE_PREFIX_KEY,
     VENDOR_RENEWAL_ALERTS_KEY, VENDOR_RENEWAL_LEAD_DAYS_KEY,
-    ROSTER_DEFAULT_SHIFT_TYPE_KEY, ATTENDANCE_PIN_ENABLED_KEY, ATTENDANCE_AUTO_CLOSE_HOURS_KEY,
+    ROSTER_DEFAULT_SHIFT_TYPE_KEY, ATTENDANCE_PIN_ENABLED_KEY, ATTENDANCE_AUTO_CLOSE_MINUTES_KEY,
     MAINTENANCE_DEFAULT_ASSIGNEE_KEY,
 )
 
@@ -633,7 +639,7 @@ def get_backoffice_config(db) -> dict:
         "vendor_renewal_lead_days": max(1, _as_int(get_setting(db, VENDOR_RENEWAL_LEAD_DAYS_KEY), 30)),
         "roster_default_shift_type": shift_type,
         "attendance_pin_enabled": _as_bool(get_setting(db, ATTENDANCE_PIN_ENABLED_KEY, "true")),
-        "attendance_auto_close_hours": min(48, max(1, _as_int(get_setting(db, ATTENDANCE_AUTO_CLOSE_HOURS_KEY), 16))),
+        "attendance_auto_close_minutes": min(2880, max(1, _as_int(get_setting(db, ATTENDANCE_AUTO_CLOSE_MINUTES_KEY), 960))),
     }
 
 
@@ -660,9 +666,9 @@ def get_stock_config(db) -> dict:
 # means an untouched install behaves exactly as before; the first admin save takes
 # over. Every enforcement site reads get_fraud_config() so the screen can never
 # claim a gate is on while the code checks something else.
-FRAUD_CLEANING_MAX_HOURS_KEY = "fraud_cleaning_max_hours"
+FRAUD_CLEANING_MAX_MINUTES_KEY = "fraud_cleaning_max_minutes"
 FRAUD_CLEANING_MIN_MINUTES_KEY = "fraud_cleaning_min_minutes"  # cleaned suspiciously fast
-FRAUD_INSPECTION_MAX_HOURS_KEY = "fraud_inspection_max_hours"
+FRAUD_INSPECTION_MAX_MINUTES_KEY = "fraud_inspection_max_minutes"
 FRAUD_ALLOWED_ISSUE_HOURS_KEY = "fraud_allowed_issue_hours"
 FRAUD_ALLOWED_STATIONS_KEY = "fraud_allowed_stations"
 FRAUD_REPEAT_REFUND_THRESHOLD_KEY = "fraud_repeat_refund_threshold"
@@ -685,8 +691,8 @@ FRAUD_CHECKOUT_NO_CARD_OTP_KEY = "fraud_checkout_no_card_otp_required"
 FRAUD_OTA_UNVERIFIED_OTP_KEY = "fraud_ota_unverified_otp_required"  # v5: unverified OTA id needs owner approval
 
 FRAUD_EDITABLE_KEYS = (
-    FRAUD_CLEANING_MAX_HOURS_KEY, FRAUD_CLEANING_MIN_MINUTES_KEY,
-    FRAUD_INSPECTION_MAX_HOURS_KEY,
+    FRAUD_CLEANING_MAX_MINUTES_KEY, FRAUD_CLEANING_MIN_MINUTES_KEY,
+    FRAUD_INSPECTION_MAX_MINUTES_KEY,
     FRAUD_ALLOWED_ISSUE_HOURS_KEY, FRAUD_ALLOWED_STATIONS_KEY,
     FRAUD_REPEAT_REFUND_THRESHOLD_KEY, FRAUD_REFUND_OTP_KEY, FRAUD_DISCOUNT_OTP_KEY,
     FRAUD_CARD_ISSUE_OTP_KEY, FRAUD_OTP_TTL_MINUTES_KEY,
@@ -723,14 +729,14 @@ def get_fraud_config(db) -> dict:
 
     return {
         # 0 disables the cleaning-too-long detector's alerting window.
-        "cleaning_max_hours": max(0, _as_int(get_setting(db, FRAUD_CLEANING_MAX_HOURS_KEY),
-                                             _as_int(os.getenv("CLEANING_MAX_HOURS"), 6))),
+        "cleaning_max_minutes": max(0, _as_int(get_setting(db, FRAUD_CLEANING_MAX_MINUTES_KEY),
+                                             _as_int(os.getenv("CLEANING_MAX_MINUTES"), 360))),
         # A room "cleaned" in fewer than this many minutes is flagged (probably not really cleaned).
         # 0 disables the cleaning-too-fast detector.
         "cleaning_min_minutes": max(0, _as_int(get_setting(db, FRAUD_CLEANING_MIN_MINUTES_KEY),
                                                _as_int(os.getenv("CLEANING_MIN_MINUTES"), 10))),
-        "inspection_max_hours": max(0, _as_int(get_setting(db, FRAUD_INSPECTION_MAX_HOURS_KEY),
-                                               _as_int(os.getenv("INSPECTION_MAX_HOURS"), 6))),
+        "inspection_max_minutes": max(0, _as_int(get_setting(db, FRAUD_INSPECTION_MAX_MINUTES_KEY),
+                                               _as_int(os.getenv("INSPECTION_MAX_MINUTES"), 360))),
         "allowed_issue_hours": hours,
         "allowed_stations": stations,
         "repeat_refund_threshold": max(1, _as_int(get_setting(db, FRAUD_REPEAT_REFUND_THRESHOLD_KEY),
@@ -829,8 +835,9 @@ COMPLAINT_EDITABLE_KEYS = tuple(
 )
 
 # Fallback SLA hours if a key is somehow missing (mirror the migration seeds).
-_COMPLAINT_SLA_RESPONSE_DEFAULTS = {"urgent": 1, "high": 2, "normal": 4, "low": 8}
-_COMPLAINT_SLA_RESOLVE_DEFAULTS = {"urgent": 4, "high": 8, "normal": 24, "low": 48}
+# v6i: minutes. Same durations as before - 1/2/4/8 h to respond, 4/8/24/48 h to resolve.
+_COMPLAINT_SLA_RESPONSE_DEFAULTS = {"urgent": 60, "high": 120, "normal": 240, "low": 480}
+_COMPLAINT_SLA_RESOLVE_DEFAULTS = {"urgent": 240, "high": 480, "normal": 1440, "low": 2880}
 
 
 def get_complaints_config(db) -> dict:
@@ -845,8 +852,8 @@ def get_complaints_config(db) -> dict:
         res[p] = max(1, _as_int(get_setting(db, COMPLAINT_SLA_RESOLVE_PREFIX + p),
                                 _COMPLAINT_SLA_RESOLVE_DEFAULTS[p]))
     return {
-        "sla_response_hours": resp,
-        "sla_resolve_hours": res,
+        "sla_response_minutes": resp,
+        "sla_resolve_minutes": res,
         "escalation_enabled": _as_bool(get_setting(db, COMPLAINT_ESCALATION_ENABLED_KEY, "true")),
         "auto_compensation_enabled": _as_bool(get_setting(db, COMPLAINT_AUTO_COMPENSATION_ENABLED_KEY, "false")),
     }

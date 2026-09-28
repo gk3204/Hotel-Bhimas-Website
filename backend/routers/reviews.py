@@ -175,8 +175,8 @@ _CFG_KEYS = {
     "auto_reply_enabled": app_settings.REVIEW_AUTO_REPLY_KEY,
     "auto_reply_threshold": app_settings.REVIEW_THRESHOLD_KEY,
     "low_band_split": app_settings.REVIEW_LOW_BAND_SPLIT_KEY,
-    "delay_min_hours": app_settings.REVIEW_DELAY_MIN_HOURS_KEY,
-    "delay_max_hours": app_settings.REVIEW_DELAY_MAX_HOURS_KEY,
+    "delay_min_minutes": app_settings.REVIEW_DELAY_MIN_MINUTES_KEY,
+    "delay_max_minutes": app_settings.REVIEW_DELAY_MAX_MINUTES_KEY,
     "low_auto_send": app_settings.REVIEW_LOW_AUTO_SEND_KEY,
     "llm_enabled": app_settings.REVIEW_LLM_ENABLED_KEY,
     "poll_interval_minutes": app_settings.REVIEW_POLL_INTERVAL_KEY,
@@ -188,8 +188,8 @@ class ReviewConfigUpdate(BaseModel):
     auto_reply_enabled: bool | None = None
     auto_reply_threshold: int | None = None
     low_band_split: int | None = None
-    delay_min_hours: float | None = None
-    delay_max_hours: float | None = None
+    delay_min_minutes: float | None = None
+    delay_max_minutes: float | None = None
     low_auto_send: bool | None = None
     llm_enabled: bool | None = None
     poll_interval_minutes: int | None = None

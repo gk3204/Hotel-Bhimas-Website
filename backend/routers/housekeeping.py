@@ -354,7 +354,7 @@ def inspect_room(room_id: int, data: InspectRequest, db: Session = Depends(get_d
 # Reception hands the housekeeper a time-limited cleaning card for a dirty CARD-LOCK room. It may
 # be encoded ONCE per cleaning cycle and only while the room is dirty. Encoding it AUTO-STARTS the
 # cleaning task (no manual "Start cleaning"); returning it AUTO-FINISHES cleaning and leaves the
-# room awaiting inspection. The card's validity window = the existing `cleaning_max_hours` fraud
+# room awaiting inspection. The card's validity window = the existing `cleaning_max_minutes` fraud
 # threshold, so the current `cleaning_too_long` detector fires if the room runs over.
 
 def _cleaning_card_payload(room: Room, card: CardIssuance) -> dict:
@@ -400,9 +400,12 @@ def encode_cleaning_card(room_id: int, data: CleaningCardRequest, db: Session = 
         raise HTTPException(status_code=409,
                             detail="A cleaning card has already been issued for this cleaning")
 
-    hours = get_fraud_config(db).get("cleaning_max_hours") or 1  # 0/disabled -> a sane 1h expiry
+    # v6i: the cleaning card's validity is the cleaning-too-long window, now in MINUTES.
+    # 0 (the documented "disabled") still has to give the card SOME life, so it falls back to an
+    # hour exactly as it did before.
+    minutes = get_fraud_config(db).get("cleaning_max_minutes") or 60
     valid_from = datetime.now()
-    valid_to = valid_from + timedelta(hours=hours)
+    valid_to = valid_from + timedelta(minutes=minutes)
     task = open_checkout_clean_task(db, room.room_id)
     card = CardIssuance(
         booking_id=task.booking_id if task else None,

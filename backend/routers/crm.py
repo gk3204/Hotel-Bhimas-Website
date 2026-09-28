@@ -676,7 +676,7 @@ def create_prearrival(data: PreArrivalCreate, db: Session = Depends(get_db),
     token = secrets.token_urlsafe(24)
     reg = PreArrivalRegistration(
         token=token, booking_id=booking.booking_id, guest_id=booking.guest_id,
-        status="sent", expires_at=datetime.utcnow() + timedelta(hours=cfg["registration_link_ttl_hours"]),
+        status="sent", expires_at=datetime.utcnow() + timedelta(minutes=cfg["registration_link_ttl_minutes"]),
         created_by=_resolve_user_id(db, user))
     db.add(reg)
     db.commit()

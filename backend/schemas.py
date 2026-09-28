@@ -1106,14 +1106,14 @@ class WhatsAppConfigUpdate(BaseModel):
     """Admin sets which automations fire, their timing, the owner recipient + review link
     (runtime, no redeploy). Provider secrets stay in ENV."""
     checkout_reminder_enabled: Optional[bool] = None
-    checkout_reminder_lead_hours: Optional[float] = Field(None, ge=0.5, le=48)
+    checkout_reminder_lead_minutes: Optional[float] = Field(None, ge=1, le=2880)      # <= 48 h
     overstay_enabled: Optional[bool] = None
     confirmation_enabled: Optional[bool] = None
     receipt_enabled: Optional[bool] = None
     room_ready_enabled: Optional[bool] = None
     portal_link_enabled: Optional[bool] = None
     review_enabled: Optional[bool] = None
-    review_delay_hours: Optional[float] = Field(None, ge=0, le=168)
+    review_delay_minutes: Optional[float] = Field(None, ge=0, le=10080)               # <= 7 days
     owner_alerts_enabled: Optional[bool] = None
     owner_whatsapp: Optional[str] = Field(None, max_length=200)   # one or more, comma-separated
     owner_email: Optional[str] = Field(None, max_length=300)      # one or more, comma-separated (FE-11)
@@ -1377,7 +1377,7 @@ class BackofficeConfigUpdate(BaseModel):
     vendor_renewal_lead_days: Optional[int] = Field(None, ge=1, le=365)
     roster_default_shift_type: Optional[str] = Field(None, pattern=SHIFT_TYPE_RE)
     attendance_pin_enabled: Optional[bool] = None
-    attendance_auto_close_hours: Optional[int] = Field(None, ge=1, le=48)
+    attendance_auto_close_minutes: Optional[int] = Field(None, ge=1, le=2880)         # <= 48 h
     # v4b8 (R20): every new maintenance ticket auto-assigns to this technician. 0 = nobody,
     # which keeps the old behaviour (the ticket stays open for a technician to claim).
     maintenance_default_assignee_id: Optional[int] = Field(None, ge=0)
@@ -1389,9 +1389,9 @@ class BackofficeConfigUpdate(BaseModel):
 class FraudConfigUpdate(BaseModel):
     """Admin-editable anti-fraud thresholds + approval gates (backlog v2 FE-12).
     Every field optional — only what's sent is changed."""
-    cleaning_max_hours: Optional[int] = Field(None, ge=0, le=168)
+    cleaning_max_minutes: Optional[int] = Field(None, ge=0, le=10080)                 # 0 = off
     cleaning_min_minutes: Optional[int] = Field(None, ge=0, le=1440)  # 0 = off; flag cleans faster than this
-    inspection_max_hours: Optional[int] = Field(None, ge=0, le=168)
+    inspection_max_minutes: Optional[int] = Field(None, ge=0, le=10080)               # 0 = off
     allowed_issue_hours: Optional[str] = Field(None, pattern=r"^\d{1,2}-\d{1,2}$")
     allowed_stations: Optional[List[str]] = None      # [] = no station fencing
     repeat_refund_threshold: Optional[int] = Field(None, ge=1, le=100)
@@ -1553,14 +1553,14 @@ class ComplaintCompensate(BaseModel):
 
 
 class ComplaintConfigUpdate(BaseModel):
-    complaint_sla_response_hours_urgent: Optional[int] = Field(None, ge=1, le=168)
-    complaint_sla_response_hours_high: Optional[int] = Field(None, ge=1, le=168)
-    complaint_sla_response_hours_normal: Optional[int] = Field(None, ge=1, le=168)
-    complaint_sla_response_hours_low: Optional[int] = Field(None, ge=1, le=168)
-    complaint_sla_resolve_hours_urgent: Optional[int] = Field(None, ge=1, le=720)
-    complaint_sla_resolve_hours_high: Optional[int] = Field(None, ge=1, le=720)
-    complaint_sla_resolve_hours_normal: Optional[int] = Field(None, ge=1, le=720)
-    complaint_sla_resolve_hours_low: Optional[int] = Field(None, ge=1, le=720)
+    complaint_sla_response_minutes_urgent: Optional[int] = Field(None, ge=1, le=10080)
+    complaint_sla_response_minutes_high: Optional[int] = Field(None, ge=1, le=10080)
+    complaint_sla_response_minutes_normal: Optional[int] = Field(None, ge=1, le=10080)
+    complaint_sla_response_minutes_low: Optional[int] = Field(None, ge=1, le=10080)
+    complaint_sla_resolve_minutes_urgent: Optional[int] = Field(None, ge=1, le=43200)
+    complaint_sla_resolve_minutes_high: Optional[int] = Field(None, ge=1, le=43200)
+    complaint_sla_resolve_minutes_normal: Optional[int] = Field(None, ge=1, le=43200)
+    complaint_sla_resolve_minutes_low: Optional[int] = Field(None, ge=1, le=43200)
     complaint_escalation_enabled: Optional[bool] = None
     complaint_auto_compensation_enabled: Optional[bool] = None
 

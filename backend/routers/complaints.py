@@ -69,8 +69,8 @@ def stamp_sla(ticket: MaintenanceTicket, cfg: dict, base: datetime | None = None
     """Set respond-by / resolve-by targets from the per-priority SLA config."""
     base = base or datetime.utcnow()
     pr = ticket.priority if ticket.priority in ("urgent", "high", "normal", "low") else "normal"
-    ticket.sla_response_due_at = base + timedelta(hours=cfg["sla_response_hours"][pr])
-    ticket.sla_resolve_due_at = base + timedelta(hours=cfg["sla_resolve_hours"][pr])
+    ticket.sla_response_due_at = base + timedelta(minutes=cfg["sla_response_minutes"][pr])
+    ticket.sla_resolve_due_at = base + timedelta(minutes=cfg["sla_resolve_minutes"][pr])
 
 
 def _breach(ticket: MaintenanceTicket, now: datetime | None = None) -> dict:

@@ -118,10 +118,10 @@ def _detect_card_anomalies(db, new_alerts, keys):
 
 def _detect_cleaning_too_long(db, new_alerts, keys):
     from utils.housekeeping import active_cleaning_card
-    max_hours = get_config(db)["cleaning_max_hours"]
-    if max_hours <= 0:
+    max_minutes = get_config(db)["cleaning_max_minutes"]
+    if max_minutes <= 0:
         return  # 0 disables the cleaning-too-long window (documented contract)
-    cutoff = datetime.utcnow() - timedelta(hours=max_hours)
+    cutoff = datetime.utcnow() - timedelta(minutes=max_minutes)
     rooms = db.query(Room).filter(Room.status == "cleaning").all()
     for r in rooms:
         if not r.status_changed_at or r.status_changed_at > cutoff:
@@ -179,8 +179,8 @@ def _detect_inspection_overdue(db, new_alerts, keys):
     """A room CLEANED (housekeeping task done) but not yet INSPECTED beyond the threshold — the
     room can't go back into service until someone signs off on it."""
     from models import HousekeepingTask
-    max_hours = get_config(db)["inspection_max_hours"]
-    cutoff = datetime.utcnow() - timedelta(hours=max_hours)
+    max_minutes = get_config(db)["inspection_max_minutes"]
+    cutoff = datetime.utcnow() - timedelta(minutes=max_minutes)
     tasks = (db.query(HousekeepingTask)
              .filter(HousekeepingTask.status == "done",
                      HousekeepingTask.inspected_at.is_(None),
