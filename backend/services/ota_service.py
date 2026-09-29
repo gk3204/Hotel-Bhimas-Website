@@ -637,6 +637,14 @@ def _parse_common(text: str) -> dict:
     field tries a few common labels. Missing fields stay None (draft is still created for manual
     completion)."""
     booking_id = _first([
+        # ⚠️ Yatra/Travelguru print their own wrapper in front of the hotel-facing reference, with
+        # a SPACE: "Booking Id: IXIJ P0002515148". The generic pattern below stops at that space
+        # and captures "IXIJ" — which matches no booking, so the cancellation never reached the
+        # stay, AND collapses every such mail onto one bogus id so they dedupe against each other
+        # and only the first ever becomes a draft. Found on production: two live bookings (#223,
+        # #224) still held rooms for guests who had cancelled weeks earlier. This pattern runs
+        # FIRST so it wins where it applies; everything else is unchanged.
+        r"booking\s*id\s*[:\-#]?\s*IXI[A-Z]?\s*(P?\d{6,})",
         r"(?:booking\s*id|booking\s*(?:reference|ref|no\.?|number)|reservation\s*(?:id|number|no\.?)|confirmation\s*(?:number|no\.?|id)|itinerary\s*(?:id|no\.?))\s*[:\-#]?\s*([A-Za-z0-9\-\/]{4,40})",
     ], text)
     guest = _first([

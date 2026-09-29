@@ -16,6 +16,7 @@ import re
 from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
@@ -182,12 +183,28 @@ def list_settlements(from_: str = Query(None, alias="from"), to: str = Query(Non
 # ============================================================
 @router.get("/drafts")
 def list_drafts(status: str = Query(None),
+                q: str = Query(None, max_length=80,
+                               description="match on guest name, OTA booking id or phone"),
                 db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
-    q = db.query(OtaDraftBooking)
+    """The drafts list, newest first, capped at 200.
+
+    ⚠️ `q` is filtered in SQL rather than by the caller, because of that cap: this property is
+    already past 600 drafts, so a client-side filter would search only the newest 200 and report
+    "not found" for a draft that is sitting right there. A desk looking up the guest at the
+    counter has to search all of them.
+    """
+    query = db.query(OtaDraftBooking)
     if status:
-        q = q.filter(OtaDraftBooking.status == status)
+        query = query.filter(OtaDraftBooking.status == status)
+    if q and q.strip():
+        like = "%" + q.strip() + "%"
+        query = query.filter(or_(
+            OtaDraftBooking.guest_name.ilike(like),
+            OtaDraftBooking.ota_booking_id.ilike(like),
+            OtaDraftBooking.phone.ilike(like),
+        ))
     rows = [ota_service.serialize_draft(d, db)
-            for d in q.order_by(OtaDraftBooking.created_at.desc()).limit(200).all()]
+            for d in query.order_by(OtaDraftBooking.created_at.desc()).limit(200).all()]
     return {"rows": rows}
 
 
