@@ -21,7 +21,7 @@ from models import Booking, Guest, BookingItem, Room, FraudAlert
 from utils import settings as app_settings
 from utils import whatsapp_service as wa
 from services import notify as notify_service
-from routers.reception import booking_checkout_moment, _grace_minutes
+from routers.reception import booking_checkout_moment
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +98,10 @@ def send_overstay_alerts(db) -> int:
     cfg = app_settings.get_whatsapp_config(db)
     if not cfg["overstay_enabled"]:
         return 0
-    grace = timedelta(minutes=_grace_minutes())
+    # v6l: the OVERSTAY grace (Settings), not the card's lock-clock buffer. The two used to be read
+    # from different places, so an owner who set the billing grace to 90 min had guests told they
+    # had overstayed at +60 and billed at +90. The alert and the bill now fire on the same minute.
+    grace = timedelta(minutes=app_settings.get_overstay_config(db)["grace_minutes"])
     now = datetime.now()
     sent = 0
     bookings = db.query(Booking).filter(Booking.status == "checked_in").all()

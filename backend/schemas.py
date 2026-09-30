@@ -293,6 +293,14 @@ class FolioChargeCreate(BaseModel):
     gst_percent: float = Field(default=5, ge=0, le=28)
 
 
+class ExtraPersonRequest(BaseModel):
+    """v6l: a one-time extra-person charge. The SERVER prices it (AC / non-AC + GST from Settings);
+    the desk only says which room and how many people."""
+    booking_item_id: Optional[int] = None     # None = the bill's own room / the stay's first room
+    persons: int = Field(..., ge=1, le=10)
+    note: Optional[str] = Field(None, max_length=80)
+
+
 class FolioVoidRequest(BaseModel):
     reason: str = Field(..., min_length=3, max_length=200)
     # Owner-approval OTP: required when VOID_OTP_REQUIRED is on (ships armed).

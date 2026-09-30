@@ -81,3 +81,14 @@ export const updateOtaConfig = (patch) =>
     headers: authHeaders(),
     body: JSON.stringify(patch),
   }).then(handle);
+
+// v6l: one-time extra-person charge — AC / non-AC price before GST, GST % added on top.
+export const getExtraPerson = () =>
+  fetch(`${BASE_URL}/settings/extra-person`, { headers: authHeaders() }).then(handle);
+
+export const setExtraPerson = (config) =>
+  fetch(`${BASE_URL}/settings/extra-person`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify({ config }),
+  }).then(handle);

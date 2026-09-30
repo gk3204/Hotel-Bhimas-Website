@@ -132,6 +132,33 @@ def set_arrival_rules(rules: dict = Body(..., embed=True),
     return {"rules": clean}
 
 
+# --- Extra person (v6l) ---------------------------------------------------------------------
+# One-time charge per extra person, priced by the room type's AC flag, BEFORE GST. GET is
+# reception-or-admin (the desk shows the price), PUT is admin-only, validated and audited.
+
+@router.get("/extra-person", dependencies=[Depends(require_reception_or_admin)])
+def get_extra_person(db: Session = Depends(get_db)):
+    return app_settings.get_extra_person_config(db)
+
+
+@router.put("/extra-person")
+def set_extra_person(config: dict = Body(..., embed=True),
+                     db: Session = Depends(get_db),
+                     user=Depends(require_admin)):
+    import json
+    errs = app_settings.validate_extra_person_config(config)
+    if errs:
+        raise HTTPException(status_code=422, detail="; ".join(errs))
+    before = app_settings.get_extra_person_config(db)
+    clean = {"ac_amount": round(float(config.get("ac_amount", 0)), 2),
+             "non_ac_amount": round(float(config.get("non_ac_amount", 0)), 2),
+             "gst_percent": round(float(config.get("gst_percent", 0)), 2)}
+    app_settings.set_setting(db, app_settings.EXTRA_PERSON_KEY, json.dumps(clean), user=user, commit=True)
+    write_audit(db, user, "settings.extra_person_update", "app_settings", None,
+                before=before, after=clean, client="web", commit=True)
+    return app_settings.get_extra_person_config(db)
+
+
 # --- Front-desk policy (v5n) ----------------------------------------------------------------
 # How much KYC the desk must capture, and the go-live cutoff for automatic no-shows. GET is
 # reception-or-admin because the DESK enforces the same rule in its wizard (it also receives this

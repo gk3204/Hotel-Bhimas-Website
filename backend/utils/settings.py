@@ -815,6 +815,63 @@ def get_overstay_config(db) -> dict:
     }
 
 
+# ---------------------------------------------------------------------------
+# Extra person (v6l)
+# ---------------------------------------------------------------------------
+EXTRA_PERSON_KEY = "extra_person_charge"
+EXTRA_PERSON_CHARGE_TYPE = "extra_person"
+
+
+def get_extra_person_config(db) -> dict:
+    """The one-time charge per extra person, by room type AC / non-AC.
+
+    Both prices are BEFORE GST; `gst_percent` is added on top and the folio line carries that slab
+    (the folio stores every rupee GST-inclusive, see utils/gst.py). 0 / 0 = not configured, and the
+    desk says so instead of posting a free line."""
+    raw = get_setting(db, EXTRA_PERSON_KEY)
+    try:
+        d = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        d = {}
+    if not isinstance(d, dict):
+        d = {}
+
+    def _money(v):
+        try:
+            return round(max(0.0, float(v)), 2)
+        except (TypeError, ValueError):
+            return 0.0
+
+    gst = _money(d.get("gst_percent"))
+    return {"ac_amount": _money(d.get("ac_amount")),
+            "non_ac_amount": _money(d.get("non_ac_amount")),
+            "gst_percent": min(28.0, gst)}
+
+
+def validate_extra_person_config(d) -> list[str]:
+    errs = []
+    if not isinstance(d, dict):
+        return ["expected an object"]
+    for k, label in (("ac_amount", "AC price"), ("non_ac_amount", "Non-AC price")):
+        try:
+            if float(d.get(k, 0)) < 0:
+                errs.append(f"{label} must be >= 0")
+        except (TypeError, ValueError):
+            errs.append(f"{label} must be a number")
+    try:
+        if not (0 <= float(d.get("gst_percent", 0)) <= 28):
+            errs.append("GST % must be 0-28")
+    except (TypeError, ValueError):
+        errs.append("GST % must be a number")
+    return errs
+
+
+def extra_person_unit_price(cfg: dict, is_ac: bool) -> tuple[float, float]:
+    """(price before GST, price GST-inclusive) for one extra person in an AC / non-AC room."""
+    base = float(cfg["ac_amount"] if is_ac else cfg["non_ac_amount"])
+    return base, round(base * (1 + float(cfg["gst_percent"]) / 100.0), 2)
+
+
 def allowed_issue_hours_window(db):
     """Parse the configured 'HH-HH' window -> (start, end); allowed = start <= hour < end."""
     try:

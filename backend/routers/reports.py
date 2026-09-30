@@ -672,7 +672,7 @@ def staff_performance_data(db, dfrom, dto):
     # the window has to be the UTC span of those BUSINESS days - not a naive local midnight, which
     # moved every figure here by 5.5 h. Half-open, so `< end_dt` below stays correct.
     start_dt, end_dt = clock.business_day_bounds(dfrom, dto)
-    UPSELL_TYPES = ("food", "minibar", "laundry", "extra_bed")
+    UPSELL_TYPES = ("food", "minibar", "laundry", "extra_bed", "extra_person")
 
     rows = {}
 
@@ -1147,7 +1147,7 @@ def checkout_summary_data(db, day):
         room_rent = _sum(("room",))
         food = _sum(("food", "minibar"))
         laundry = _sum(("laundry",))
-        misc = _sum(("misc", "extra_bed"))
+        misc = _sum(("misc", "extra_bed", "extra_person"))   # v6l: extra person
         discount = _sum(("discount",))
         pairs = [(c.gst_percent, c.amount) for c in charges if c.type not in ("payment", "discount")]
         sp = _gst_split(pairs, discount=discount)   # v6d (F-11): tax on the discounted value

@@ -807,6 +807,44 @@ def _night_rate(db, booking: Booking, selection=None) -> float:
     return round(float(booking.total_amount or 0) / nights * (len(selection) / total_rooms), 2)
 
 
+def _selection_ac_flags(db, selection) -> list[bool]:
+    """v6l: for each charged room, whether its BOOKED room type is AC. The booked type, not the
+    physical room's: a room sold as its alternate type is priced as what the guest booked, the same
+    rule `_night_rate` follows."""
+    cache: dict[int, bool] = {}
+    out = []
+    for item, _rid in selection:
+        rt_id = item.room_type_id if item is not None else None
+        if rt_id not in cache:
+            rt = db.query(RoomType).filter(RoomType.room_type_id == rt_id).first() if rt_id else None
+            cache[rt_id] = bool(rt and rt.is_ac)
+        out.append(cache[rt_id])
+    return out
+
+
+def _fee_lines(db, rule, selection, applied: float, basis: str) -> list[tuple[float, float | None]]:
+    """(amount, gst_percent) per charged room for an early-check-in / late-checkout fee.
+
+    ac_split (v6l): each room at its own AC / non-AC price with the RULE's GST slab. If the desk
+    changed the total, it is spread in the same proportions, the last room taking the rounding.
+    Every other mode: an even split at each room's own room-type slab (v5n, unchanged)."""
+    n = max(1, len(selection))
+    if basis in ("ac_split", "override") and arrival_rules.is_ac_split(rule):
+        base = arrival_rules.ac_split_amounts(rule, _selection_ac_flags(db, selection))
+        total = round(sum(base), 2)
+        if total > 0 and abs(total - applied) > 0.005:
+            scaled = [round(b * applied / total, 2) for b in base[:-1]]
+            base = scaled + [round(applied - sum(scaled), 2)]
+        elif total <= 0:
+            per = round(applied / n, 2)
+            base = [per] * (n - 1) + [round(applied - per * (n - 1), 2)]
+        g = arrival_rules.fee_gst_percent(rule)
+        return [(a, g) for a in base]
+    per = round(applied / n, 2)
+    amounts = [per] * (n - 1) + [round(applied - per * (n - 1), 2)]
+    return [(a, _item_gst_percent(db, item)) for (item, _rid), a in zip(selection, amounts)]
+
+
 def _item_gst_percent(db, item) -> float | None:
     """The GST slab of one booking item's room type. Per item, not per booking: a stay mixing a
     Suite with a Double must tax each room's fee at its own room type's rate."""
@@ -881,7 +919,8 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
 
     if now < expected:
         rate = _night_rate(db, booking, selection)
-        ev = arrival_rules.evaluate_early(rules, src, expected, now, rate, comp, rooms=rooms_charged)
+        ev = arrival_rules.evaluate_early(rules, src, expected, now, rate, comp, rooms=rooms_charged,
+                                          ac_flags=_selection_ac_flags(db, selection))
         out.update(kind="early", deviation_minutes=ev["deviation_minutes"], rule=ev["rule"],
                    quoted=ev["charge"], basis=ev["basis"], full_night=ev["full_night"],
                    approval=ev["approval"], night_rate=rate)
@@ -931,6 +970,10 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
         elif out["full_night"]:
             what = "an extra night" if days_early <= 1 else f"{days_early} extra nights"
             out["text"] = f"Early by {dev} — charged as {what} (₹{quoted:,.0f})"
+        elif out["basis"] == "ac_split":
+            g = arrival_rules.fee_gst_percent(out["rule"]) or 0
+            out["text"] = (f"Early by {dev} — early check-in fee ₹{quoted:,.2f} "
+                           f"(AC / non-AC rate + {g:g}% GST)")
         else:
             out["text"] = f"Early by {dev} — early check-in fee ₹{quoted:,.0f}"
         out["text"] += f" · stay runs from {expected:%H:%M} → checkout {co:%d %b %H:%M}"
@@ -1194,7 +1237,11 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 if held:
                     raise HTTPException(status_code=409,
                                         detail=f"Room {room.room_number} is already held by booking {held.booking_id}")
-                _room_code(room)  # fail early on a non-numeric room number
+                # fail early on a number a card cannot encode. v6l: CARD rooms only - a key-lock
+                # room never gets a card, and 3-digit key rooms are allowed at creation (F-02), so
+                # this refused to check anyone into them.
+                if room.lock_type != "key":
+                    _room_code(room)
                 rooms_by_id[rid] = room
 
         # ---- v4b7: ONE owner code for the whole check-in, not one per room ----
@@ -1705,10 +1752,9 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 elif arrival["kind"] == "early" and fee_applied > 0:
                     # Split the applied fee across the charged rooms, the last room absorbing the
                     # rounding remainder — the same paisa-exact rule the folio uses everywhere else.
-                    n = max(1, len(selection))
-                    per = round(fee_applied / n, 2)
-                    amounts = [per] * (n - 1) + [round(fee_applied - per * (n - 1), 2)]
-                    for (item, _rid), room, amount in zip(selection, sel_rooms, amounts):
+                    # v6l: an ac_split rule prices each room at its own AC / non-AC rate and GST slab.
+                    lines = _fee_lines(db, arrival["rule"], selection, fee_applied, basis)
+                    for (item, _rid), room, (amount, line_gst) in zip(selection, sel_rooms, lines):
                         label = f" — Room {room.room_number}" if room else ""
                         # v6e: the fee goes on the ROOM's bill when the stay bills per room.
                         # It was already charged per room (v5n); this is where it lands.
@@ -1718,7 +1764,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                             description=(f"Early check-in fee{label} — "
                                          f"{_fmt_dev(arrival['deviation_minutes'])} before {exp:%H:%M}"),
                             qty=1, unit_price=amount, amount=amount,
-                            gst_percent=_item_gst_percent(db, item),
+                            gst_percent=(line_gst if line_gst is not None
+                                         else _item_gst_percent(db, item)),
                             posted_by=_resolve_user_id(db, user), charge_date=today,
                             posting_reason="early", room_id=room.room_id if room else None)
                         db.add(charge)
@@ -2221,7 +2268,7 @@ def _checkout_response(db: Session, booking: Booking, folio: Folio | None, overr
     }
 
 
-def _early_checkout_new_co(booking: Booking, now: datetime) -> date:
+def _early_checkout_new_co(db, booking: Booking, now: datetime) -> date:
     """The check-out DATE a guest leaving at `now` is billed through.
 
     A guest who lingers past TODAY's check-out deadline (check-out time + grace) has used
@@ -2230,16 +2277,28 @@ def _early_checkout_new_co(booking: Booking, now: datetime) -> date:
     The daily deadline mirrors `booking_checkout_moment`:
       OTA   -> today @ 12:00      (contracted noon-to-noon)
       fixed -> today @ CHECKOUT_HOUR
-      24h   -> today @ the actual check-in clock-time (10pm in -> 10pm out)."""
+      24h   -> today @ the STAY-CLOCK time (10pm in -> 10pm out)
+      a paid hourly extension ending today -> that moment.
+
+    v6l: two corrections, so the early-checkout cut and the overstay biller can never disagree.
+    * The 24h clock is `stay_started_at` (what the arrival rules set: the expected time for a
+      guest who came early within the free window), not `checked_in_at`. Expected 14:00, in at
+      12:30, leaving early at 14:15 on a later day: the stay runs to 14:00 + grace, but this used
+      12:30 + grace and charged tonight.
+    * The grace is the OVERSTAY grace from Settings (the courtesy window before the hotel bills),
+      not the key card's lock-clock buffer from the server environment."""
     today = now.date()
-    if ota_service.is_ota_source(booking.booking_source):
-        deadline_t = time(hour=12)
+    extended = getattr(booking, "checkout_extended_until", None)
+    if extended is not None and extended.date() == today:
+        deadline = extended
+    elif ota_service.is_ota_source(booking.booking_source):
+        deadline = datetime.combine(today, time(hour=12))
     elif _checkout_mode() == "fixed":
-        deadline_t = time(hour=_checkout_hour())
+        deadline = datetime.combine(today, time(hour=_checkout_hour()))
     else:
-        base = booking.checked_in_at or now
-        deadline_t = base.time().replace(microsecond=0)
-    deadline = datetime.combine(today, deadline_t) + timedelta(minutes=_grace_minutes())
+        base = booking.stay_started_at or booking.checked_in_at or now
+        deadline = datetime.combine(today, base.time().replace(microsecond=0))
+    deadline += timedelta(minutes=app_settings.get_overstay_config(db)["grace_minutes"])
     return today if now <= deadline else today + timedelta(days=1)
 
 
@@ -2274,7 +2333,7 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
         # Default (desk sends none): bill through the day the guest actually leaves. If they've
         # already passed today's check-out deadline (time + grace), tonight is kept — the cut
         # starts tomorrow — so a late-afternoon departure never wrongly refunds tonight's rent.
-        new_co = data.new_check_out or _early_checkout_new_co(booking, datetime.now())
+        new_co = data.new_check_out or _early_checkout_new_co(db, booking, datetime.now())
         if new_co <= booking.check_in:
             raise HTTPException(status_code=400,
                                 detail="Early check-out must leave at least one night stayed")
@@ -2419,7 +2478,8 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
         if held:
             raise HTTPException(status_code=409,
                                 detail=f"Room {new_room.room_number} is already held by booking {held.booking_id}")
-        _room_code(new_room)  # fail early on a non-numeric room number
+        if new_room.lock_type != "key":   # v6l: a key-lock room never gets a card
+            _room_code(new_room)  # fail early on a number a card cannot encode
         new_type = db.query(RoomType).filter(RoomType.room_type_id == new_room.room_type_id).first()
         if not new_type:
             raise HTTPException(status_code=404, detail="Target room's type not found")
@@ -2987,7 +3047,8 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
         total_rooms = sum(max(1, int(i.quantity or 1)) for i in booking.booking_items) or 1
         rate = _night_rate(db, booking, selection)
         ev = arrival_rules.evaluate_extension(rules, booking.booking_source or "direct", current,
-                                              data.hours, rate, comp, rooms=rooms_charged)
+                                              data.hours, rate, comp, rooms=rooms_charged,
+                                              ac_flags=_selection_ac_flags(db, selection))
         if ev["refused"]:
             raise HTTPException(status_code=400, detail=f"Cannot extend by {data.hours} h: {ev['refused']}")
         until = ev["until"]
@@ -3003,9 +3064,12 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
         balance_before = float(folio.balance or 0)
         rooms_note = ("" if rooms_charged >= total_rooms
                       else f" · {rooms_charged} of {total_rooms} rooms")
+        _gst_note = (f" (AC / non-AC rate + {arrival_rules.fee_gst_percent(ev['rule']) or 0:g}% GST)"
+                     if ev["basis"] == "ac_split" else "")
         text = (f"Late checkout +{data.hours} h (until {until:%H:%M %d %b}){rooms_note}"
                 + (" — complimentary" if ev["exempt"] else
-                   (" — free" if quoted == 0 else f" — ₹{quoted:,.0f}")))
+                   (" — free" if quoted == 0 else f" — ₹{quoted:,.2f}{_gst_note}"
+                    if _gst_note else f" — ₹{quoted:,.0f}")))
 
         if data.dry_run:
             db.rollback()
@@ -3038,10 +3102,10 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
         charge_id = None
         events = []
         if applied > 0 and not ev["exempt"]:
-            n = max(1, len(selection))
-            per = round(applied / n, 2)
-            amounts = [per] * (n - 1) + [round(applied - per * (n - 1), 2)]
-            for (item, _rid), room, amount in zip(selection, sel_rooms, amounts):
+            # v6l: an ac_split rule prices each room at its own AC / non-AC rate and GST slab.
+            lines = _fee_lines(db, ev["rule"], selection, applied,
+                               "override" if changed else ev["basis"])
+            for (item, _rid), room, (amount, line_gst) in zip(selection, sel_rooms, lines):
                 label = f" — Room {room.room_number}" if room else ""
                 # v6e: the late-checkout fee is that room's, so it goes on that room's bill.
                 _fee_folio = folio_resolver.folio_for_item(db, booking, item) or folio
@@ -3049,7 +3113,7 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
                     folio_id=_fee_folio.id, type="room",
                     description=f"Late checkout +{data.hours} h{label} (until {until:%H:%M %d %b})",
                     qty=1, unit_price=amount, amount=amount,
-                    gst_percent=_item_gst_percent(db, item),
+                    gst_percent=(line_gst if line_gst is not None else _item_gst_percent(db, item)),
                     posted_by=uid, charge_date=current.date(),
                     posting_reason="extend_hours", room_id=room.room_id if room else None)
                 db.add(charge)

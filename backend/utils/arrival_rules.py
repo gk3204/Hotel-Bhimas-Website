@@ -13,7 +13,9 @@ One JSON setting, `arrival_rules`:
 * `threshold_minutes` — deviation up to this is free / ignored (a guest 2 minutes early is not "early").
 * `full_night_after_minutes` — beyond this the deviation is treated as a whole night ("too early" ->
   an extra night is posted; "too late" extension -> refused or a full night, per `overflow`).
-* `charge` — {"mode": "free" | "fixed" (amount, Rs) | "percent" (percent of one night's GST-inclusive rate)}.
+* `charge` — {"mode": "free" | "fixed" (amount, Rs) | "percent" (percent of one night's GST-inclusive rate)
+  | "ac_split" (v6l: `ac_amount` for a room of an AC type, `non_ac_amount` otherwise, both BEFORE
+  GST; `gst_percent` is added on top and the folio line carries that slab, not the room's)}.
 * `approval` — "always" | "on_change" (only when the desk edits the computed amount / makes it free) |
   "never"; satisfied by an admin login or an owner OTP (action `arrival_fee` / `extend_hours`).
 * `exempt_comp` — a fully complimentary stay is never charged (the event is still recorded).
@@ -48,7 +50,7 @@ DEFAULT_RULES = {
     ],
 }
 
-CHARGE_MODES = ("free", "fixed", "percent")
+CHARGE_MODES = ("free", "fixed", "percent", "ac_split")
 APPROVALS = ("always", "on_change", "never")
 OVERFLOWS = ("refuse", "full_night")
 
@@ -97,7 +99,11 @@ def _norm_row(kind: str, r: dict) -> dict:
     mode = str(ch.get("mode", "free")).lower()
     row["charge"] = {"mode": mode if mode in CHARGE_MODES else "free",
                      "amount": round(max(0.0, _num(ch.get("amount"), 0.0)), 2),
-                     "percent": round(min(100.0, max(0.0, _num(ch.get("percent"), 0.0))), 2)}
+                     "percent": round(min(100.0, max(0.0, _num(ch.get("percent"), 0.0))), 2),
+                     # v6l: the AC / non-AC fixed price, before GST
+                     "ac_amount": round(max(0.0, _num(ch.get("ac_amount"), 0.0)), 2),
+                     "non_ac_amount": round(max(0.0, _num(ch.get("non_ac_amount"), 0.0)), 2),
+                     "gst_percent": round(min(28.0, max(0.0, _num(ch.get("gst_percent"), 0.0))), 2)}
     ap = str(r.get("approval", "on_change")).lower()
     row["approval"] = ap if ap in APPROVALS else "on_change"
     if kind == "hourly_extension":
@@ -131,7 +137,12 @@ def validate(rules: dict) -> list[str]:
                     errs.append(f"{kind} row {i}: full-night bound must be >= threshold")
                 ch = r.get("charge") or {}
                 if str(ch.get("mode", "free")).lower() not in CHARGE_MODES:
-                    errs.append(f"{kind} row {i}: charge mode must be free / fixed / percent")
+                    errs.append(f"{kind} row {i}: charge mode must be free / fixed / percent / ac_split")
+                if str(ch.get("mode")) == "ac_split":
+                    if _num(ch.get("ac_amount"), -1) < 0 or _num(ch.get("non_ac_amount"), -1) < 0:
+                        errs.append(f"{kind} row {i}: AC and non-AC amounts must be >= 0")
+                    if not (0 <= _num(ch.get("gst_percent"), -1) <= 28):
+                        errs.append(f"{kind} row {i}: GST % must be 0-28")
                 if str(ch.get("mode")) == "percent" and not (0 <= _num(ch.get("percent"), -1) <= 100):
                     errs.append(f"{kind} row {i}: percent must be 0-100")
                 if str(ch.get("mode")) == "fixed" and _num(ch.get("amount"), -1) < 0:
@@ -167,11 +178,38 @@ def charge_for(rule: dict, night_rate: float, units: float = 1.0) -> tuple[float
     """
     ch = rule.get("charge") or {}
     mode = ch.get("mode", "free")
+    if mode == "ac_split":
+        # `units` rooms with no AC information are priced as non-AC; callers pass ac_flags instead.
+        return round(sum(ac_split_amounts(rule, [False] * max(1, int(units)))), 2), "ac_split"
     if mode == "fixed":
         return round(float(ch.get("amount", 0)) * units, 2), "fixed"
     if mode == "percent":
         return round(float(night_rate) * float(ch.get("percent", 0)) / 100.0, 2), "percent"
     return 0.0, "free"
+
+
+def is_ac_split(rule: dict | None) -> bool:
+    return bool(rule) and (rule.get("charge") or {}).get("mode") == "ac_split"
+
+
+def ac_split_amounts(rule: dict, ac_flags) -> list[float]:
+    """v6l: one GST-INCLUSIVE amount per charged room, in `ac_flags` order (True = an AC room type).
+
+    The admin enters the price BEFORE GST; the folio stores every rupee GST-inclusive (utils/gst.py),
+    so the line is `price x (1 + gst%)` and carries `gst_percent` as its slab. ₹500 at 18% -> ₹590,
+    which the invoice splits back into ₹500 taxable + ₹90 GST."""
+    ch = rule.get("charge") or {}
+    g = float(ch.get("gst_percent") or 0)
+    out = []
+    for is_ac in ac_flags:
+        base = float(ch.get("ac_amount" if is_ac else "non_ac_amount") or 0)
+        out.append(round(base * (1 + g / 100.0), 2))
+    return out
+
+
+def fee_gst_percent(rule: dict | None) -> float | None:
+    """The GST slab a fee line carries: the rule's own for ac_split, else None (= the room's)."""
+    return float((rule.get("charge") or {}).get("gst_percent") or 0) if is_ac_split(rule) else None
 
 
 def needs_approval(rule: dict, quoted: float, applied: float | None) -> bool:
@@ -184,7 +222,7 @@ def needs_approval(rule: dict, quoted: float, applied: float | None) -> bool:
 
 
 def evaluate_early(rules: dict, source: str, expected_at: datetime, now: datetime,
-                   night_rate: float, comp: bool, rooms: int = 1) -> dict:
+                   night_rate: float, comp: bool, rooms: int = 1, ac_flags=None) -> dict:
     """Early check-in: how early, what it costs, whether an extra night is needed."""
     rule = rule_for(rules, "early_checkin", source)
     dev = int((expected_at - now).total_seconds() // 60) if expected_at else 0   # minutes early (+)
@@ -201,6 +239,10 @@ def evaluate_early(rules: dict, source: str, expected_at: datetime, now: datetim
         return out                                            # within tolerance: free
     if dev > rule["full_night_after_minutes"]:
         out.update(full_night=True, charge=round(float(night_rate), 2), basis="full_night")
+        return out
+    if is_ac_split(rule) and ac_flags is not None:
+        per = ac_split_amounts(rule, ac_flags)
+        out.update(charge=round(sum(per), 2), basis="ac_split", per_room=per)
         return out
     amt, basis = charge_for(rule, night_rate, units=max(1, int(rooms)))
     out.update(charge=amt, basis=basis)
@@ -220,7 +262,7 @@ def evaluate_late_arrival(rules: dict, source: str, expected_at: datetime, now: 
 
 
 def evaluate_extension(rules: dict, source: str, current_checkout: datetime, hours: int,
-                       night_rate: float, comp: bool, rooms: int = 1) -> dict:
+                       night_rate: float, comp: bool, rooms: int = 1, ac_flags=None) -> dict:
     """Hourly extension: new checkout moment, cost, or a refusal beyond the bound."""
     rule = rule_for(rules, "hourly_extension", source)
     hours = int(hours)
@@ -249,6 +291,10 @@ def evaluate_extension(rules: dict, source: str, current_checkout: datetime, hou
                           "extend the stay by a night instead")
         return out
     # One fee per extension, not per hour — but per ROOM staying late (v5n).
+    if is_ac_split(rule) and ac_flags is not None:
+        per = ac_split_amounts(rule, ac_flags)
+        out.update(charge=round(sum(per), 2), basis="ac_split", per_room=per)
+        return out
     amt, basis = charge_for(rule, night_rate, units=max(1, int(rooms)))
     out.update(charge=amt, basis=basis)
     return out
@@ -264,7 +310,7 @@ KIND_LABELS = {"early_checkin": "Early check-in", "late_arrival": "Late arrival"
                "hourly_extension": "Hourly extension"}
 BASIS_LABELS = {"free": "Free", "fixed": "Fixed fee", "percent": "% of night", "full_night": "Full night",
                 "exempt_comp": "Comp (exempt)", "override": "Desk override", "voided": "Voided",
-                "on_time": "On time", "late": "Late"}
+                "on_time": "On time", "late": "Late", "ac_split": "AC / non-AC fee"}
 
 
 def stay_events_report(db, date_from, date_to, kind: str | None = None) -> dict:

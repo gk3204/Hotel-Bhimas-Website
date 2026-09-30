@@ -2,9 +2,11 @@
 //
 // Three rule tables (early check-in / late arrival / hourly extension), each a list of rows
 // keyed by booking source. The first row whose sources include the booking's source wins;
-// the "*" row is the fallback and every table must have one. Charges are a flat ₹ amount or a
-// percent of the stay's one-night rate (GST inclusive); approval decides when an admin login or
-// owner OTP is needed. Saved as one JSON document via PUT /settings/arrival-rules.
+// the "*" row is the fallback and every table must have one. Charges are a flat ₹ amount, a
+// percent of the stay's one-night rate (GST inclusive), or (v6l) a fixed price for AC rooms and
+// one for non-AC rooms, BEFORE GST, with the GST % added on top — each room is charged at its own
+// room type's price. Approval decides when an admin login or owner OTP is needed. Saved as one
+// JSON document via PUT /settings/arrival-rules.
 import React, { useEffect, useState } from "react";
 import { FaPlus, FaSave, FaTimes, FaUndo } from "react-icons/fa";
 import { Card, GhostButton, PrimaryButton, inputCls } from "./BackofficeUI";
@@ -113,8 +115,28 @@ function RuleRow({ kind, row, sources, onChange, onRemove, isLast }) {
               <option value="free">Free</option>
               <option value="fixed">Fixed ₹</option>
               <option value="percent">% of one night</option>
+              <option value="ac_split">Fixed by AC / Non-AC (+ GST)</option>
             </select>
           </label>
+        )}
+        {kind.charge && mode === "ac_split" && (
+          <>
+            <label className="text-xs text-slate-400">
+              AC room ₹ (before GST)
+              <input type="number" min="0" step="1" className={inputCls} value={row.charge?.ac_amount ?? 0}
+                     onChange={(e) => updCharge({ ac_amount: num(e.target.value) })} />
+            </label>
+            <label className="text-xs text-slate-400">
+              Non-AC room ₹ (before GST)
+              <input type="number" min="0" step="1" className={inputCls} value={row.charge?.non_ac_amount ?? 0}
+                     onChange={(e) => updCharge({ non_ac_amount: num(e.target.value) })} />
+            </label>
+            <label className="text-xs text-slate-400">
+              GST % (added on top)
+              <input type="number" min="0" max="28" step="0.5" className={inputCls} value={row.charge?.gst_percent ?? 0}
+                     onChange={(e) => updCharge({ gst_percent: num(e.target.value) })} />
+            </label>
+          </>
         )}
         {kind.charge && mode === "fixed" && (
           <label className="text-xs text-slate-400">

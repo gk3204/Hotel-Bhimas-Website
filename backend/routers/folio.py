@@ -32,7 +32,7 @@ from database import SessionLocal
 from models import (Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, Invoice,
                     Payment, PaymentAllocation, RoomType)
 from schemas import (FolioBillToRequest, FolioChargeCreate, FolioDiscountRequest, FolioOpenRequest,
-                     FolioVoidRequest, InvoiceBuyerRequest)
+                     FolioVoidRequest, InvoiceBuyerRequest, ExtraPersonRequest)
 from services import company_service, folio_resolver, room_posting
 from utils import gst
 from utils import ordering
@@ -775,6 +775,104 @@ def post_charge(folio_id: int, data: FolioChargeCreate, db: Session = Depends(ge
         logger.error(f"post_charge failed: {e}", exc_info=True)
         db.rollback()
         raise HTTPException(status_code=500, detail="Failed to post charge")
+
+
+# --- Extra person (v6l) ---------------------------------------------------------------------------
+# A one-time charge per extra person, priced by the ROOM TYPE's AC flag from web Settings, before GST
+# (GST added on top; the line carries that slab). Server-priced so the desk cannot disagree with
+# Settings, and posted on the ROOM's bill when the stay bills per room.
+
+def _extra_person_rooms(db: Session, folio: Folio, booking: Booking) -> list[dict]:
+    """The rooms an extra person can be added to from this bill: its own room on a per-room bill,
+    else every room of the stay (booked type decides AC, as it does for every other fee)."""
+    cfg = app_settings.get_extra_person_config(db)
+    items = [i for i in (booking.booking_items or [])
+             if folio.booking_item_id is None or i.booking_item_id == folio.booking_item_id]
+    out = []
+    for i in sorted(items, key=lambda x: x.booking_item_id):
+        rt = db.query(RoomType).filter(RoomType.room_type_id == i.room_type_id).first()
+        is_ac = bool(rt and rt.is_ac)
+        base, incl = app_settings.extra_person_unit_price(cfg, is_ac)
+        out.append({"booking_item_id": i.booking_item_id,
+                    "room_id": i.room_id,
+                    "room_number": i.room.room_number if i.room is not None else None,
+                    "room_type": rt.name if rt else None,
+                    "is_ac": is_ac, "price": base, "price_incl_gst": incl})
+    return out
+
+
+@router.get("/{folio_id}/extra-person")
+def extra_person_options(folio_id: int, db: Session = Depends(get_db),
+                         user=Depends(require_reception_or_admin)):
+    folio = _get_folio(db, folio_id)
+    booking = db.query(Booking).options(
+        joinedload(Booking.booking_items).joinedload(BookingItem.room)).filter(
+        Booking.booking_id == folio.booking_id).first()
+    cfg = app_settings.get_extra_person_config(db)
+    return {**cfg,
+            "configured": (cfg["ac_amount"] > 0 or cfg["non_ac_amount"] > 0),
+            "rooms": _extra_person_rooms(db, folio, booking) if booking else []}
+
+
+@router.post("/{folio_id}/extra-person")
+def post_extra_person(folio_id: int, data: ExtraPersonRequest, db: Session = Depends(get_db),
+                      user=Depends(require_reception_or_admin)):
+    try:
+        folio = _get_folio(db, folio_id)
+        _ensure_chargeable(db, folio)
+        booking = db.query(Booking).options(
+            joinedload(Booking.booking_items).joinedload(BookingItem.room)).filter(
+            Booking.booking_id == folio.booking_id).first()
+        if not booking:
+            raise HTTPException(status_code=404, detail="Booking not found")
+        rooms = _extra_person_rooms(db, folio, booking)
+        pick = (next((r for r in rooms if r["booking_item_id"] == data.booking_item_id), None)
+                if data.booking_item_id else (rooms[0] if rooms else None))
+        if pick is None:
+            raise HTTPException(status_code=422, detail="That room is not on this bill")
+        if pick["price"] <= 0:
+            raise HTTPException(
+                status_code=422,
+                detail=("No extra-person price is set for "
+                        f"{'AC' if pick['is_ac'] else 'non-AC'} rooms — set it in web Settings → "
+                        "Extra person."))
+        cfg = app_settings.get_extra_person_config(db)
+        item = next(i for i in booking.booking_items if i.booking_item_id == pick["booking_item_id"])
+        target = folio_resolver.folio_for_item(db, booking, item) or folio
+        if target.id != folio.id:
+            _ensure_chargeable(db, target)
+        label = f" — Room {pick['room_number']}" if pick["room_number"] else ""
+        note = f" ({data.note.strip()})" if data.note and data.note.strip() else ""
+        amount = round(pick["price_incl_gst"] * data.persons, 2)
+        charge = FolioCharge(
+            folio_id=target.id,
+            type=app_settings.EXTRA_PERSON_CHARGE_TYPE,
+            description=(f"Extra person × {data.persons}{label} "
+                         f"({'AC' if pick['is_ac'] else 'Non-AC'} ₹{pick['price']:,.0f} + "
+                         f"{cfg['gst_percent']:g}% GST){note}")[:200],
+            qty=data.persons,
+            unit_price=pick["price_incl_gst"],
+            amount=amount,
+            gst_percent=cfg["gst_percent"],
+            posted_by=_resolve_user_id(db, user),
+            room_id=pick["room_id"],
+        )
+        db.add(charge)
+        _recompute(db, target)
+        db.commit()
+        write_audit(db, user, "folio.extra_person", "folio", target.id,
+                    after={"charge_id": charge.id, "persons": data.persons,
+                           "booking_item_id": pick["booking_item_id"], "is_ac": pick["is_ac"],
+                           "price": pick["price"], "gst_percent": cfg["gst_percent"],
+                           "amount": amount},
+                    client="desktop", commit=True)
+        return _folio_detail(db, folio)
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"post_extra_person failed: {e}", exc_info=True)
+        db.rollback()
+        raise HTTPException(status_code=500, detail="Failed to post the extra-person charge")
 
 
 @router.post("/{folio_id}/charges/{charge_id}/void")
