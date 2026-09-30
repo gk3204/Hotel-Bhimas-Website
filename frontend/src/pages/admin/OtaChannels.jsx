@@ -585,6 +585,8 @@ const DraftsTab = ({ showToast }) => {
     confirmed: "bg-green-500/20 text-green-300 border-green-500/30",
     dismissed: "bg-slate-500/20 text-slate-300 border-slate-500/30",
     flagged: "bg-red-500/20 text-red-300 border-red-500/30",
+    // b5: the OTA cancelled it before anyone confirmed it; it holds no room.
+    cancelled: "bg-rose-500/20 text-rose-300 border-rose-500/30 line-through",
   }[s] || "bg-slate-500/20 text-slate-300 border-slate-500/30");
 
   return (
@@ -645,7 +647,7 @@ const DraftsTab = ({ showToast }) => {
                     {d.linked_booking_id && <div className="text-xs text-slate-500 mt-1">#{d.linked_booking_id}</div>}
                     {/* v5r: why this one is still sitting here. Auto-confirm failures used to be
                         invisible outside the server log. */}
-                    {d.status === "pending" && d.last_error && (
+                    {(d.status === "pending" || d.status === "cancelled") && d.last_error && (
                       <div className="text-[11px] text-amber-300/90 mt-1 max-w-xs whitespace-normal text-left">{d.last_error}</div>
                     )}
                   </td>

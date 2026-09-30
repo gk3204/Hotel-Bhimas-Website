@@ -1113,6 +1113,37 @@ def _pick_room_type_id(db, hint):
     return best.room_type_id
 
 
+def draft_room_type_lines(db, d) -> list:
+    """b5: which PMS room types an unconfirmed draft would take, as [(room_type_id | None, rooms)].
+
+    The SAME mapping `auto_confirm_draft` uses (a mixed voucher's `room_lines`, else the cleaned
+    `room_type_hint` through `_pick_room_type_id`, else the voucher's own total through
+    `_room_type_by_price`), so a room held for a draft is the room its booking will take. None means
+    nothing identified the type; availability reports those as unmapped rather than guessing.
+    """
+    lines = None
+    if d.room_lines:
+        try:
+            lines = json.loads(d.room_lines)
+        except (TypeError, ValueError):
+            lines = None
+    if lines:
+        out = []
+        for ln in lines:
+            h = _clean_room_hint((ln or {}).get("hint"))
+            out.append((_pick_room_type_id(db, h) if h else None, int((ln or {}).get("rooms") or 1)))
+        return out
+    n = int(d.rooms or 1)
+    h = _clean_room_hint(d.room_type_hint)
+    rt = _pick_room_type_id(db, h) if h else None
+    if not rt:
+        try:
+            rt = _room_type_by_price(db, d, n, 5.0)
+        except Exception:  # pricing is best-effort here; an unpriceable draft is simply unmapped
+            rt = None
+    return [(rt, n)]
+
+
 def _quote_rooms_total(db, room_type_id, rooms: int, check_in, check_out, channel_code) -> float | None:
     """What the PMS would charge for `rooms` of this type over the stay, GST-inclusive — the figure to
     compare a voucher total against. Uses the same rate engine the booking itself will use, so the two
@@ -1165,6 +1196,18 @@ def auto_confirm_draft(db, d, user=None):
     if not _auto_confirm_enabled():
         return None
     if d.kind != "confirmation" or d.status != "pending" or d.linked_booking_id:
+        return None
+    # b5: the cancellation email can arrive BEFORE the confirmation (they are separate emails and
+    # the poller reads them in whatever order the mailbox gives). If the OTA has already cancelled
+    # this booking, do not book it; retire the draft as cancelled instead.
+    if d.ota_booking_id and db.query(OtaDraftBooking).filter(
+            OtaDraftBooking.channel_code == d.channel_code,
+            OtaDraftBooking.ota_booking_id == d.ota_booking_id,
+            OtaDraftBooking.kind == "cancellation").first():
+        d.status = "cancelled"
+        d.last_error = (f"Cancelled by {d.channel_code} before it was confirmed — no booking "
+                        f"was made; nothing to confirm.")
+        db.flush()
         return None
 
     # v5r: the owner chooses whether vouchers become bookings on their own, and whether that includes
@@ -1376,7 +1419,12 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
                         OtaDraftBooking.status.in_(("pending", "flagged")))
                 .all())
         for pd in pend:
-            pd.status = "dismissed"      # the OTA cancelled it; the desk must not confirm this draft
+            # b5: `cancelled`, not `dismissed`. The desk showed an OTA cancellation exactly like
+            # a manual dismiss, so nobody could tell "the guest cancelled" from "we binned it".
+            # A cancelled draft holds no room (utils/availability.py HOLDING_DRAFT_STATUSES).
+            pd.status = "cancelled"
+            pd.last_error = (f"Cancelled by {channel} on {clock.now_local():%d %b %Y} — no booking "
+                             f"was made; nothing to confirm.")
         b = (db.query(Booking)
              .filter(Booking.ota_booking_id == fields["ota_booking_id"],
                      Booking.status.in_(_LIVE_STATUSES))

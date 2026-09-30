@@ -151,7 +151,10 @@ def redate(booking_id: int, data: RedateRequest, db: Session = Depends(get_db),
         if b.status == "confirmed" and b.check_in < new_co and b.check_out > new_ci:
             booked -= qty
         inactive = int(availability.out_of_service_count(db, rt_id))
-        free = (rt.total_rooms if rt else 0) - booked - inactive
+        # b5: unconfirmed OTA drafts hold their rooms (not this booking's own draft).
+        holds, _u = availability.ota_draft_holds(db, new_ci, new_co,
+                                                  exclude_ota_booking_id=b.ota_booking_id)
+        free = (rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
         if free < qty:
             raise HTTPException(
                 status_code=409,

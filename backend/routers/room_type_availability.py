@@ -158,7 +158,12 @@ def check_room_availability(
     # Deactivated + maintenance/blocked rooms of this type can't be sold either.
     out_of_service = int(out_of_service_count(db, room_type_id))
 
-    available_rooms = room_type.total_rooms - booked_rooms - out_of_service
+    # b5: rooms held by unconfirmed OTA confirmation drafts (the same figure the desk subtracts).
+    from utils.availability import ota_draft_holds
+    holds, _unmapped = ota_draft_holds(db, check_in_date, check_out_date)
+    ota_held = int(holds.get(room_type_id, 0))
+
+    available_rooms = room_type.total_rooms - booked_rooms - out_of_service - ota_held
 
     return {
         "room_type_id": room_type_id,
@@ -166,6 +171,7 @@ def check_room_availability(
         "total_rooms": room_type.total_rooms,
         "booked_rooms": booked_rooms,
         "out_of_service": out_of_service,
+        "ota_held": ota_held,
         "available_rooms": max(0, int(available_rooms)),
         "is_blocked": False,
         "check_in": check_in_date,

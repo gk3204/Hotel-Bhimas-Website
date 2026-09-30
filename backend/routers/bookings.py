@@ -115,18 +115,16 @@ def create_booking(
             # inserted yet, the subquery matches nothing, and both are allowed through. The advisory
             # lock is on the room type itself, which always exists. Released on commit/rollback.
             availability.lock_room_type(db, room_item.room_type_id)
-            booked_rooms = db.query(func.sum(BookingItem.quantity)).filter(
-                BookingItem.room_type_id == room_item.room_type_id,
-                BookingItem.booking_id.in_(
-                    db.query(Booking.booking_id).filter(
-                        Booking.status.in_(["confirmed", "pending_payment", "payment_pending"]),
-                        Booking.check_in < data.check_out,
-                        Booking.check_out > data.check_in
-                    ).with_for_update()  # 🔒 Lock rows to prevent concurrent overbooking
-                )
-            ).scalar() or 0
-
-            available_rooms = room_type.total_rooms - booked_rooms
+            # b5: the SHARED capacity arithmetic. This path had its own query, which left out
+            # guests already CHECKED IN and rooms in maintenance/blocked, so the website could
+            # sell a room the desk knew was taken (utils/availability.py says why that matters).
+            # It also subtracts rooms held by unconfirmed OTA drafts, like the desk does.
+            booked_rooms = int(availability.booked_qty(db, room_item.room_type_id,
+                                                       data.check_in, data.check_out, lock=True))
+            out_of_service = int(availability.out_of_service_count(db, room_item.room_type_id))
+            holds, _unmapped = availability.ota_draft_holds(db, data.check_in, data.check_out)
+            ota_held = int(holds.get(room_item.room_type_id, 0))
+            available_rooms = room_type.total_rooms - booked_rooms - out_of_service - ota_held
             requested_rooms = room_item.quantity
 
             if requested_rooms > available_rooms:

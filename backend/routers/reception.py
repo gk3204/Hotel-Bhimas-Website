@@ -99,12 +99,15 @@ def desk_availability(
     if ci >= co:
         raise HTTPException(status_code=400, detail="Check-out must be after check-in")
 
+    # b5: rooms held by unconfirmed OTA confirmation drafts for these dates.
+    holds, unmapped = availability.ota_draft_holds(db, ci, co)
     rows = []
     for rt in db.query(RoomType).filter(RoomType.is_active == True).order_by(RoomType.room_type_id).all():  # noqa: E712
         blk = _blocked(db, rt.room_type_id, ci, co)
         booked = int(_booked_qty(db, rt.room_type_id, ci, co))
         inactive = int(_inactive_count(db, rt.room_type_id))
-        available = 0 if blk else max(0, rt.total_rooms - booked - inactive)
+        held = int(holds.get(rt.room_type_id, 0))
+        available = 0 if blk else max(0, rt.total_rooms - booked - inactive - held)
         rows.append({
             "room_type_id": rt.room_type_id,
             "room_type_name": rt.name,
@@ -116,11 +119,15 @@ def desk_availability(
             # maintenance/blocked status, hence the clearer alias alongside it (FE-7).
             "inactive": inactive,
             "out_of_service": inactive,
+            "ota_held": held,
             "available": available,
             "blocked": bool(blk),
             "block_reason": blk.reason if blk else None,
         })
-    return {"check_in": str(ci), "check_out": str(co), "room_types": rows}
+    return {"check_in": str(ci), "check_out": str(co), "room_types": rows,
+            # b5: rooms on unconfirmed OTA drafts whose room type could not be identified. They
+            # hold nothing (we will not guess), so the desk warns instead.
+            "ota_unmapped": int(unmapped)}
 
 
 # ---- Create a desk booking (walk-in or advance; single or group) ----
@@ -183,10 +190,19 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             availability.lock_room_type(db, item.room_type_id)
             booked = _booked_qty(db, item.room_type_id, data.check_in, data.check_out, lock=True)
             inactive = _inactive_count(db, item.room_type_id)
-            available = rt.total_rooms - int(booked) - int(inactive)
+            # b5: unconfirmed OTA drafts hold their rooms, except the draft(s) for THIS booking's
+            # own OTA id, so confirming a draft is never blocked by its own hold.
+            holds, _unmapped = availability.ota_draft_holds(
+                db, data.check_in, data.check_out,
+                exclude_ota_booking_id=(data.ota_booking_id or None))
+            held = int(holds.get(item.room_type_id, 0))
+            available = rt.total_rooms - int(booked) - int(inactive) - held
             if item.quantity > available:
+                why = (f" ({held} held by unconfirmed OTA booking(s) for these dates — confirm or "
+                       f"dismiss them on OTA Bookings)" if held else "")
                 raise HTTPException(status_code=409,
-                                    detail=f"Not enough {rt.name}s available. Available: {max(0, available)}, Requested: {item.quantity}")
+                                    detail=f"Not enough {rt.name}s available. Available: {max(0, available)}, "
+                                           f"Requested: {item.quantity}{why}")
             rt_map[item.room_type_id] = rt
 
         # Occupancy (per booking): total adults must fit the combined max-occupancy (= max adults)
@@ -963,7 +979,10 @@ def _assert_early_capacity(db, booking: Booking, date_from: date, date_to: date)
         name = rt.name if rt else f"type {rt_id}"
         booked = int(_booked_qty(db, rt_id, date_from, date_to, lock=True))
         inactive = int(_inactive_count(db, rt_id))
-        free = (rt.total_rooms if rt else 0) - booked - inactive
+        # b5: an unconfirmed OTA draft arriving tonight holds its room too.
+        holds, _u = availability.ota_draft_holds(db, date_from, date_to,
+                                                  exclude_ota_booking_id=booking.ota_booking_id)
+        free = (rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
         if free < qty:
             raise HTTPException(
                 status_code=409,
@@ -2422,7 +2441,9 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
                                     detail=f"{new_type.name} is blocked for the remaining dates")
             booked = int(_booked_qty(db, new_type.room_type_id, today, booking.check_out, lock=True))
             inactive = int(_inactive_count(db, new_type.room_type_id))
-            if new_type.total_rooms - booked - inactive <= 0:
+            holds, _u = availability.ota_draft_holds(db, today, booking.check_out,
+                                                      exclude_ota_booking_id=booking.ota_booking_id)
+            if new_type.total_rooms - booked - inactive - int(holds.get(new_type.room_type_id, 0)) <= 0:
                 raise HTTPException(status_code=409,
                                     detail=f"No {new_type.name} capacity left for the remaining dates "
                                            f"— a future reservation needs it")
@@ -2696,7 +2717,10 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
                                     detail=f"{name} is blocked for the extra nights")
             booked = int(availability.booked_qty(db, rt_id, old_co, new_co, lock=True))
             inactive = int(availability.out_of_service_count(db, rt_id))
-            free = (rt.total_rooms if rt else 0) - booked - inactive
+            # b5: extending into a night an unconfirmed OTA guest is booked for would strand them.
+            holds, _u = availability.ota_draft_holds(db, old_co, new_co,
+                                                      exclude_ota_booking_id=booking.ota_booking_id)
+            free = (rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
             if free < qty:
                 raise HTTPException(
                     status_code=409,

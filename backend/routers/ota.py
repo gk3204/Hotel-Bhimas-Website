@@ -185,6 +185,8 @@ def list_settlements(from_: str = Query(None, alias="from"), to: str = Query(Non
 def list_drafts(status: str = Query(None),
                 q: str = Query(None, max_length=80,
                                description="match on guest name, OTA booking id or phone"),
+                kind: str = Query(None, description="confirmation | cancellation"),
+                check_in_from: date = Query(None), check_in_to: date = Query(None),
                 db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
     """The drafts list, newest first, capped at 200.
 
@@ -203,9 +205,57 @@ def list_drafts(status: str = Query(None),
             OtaDraftBooking.ota_booking_id.ilike(like),
             OtaDraftBooking.phone.ilike(like),
         ))
-    rows = [ota_service.serialize_draft(d, db)
-            for d in query.order_by(OtaDraftBooking.created_at.desc()).limit(200).all()]
+    if kind:
+        query = query.filter(OtaDraftBooking.kind == kind)
+    if check_in_from:
+        query = query.filter(OtaDraftBooking.check_in >= check_in_from)
+    if check_in_to:
+        query = query.filter(OtaDraftBooking.check_in <= check_in_to)
+    drafts = query.order_by(OtaDraftBooking.created_at.desc()).limit(200).all()
+    rows = [ota_service.serialize_draft(d, db) for d in drafts]
+    _annotate_cancellations(db, drafts, rows)
     return {"rows": rows}
+
+
+def _annotate_cancellations(db, drafts, rows):
+    """b5: tie each confirmation draft to what the OTA later did with it, so the desk can show one
+    row per booking instead of a confirmation row and a separate cancellation row.
+
+    Fields added to every row:
+      cancelled_by_ota        the OTA cancelled this stay (a `cancelled` draft, or a cancellation
+                              draft exists for the same channel + OTA id)
+      cancellation_draft_id   that cancellation draft, if one exists
+      cancelled_on            when the cancellation arrived (the cancellation draft's created_at)
+      booking_auto_cancelled  the booking made from this draft was cancelled automatically
+      cancel_needs_desk       the cancellation is flagged: the guest had already checked in, so
+                              the desk must settle it with the OTA
+    Two queries whatever the page size.
+    """
+    pairs = {(d.channel_code, d.ota_booking_id) for d in drafts if d.ota_booking_id}
+    cancels = {}
+    if pairs:
+        ids = {p[1] for p in pairs}
+        for c in (db.query(OtaDraftBooking)
+                  .filter(OtaDraftBooking.kind == "cancellation",
+                          OtaDraftBooking.ota_booking_id.in_(ids)).all()):
+            cancels[(c.channel_code, c.ota_booking_id)] = c
+    booking_ids = {d.linked_booking_id for d in drafts if d.linked_booking_id}
+    booking_ids |= {c.linked_booking_id for c in cancels.values() if c.linked_booking_id}
+    bstatus = {}
+    if booking_ids:
+        bstatus = {bid: st for bid, st in
+                   db.query(Booking.booking_id, Booking.status).filter(Booking.booking_id.in_(booking_ids)).all()}
+    for d, row in zip(drafts, rows):
+        c = cancels.get((d.channel_code, d.ota_booking_id)) if d.kind == "confirmation" else None
+        by_ota = d.status == "cancelled" or c is not None or d.kind == "cancellation"
+        linked = d.linked_booking_id or (c.linked_booking_id if c else None)
+        row["cancelled_by_ota"] = bool(by_ota)
+        row["cancellation_draft_id"] = c.id if c else (d.id if d.kind == "cancellation" else None)
+        stamp = (c.created_at if c else (d.created_at if d.kind == "cancellation" else None))
+        row["cancelled_on"] = stamp.isoformat() if stamp else None
+        row["booking_auto_cancelled"] = bool(by_ota and linked and bstatus.get(linked) == "cancelled")
+        src = c if c else (d if d.kind == "cancellation" else None)
+        row["cancel_needs_desk"] = bool(src is not None and src.status == "flagged")
 
 
 def _confirm_lines(data) -> list:
@@ -234,6 +284,9 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
         raise HTTPException(status_code=409, detail="Draft already confirmed")
     if d.kind == "cancellation":
         raise HTTPException(status_code=400, detail="Cancellation drafts can't be confirmed as a booking; dismiss it.")
+    if d.status == "cancelled":
+        # b5: the OTA cancelled this stay; booking it would sell a room to a guest who is not coming.
+        raise HTTPException(status_code=409, detail="The OTA cancelled this booking — there is nothing to confirm.")
 
     guest_name = data.guest_name or d.guest_name
     check_in = data.check_in or d.check_in
