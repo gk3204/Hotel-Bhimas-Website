@@ -1037,11 +1037,19 @@ def _upsert_draft(db, fields: dict) -> tuple[OtaDraftBooking, bool]:
 # The bed-size words carry the strongest room-type signal; weighted ×3 when matching the OTA room
 # wording to a PMS room type. Mirrors the desk's OtaDraftsViewModel.PickRoomType.
 _BED_WORDS = frozenset({"single", "double", "triple", "twin", "quad", "family",
-                        "deluxe", "deeluxe", "suite", "standard"})
+                        "deluxe", "deeluxe", "suite", "standard", "four", "five"})
+
+# v6k.1: OTA wording spells the same thing several ways ("4 Bedded", "Triple Beded", "Bedroom").
+# Without this, "4 Bedded Non AC Family Room" matched nothing but "non ac" and went to a double.
+_WORD_ALIASES = {"1": "single", "2": "double", "3": "triple", "4": "four", "5": "five",
+                 "bedded": "bed", "beded": "bed", "beds": "bed", "bedroom": "bed", "bedrooms": "bed"}
+# Words that say nothing about WHICH type: never a reason to pick one.
+_FILLER_WORDS = frozenset({"room", "rooms", "with", "and", "a", "an", "the", "of", "for"})
 
 
 def _rt_words(s: str) -> list:
-    return [w for w in re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split() if w]
+    words = re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+    return [_WORD_ALIASES.get(w, w) for w in words if w and w not in _FILLER_WORDS]
 
 
 def _clean_room_hint(hint):
@@ -1098,19 +1106,49 @@ def _pick_room_type_id(db, hint):
     """Map the OTA room wording (e.g. "Double Non AC Room") to an active PMS room type id, weighting
     the bed-size word most. Returns None when there are no active room types. Server-side twin of the
     desk's bed-size picker, so an auto-confirmed booking lands on the same room type the desk would pick."""
-    types = db.query(RoomType).filter(RoomType.is_active == True).all()  # noqa: E712
+    types = (db.query(RoomType).filter(RoomType.is_active == True)  # noqa: E712
+             .order_by(RoomType.room_type_id).all())
+    if not types:
+        return None
+    return best_room_type_for_hint([(t.room_type_id, t.name) for t in types], hint)
+
+
+def _is_non_ac(words) -> bool:
+    return "non" in words or "nonac" in words
+
+
+def best_room_type_for_hint(types, hint):
+    """The pure scoring behind `_pick_room_type_id`: `types` is [(room_type_id, name)] in a fixed
+    order. Matching words score (the bed-size word 3, others 1).
+
+    v6k.1: "Double Deluxe Ac" used to score EXACTLY the same against "Double Deluxe Non-Ac" (the
+    type's extra "non" cost nothing) and the first type in an unordered query won, so on production
+    every AC double voucher was held against the NON-AC type. Now an AC / non-AC disagreement is
+    heavily penalised when the voucher says either, and a tie goes to the type with fewer words the
+    voucher did not say. The desk's PickRoomType is the same rule.
+
+    None when nothing but "AC"/"non AC" (or nothing at all) matched: wording like "Name" or "but
+    would like an AC room" names no type, and the caller then lets the voucher's price decide.
+    """
     if not types:
         return None
     if not hint or not hint.strip():
-        return types[0].room_type_id
+        return types[0][0]
     hint_words = _rt_words(hint)
-    best, best_score = types[0], -1
-    for t in types:
-        tw = set(_rt_words(t.name))
+    hint_set = set(hint_words)
+    says_ac = "ac" in hint_set or _is_non_ac(hint_set)
+    best_id, best_key = None, None
+    for rid, name in types:
+        tw = set(_rt_words(name))
+        if not any(w in tw for w in hint_set if w not in ("ac", "non", "nonac")):
+            continue
         score = sum(3 if w in _BED_WORDS else 1 for w in hint_words if w in tw)
-        if score > best_score:
-            best, best_score = t, score
-    return best.room_type_id
+        if says_ac and _is_non_ac(hint_set) != _is_non_ac(tw):
+            score -= 5
+        key = (score, -len(tw - hint_set))
+        if best_key is None or key > best_key:
+            best_id, best_key = rid, key
+    return best_id
 
 
 def draft_room_type_lines(db, d) -> list:

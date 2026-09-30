@@ -480,19 +480,35 @@ const DraftsTab = ({ showToast }) => {
 
   // Best-effort map the OTA's room wording (e.g. "Double Non AC Room") to a PMS room type,
   // weighting the bed-size word most (it's the strongest signal). Falls back to the first type.
+  // v6k.1: the same rule as the server's best_room_type_for_hint. "Double Deluxe Ac" used to tie
+  // with "Double Deluxe Non-Ac" and the first type won; now an AC / non-AC disagreement is
+  // penalised, a tie goes to the type with fewer unsaid words, and "4 Bedded" = "four bed".
   const pickRoomType = (hint) => {
     if (!hint || roomTypes.length === 0) return roomTypes[0]?.room_type_id || "";
-    const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
-    const strong = ["single", "double", "triple", "twin", "quad", "family", "deluxe", "deeluxe", "suite", "standard"];
-    const hintWords = norm(hint).split(" ").filter(Boolean);
-    let best = roomTypes[0], bestScore = -1;
-    for (const t of roomTypes) {
-      const tw = new Set(norm(t.name).split(" ").filter(Boolean));
+    const alias = { 1: "single", 2: "double", 3: "triple", 4: "four", 5: "five",
+      bedded: "bed", beded: "bed", beds: "bed", bedroom: "bed", bedrooms: "bed" };
+    const filler = new Set(["room", "rooms", "with", "and", "a", "an", "the", "of", "for"]);
+    const words = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ")
+      .filter((w) => w && !filler.has(w)).map((w) => alias[w] || w);
+    const strong = ["single", "double", "triple", "twin", "quad", "family", "deluxe", "deeluxe",
+      "suite", "standard", "four", "five"];
+    const nonAc = (set) => set.has("non") || set.has("nonac");
+    const hintWords = words(hint);
+    const hintSet = new Set(hintWords);
+    const saysAc = hintSet.has("ac") || nonAc(hintSet);
+    let best = null, bestScore = 0, bestExtra = 0;
+    for (const t of [...roomTypes].sort((a, b) => a.room_type_id - b.room_type_id)) {
+      const tw = new Set(words(t.name));
+      if (![...hintSet].some((w) => !["ac", "non", "nonac"].includes(w) && tw.has(w))) continue;
       let score = 0;
       for (const w of hintWords) if (tw.has(w)) score += strong.includes(w) ? 3 : 1;
-      if (score > bestScore) { bestScore = score; best = t; }
+      if (saysAc && nonAc(hintSet) !== nonAc(tw)) score -= 5;
+      const extra = -[...tw].filter((w) => !hintSet.has(w)).length;
+      if (!best || score > bestScore || (score === bestScore && extra > bestExtra)) {
+        best = t; bestScore = score; bestExtra = extra;
+      }
     }
-    return best.room_type_id;
+    return (best || roomTypes[0]).room_type_id;
   };
 
   const openConfirm = (d) => {
