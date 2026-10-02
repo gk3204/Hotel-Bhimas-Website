@@ -284,11 +284,50 @@ _DEFAULTS = {
 }
 
 
+_CACHE_KEY = "_app_settings_cache"
+
+
+class settings_cache:
+    """Opt-in, per-session memo for `get_setting`, for read-heavy endpoints.
+
+        with app_settings.settings_cache(db):
+            ...build the desk board...
+
+    v6l.1: the desk board read app_settings 87 times in ONE build (an is-OTA check, the overstay
+    config, the arrival rules... once per booking row). On production every query is a slow
+    round trip, so the board ran past the desk's 20-second timeout. Opt-in rather than global so
+    nothing else changes behaviour: code that writes an AppSetting row directly and reads it back
+    in the same session (a test does) never sees a stale value. `set_setting` keeps it current."""
+
+    def __init__(self, db):
+        self.db = db
+        self.owner = False
+
+    def __enter__(self):
+        info = getattr(self.db, "info", None)
+        if info is not None and _CACHE_KEY not in info:
+            info[_CACHE_KEY] = {}
+            self.owner = True
+        return self
+
+    def __exit__(self, *exc):
+        if self.owner:
+            self.db.info.pop(_CACHE_KEY, None)
+        return False
+
+
 def get_setting(db, key, default=None):
     """Raw text value for `key`, or `default` (falls back to a known seed default)."""
-    row = db.query(AppSetting).filter(AppSetting.key == key).first()
-    if row is not None and row.value is not None:
-        return row.value
+    cache = getattr(db, "info", {}).get(_CACHE_KEY)
+    if cache is not None and key in cache:
+        value = cache[key]
+    else:
+        row = db.query(AppSetting).filter(AppSetting.key == key).first()
+        value = row.value if row is not None else None
+        if cache is not None:
+            cache[key] = value
+    if value is not None:
+        return value
     if default is not None:
         return default
     return _DEFAULTS.get(key)
@@ -301,6 +340,9 @@ def set_setting(db, key, value, user=None, commit=False):
         row = AppSetting(key=key)
         db.add(row)
     row.value = None if value is None else str(value)
+    cache = getattr(db, "info", {}).get(_CACHE_KEY)
+    if cache is not None:
+        cache[key] = row.value
     row.updated_by = _resolve_user_id(db, user)
     row.updated_at = datetime.utcnow()
     if commit:

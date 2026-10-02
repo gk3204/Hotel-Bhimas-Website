@@ -36,7 +36,7 @@ from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
 from utils.rate_engine import quote_stay
 from utils.housekeeping import on_room_dirtied, set_hk_status, cleaning_card_state
-from models import HousekeepingStatus
+from models import HousekeepingStatus, Payment
 from routers.promotions import get_active_promotions, best_promotion_for_item
 from routers.payments import total_paid, total_paid_including_prepaid, prepaid_slice
 from routers.folio import (open_folio, _recompute, _get_invoice, _active_charges,
@@ -3569,18 +3569,57 @@ def reverse_overstay(booking_id: int, data: ReverseOverstayRequest,
 # ---- Desk board: arrivals + in-house + vacant rooms (also the desktop's offline cache) ----
 @router.get("/board")
 def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
+    """v6l.1: built with app_settings read ONCE per build and the per-booking money / card lookups
+    fetched in bulk. On production every query is a slow round trip, and the board used to issue
+    ~300 of them (87 settings reads, 68 folio + 68 payment lookups, 43 cleaning-card checks for 68
+    bookings), which ran past the desk's 20-second timeout: "The request was canceled due to the
+    configured HttpClient.Timeout of 20 seconds elapsing". Same output, a handful of queries."""
+    with app_settings.settings_cache(db):
+        return _build_desk_board(db)
+
+
+def _build_desk_board(db: Session):
     expire_pending_bookings(db)
     today = date.today()
+
+    # v6l.1: filled in bulk once the board's bookings are known (see _prefetch below). A booking
+    # the prefetch did not cover still answers through the original per-booking queries.
+    _paid_by_booking: dict = {}
+    _folios_by_booking: dict = {}
 
     def _paid_and_folio(booking_id):
         # v6e: a stay can have more than one bill. The board shows what the WHOLE stay still owes —
         # a desk asking "what does room 12 owe" is asking about a room, and gets that from the
         # folio screen. Reporting only the first folio's balance would have quietly understated
         # every per-room stay on the board the desk works from.
-        folios = folio_resolver.folios_for_booking(db, booking_id)
-        return (total_paid(db, booking_id),
+        if booking_id in _folios_by_booking:
+            folios = _folios_by_booking[booking_id]
+            paid = _paid_by_booking.get(booking_id, 0.0)
+        else:
+            folios = folio_resolver.folios_for_booking(db, booking_id)
+            paid = total_paid(db, booking_id)
+        return (paid,
                 folios[0].id if folios else None,
                 round(sum(float(f.balance or 0) for f in folios), 2) if folios else None)
+
+    def _prefetch(bookings):
+        """One query each for the payments, folios and active-card counts of every board row,
+        with exactly the filters total_paid / folios_for_booking / _active_cards use."""
+        ids = sorted({b.booking_id for b in bookings})
+        if not ids:
+            return
+        for bid, amt in (db.query(Payment.booking_id, func.coalesce(func.sum(Payment.amount), 0))
+                         .filter(Payment.booking_id.in_(ids), Payment.status == "paid")
+                         .group_by(Payment.booking_id).all()):
+            _paid_by_booking[bid] = float(amt or 0)
+        for bid in ids:
+            _folios_by_booking[bid] = []
+        for f in db.query(Folio).filter(Folio.booking_id.in_(ids)).order_by(Folio.id).all():
+            _folios_by_booking[f.booking_id].append(f)
+
+    _active_cards_by_room = dict(
+        db.query(CardIssuance.room_id, func.count(CardIssuance.id))
+        .filter(CardIssuance.status == "active").group_by(CardIssuance.room_id).all())
 
     # Corporate bill-to (prompt 18 slice 7) — cached per board build, not per row.
     _company_names = {c.id: c.name for c in db.query(Company).all()}
@@ -3689,7 +3728,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
                 "building": i.room.building,
                 "floor": i.room.floor,
                 "max_cards": i.room.max_cards,
-                "active_cards": _active_cards(db, i.room.room_id),
+                "active_cards": int(_active_cards_by_room.get(i.room.room_id, 0)),
                 "lock_type": i.room.lock_type,
                 "checked_in_at": i.checked_in_at.isoformat(),
                 "expected_check_out": booking_checkout_moment(b, item=i).isoformat(),
@@ -3709,16 +3748,16 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
         joinedload(Booking.guest),
         joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
     ).filter(Booking.status == "checked_in")
-    arrivals = [_arrival_row(b) for b in _arrival_q.filter(
+    _arr_b = _arrival_q.filter(
         Booking.check_in <= today, Booking.check_out >= today,
-    ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()]
-    arrivals += [_arrival_row(b) for b in _part_q.filter(
+    ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()
+    _part_b = [b for b in _part_q.filter(
         Booking.check_in <= today, Booking.check_out >= today,
     ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()
         if pending_items(b)]
-    upcoming = [_arrival_row(b) for b in _arrival_q.filter(
+    _up_b = _arrival_q.filter(
         Booking.check_in > today, Booking.check_in <= today + timedelta(days=7),
-    ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()]
+    ).order_by(Booking.check_in, Booking.check_in_time, Booking.booking_id).all()
 
     # F-16: the fourth bucket — a reservation nobody ever arrived for, whose window has now closed.
     # It was in NO bucket: `arrivals` requires check_out >= today, `upcoming` requires a future
@@ -3730,17 +3769,23 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
     # Capped and newest-first — this is a to-do list, not an archive. The row carries the same shape
     # as an arrival so the desk can reuse the card, and both actions it needs (mark no-show, re-date)
     # already exist in routers/booking_lifecycle.py.
-    missed = [_arrival_row(b) for b in _arrival_q.filter(
+    _missed_b = _arrival_q.filter(
         Booking.check_out < today,
-    ).order_by(Booking.check_out.desc(), Booking.booking_id.desc()).limit(50).all()]
+    ).order_by(Booking.check_out.desc(), Booking.booking_id.desc()).limit(50).all()
+    _in_b = db.query(Booking).options(
+        joinedload(Booking.guest),
+        joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
+    ).filter(Booking.status == "checked_in").order_by(Booking.check_out, Booking.booking_id).all()
+
+    _prefetch(_arr_b + _part_b + _up_b + _missed_b + _in_b)
+    arrivals = [_arrival_row(b) for b in _arr_b] + [_arrival_row(b) for b in _part_b]
+    upcoming = [_arrival_row(b) for b in _up_b]
+    missed = [_arrival_row(b) for b in _missed_b]
 
     # Read the overstay config ONCE for the whole board rather than per row.
     ov_cfg = app_settings.get_overstay_config(db)
     inhouse = []
-    for b in db.query(Booking).options(
-            joinedload(Booking.guest),
-            joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
-    ).filter(Booking.status == "checked_in").order_by(Booking.check_out, Booking.booking_id).all():
+    for b in _in_b:
         paid, folio_id, folio_balance = _paid_and_folio(b.booking_id)
         valid_from, valid_to = _card_window(b)
         rooms = []
@@ -3759,7 +3804,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
                         "building": room.building,
                         "floor": room.floor,
                         "max_cards": room.max_cards,
-                        "active_cards": _active_cards(db, room.room_id),
+                        "active_cards": int(_active_cards_by_room.get(room.room_id, 0)),
                         "lock_type": room.lock_type,   # key rooms skip card read/erase at checkout
                         "checked_in_at": i.checked_in_at.isoformat() if i.checked_in_at else None,
                         "expected_check_out": booking_checkout_moment(b, item=i).isoformat(),
@@ -3834,10 +3879,32 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
     # READ-ONLY housekeeping panel (cleaning/dirty rooms are in neither vacant_rooms
     # nor inhouse, so they need their own list). Reception cannot edit these.
     rooms_hk = []
-    for r, hk in db.query(Room, HousekeepingStatus).outerjoin(
+    _hk_rows = db.query(Room, HousekeepingStatus).outerjoin(
         HousekeepingStatus, Room.room_id == HousekeepingStatus.room_id,
     ).filter(Room.is_active == True).order_by(  # noqa: E712
-            *ordering.room_number_key(Room.room_number)).all():
+            *ordering.room_number_key(Room.room_number)).all()
+    # v6l.1: one query for every card-lock room's cleaning cards (was one per room).
+    _card_rooms = [r for r, _hk in _hk_rows if getattr(r, "lock_type", "card") != "key"]
+    _cleaning_by_room: dict = {}
+    if _card_rooms:
+        _oldest = min((r.status_changed_at or datetime.min) for r in _card_rooms)
+        for c in db.query(CardIssuance).filter(
+                CardIssuance.room_id.in_([r.room_id for r in _card_rooms]),
+                CardIssuance.card_type == "cleaning",
+                CardIssuance.issued_at >= _oldest).all():
+            _cleaning_by_room.setdefault(c.room_id, []).append(c)
+
+    def _cleaning_state(room):
+        if getattr(room, "lock_type", "card") == "key":
+            return "none"
+        since = room.status_changed_at or datetime.min
+        cards = [c for c in _cleaning_by_room.get(room.room_id, [])
+                 if c.issued_at is not None and c.issued_at >= since]
+        if not cards:
+            return "none"
+        return "active" if any(c.status == "active" for c in cards) else "used"
+
+    for r, hk in _hk_rows:
         rooms_hk.append({
             "room_id": r.room_id,
             "room_number": r.room_number,
@@ -3848,7 +3915,7 @@ def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_
             "lock_type": r.lock_type,
             "building": r.building,
             "floor": r.floor,
-            "cleaning_card": cleaning_card_state(db, r),
+            "cleaning_card": _cleaning_state(r),
         })
 
     # v5s, owner's explicit choice: the In-house board reads by ROOM NUMBER (Arrivals and
