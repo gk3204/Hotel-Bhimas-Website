@@ -78,8 +78,9 @@ export async function createSettlement(data) {
 }
 
 // --- Email draft inbox ---
-export async function getDrafts(status) {
-  const res = await fetch(`${BASE_URL}/ota/drafts${qs({ status })}`, { headers: authHeaders() });
+export async function getDrafts(status, q) {
+  // v6n.3: `q` searches the server (name / OTA id / phone), reaching drafts past the 200-row cap.
+  const res = await fetch(`${BASE_URL}/ota/drafts${qs({ status, q })}`, { headers: authHeaders() });
   return handle(res);
 }
 

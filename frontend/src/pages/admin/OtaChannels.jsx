@@ -465,6 +465,13 @@ const DraftsTab = ({ showToast }) => {
   const [polling, setPolling] = useState(false);
   const [importDate, setImportDate] = useState("");
   const [importing, setImporting] = useState(false);
+  // v6n.3: search + filter chips, the same as the desk's OTA Bookings screen. Typing filters the
+  // loaded rows at once; after a short pause the server is searched too (the list is capped at 200),
+  // and an older answer can never overwrite a newer one.
+  const [search, setSearch] = useState("");
+  const [serverRows, setServerRows] = useState(null);
+  const [bucket, setBucket] = useState("all");
+  const searchSeq = React.useRef(0);
 
   const load = async () => {
     setLoading(true);
@@ -477,6 +484,49 @@ const DraftsTab = ({ showToast }) => {
     setLoading(false);
   };
   useEffect(() => { load(); }, []); // eslint-disable-line
+
+  useEffect(() => {
+    const term = search.trim();
+    const seq = ++searchSeq.current;
+    if (term.length < 2) return undefined;   // render ignores old server rows below
+    const t = setTimeout(async () => {
+      try {
+        const data = await getDrafts(undefined, term);
+        if (seq === searchSeq.current) setServerRows(data.rows || []);
+      } catch { /* the local filter still works */ }
+    }, 400);
+    return () => clearTimeout(t);
+  }, [search]);
+
+  const bucketOf = (d) => {
+    if (d.status === "cancelled" || d.cancelled_by_ota) return "cancelled";
+    if (d.status === "confirmed") return "confirmed";
+    if (d.kind === "confirmation" && (d.status === "pending" || d.status === "flagged")) return "toconfirm";
+    return "other";
+  };
+  const matches = (d, needle) => {
+    if (!needle) return true;
+    const t = needle.toLowerCase();
+    const digits = t.replace(/\D/g, "");
+    const hay = [d.guest_name, d.ota_booking_id, d.email, d.channel_code, CHANNEL_LABEL[d.channel_code],
+      d.kind, d.status, d.check_in, d.check_out, d.room_type_hint]
+      .filter(Boolean).join(" ").toLowerCase();
+    if (hay.includes(t)) return true;
+    return digits.length >= 3 && String(d.phone || "").replace(/\D/g, "").includes(digits);
+  };
+  const term = search.trim();
+  const activeServer = term.length >= 2 ? serverRows : null;
+  const pool = (() => {
+    if (!activeServer) return drafts;
+    const byId = new Map(drafts.map((d) => [d.id, d]));
+    activeServer.forEach((d) => byId.set(d.id, d));    // server hits the 200 loaded rows did not have
+    return [...byId.values()].sort((a, b) => b.id - a.id);
+  })();
+  const serverIds = new Set((activeServer || []).map((r) => r.id));
+  const searched = pool.filter((d) => matches(d, term) || serverIds.has(d.id));
+  const counts = searched.reduce((acc, d) => { const b = bucketOf(d); acc[b] = (acc[b] || 0) + 1; return acc; },
+    { toconfirm: 0, confirmed: 0, cancelled: 0 });
+  const shown = bucket === "all" ? searched : searched.filter((d) => bucketOf(d) === bucket);
 
   // Best-effort map the OTA's room wording (e.g. "Double Non AC Room") to a PMS room type,
   // weighting the bed-size word most (it's the strongest signal). Falls back to the first type.
@@ -624,6 +674,25 @@ const DraftsTab = ({ showToast }) => {
           </button>
         </div>
       </div>
+      <div className="px-6 py-3 border-b border-slate-700 flex flex-wrap items-center gap-3">
+        <input value={search} onChange={(e) => setSearch(e.target.value)}
+          placeholder="Search guest, OTA booking id, phone, email, channel, date…"
+          className={inputCls + " py-2 flex-1 min-w-[240px]"} />
+        {search && (
+          <button onClick={() => setSearch("")} className="text-slate-400 hover:text-white text-sm underline">Clear</button>
+        )}
+        <div className="flex flex-wrap gap-1.5">
+          {[["all", "All", searched.length], ["toconfirm", "To confirm", counts.toconfirm],
+            ["confirmed", "Confirmed", counts.confirmed], ["cancelled", "Cancelled", counts.cancelled]].map(([k, label, n]) => (
+            <button key={k} onClick={() => setBucket(k)}
+              className={`px-3 py-1 rounded-full text-xs font-semibold border transition ${bucket === k
+                ? "bg-[#E5C07B]/20 border-[#E5C07B] text-[#E5C07B]"
+                : "border-slate-600 text-slate-400 hover:border-slate-400"}`}>
+              {label} <span className="opacity-70">{n}</span>
+            </button>
+          ))}
+        </div>
+      </div>
       {loading ? <Spinner /> : drafts.length === 0 ? (
         <Empty emoji="✉️" text="No drafts. Forwarded/parsed OTA emails will appear here for one-click confirm." />
       ) : (
@@ -643,7 +712,12 @@ const DraftsTab = ({ showToast }) => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-700">
-              {drafts.map((d) => (
+              {shown.length === 0 && (
+                <tr><td colSpan={9} className="px-5 py-8 text-center text-slate-500">
+                  No drafts match {term ? <>&ldquo;{term}&rdquo;</> : "this filter"}.
+                </td></tr>
+              )}
+              {shown.map((d) => (
                 <tr key={d.id} className="hover:bg-slate-700/30 transition">
                   <td className="px-5 py-3 text-slate-300">{CHANNEL_LABEL[d.channel_code] || d.channel_code}</td>
                   <td className="px-5 py-3 text-slate-400">{d.kind}</td>
