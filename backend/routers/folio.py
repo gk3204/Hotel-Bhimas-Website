@@ -309,6 +309,7 @@ def _room_subtotals(charges, rooms_by_item, rooms_by_id) -> list:
 def _folio_detail(db: Session, folio: Folio):
     """Shared response builder: folio + booking/guest summary + all lines + GST totals."""
     from routers.payments import prepaid_slice      # local: payments imports this module
+    from routers.reception import guest_display_phone as _guest_display_phone,         guest_display_email as _guest_display_email
     booking = db.query(Booking).options(
         joinedload(Booking.guest),
         joinedload(Booking.booking_items).joinedload(BookingItem.room),
@@ -339,8 +340,9 @@ def _folio_detail(db: Session, folio: Folio):
         "guest_balance": round(float(folio.balance or 0) - company_balance, 2),
         "opened_at": str(folio.opened_at) if folio.opened_at else None,
         "guest_name": booking.display_guest_name if booking else None,
-        "phone": booking.guest.phone if booking and booking.guest else None,
-        "email": booking.guest.email if booking and booking.guest else None,
+        # v6m: blank, never an OTA placeholder number or the channel's no-reply address.
+        "phone": _guest_display_phone(booking) if booking else None,
+        "email": _guest_display_email(booking) if booking else None,
         # v3 item 7: the room number is the first thing the desk looks for when a guest
         # queries their bill. List + pre-joined label (a stay can hold several rooms).
         # v6h: `room_number` is NOT set here - this bill belongs to ONE room and the key is set

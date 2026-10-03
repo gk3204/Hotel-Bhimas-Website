@@ -7,9 +7,10 @@ import {
   getBookingGuests,
   getGuestScanObjectUrl,
 } from "../../api/bookings";
-import { adminCancelBooking, markNoShow, reinstateBooking, redateBooking } from "../../api/admin";
+import { adminCancelBooking, markNoShow, reinstateBooking, redateBooking, editBookingDetails, editBookingRooms } from "../../api/admin";
+import { getRoomTypes } from "../../api/roomTypes";
 import { jwtDecode } from "jwt-decode";
-import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard, FaUserSlash, FaUndo, FaCalendarAlt } from "react-icons/fa";
+import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard, FaUserSlash, FaUndo, FaCalendarAlt, FaEdit, FaPlus, FaTimes } from "react-icons/fa";
 import { prettyCategory } from "../../utils/useCategoryList";
 
 // "2026-08-02T14:32:10" -> "14:32". Times are stored/served in Asia/Kolkata.
@@ -49,6 +50,10 @@ const Bookings = () => {
   const [adminCancelLoading, setAdminCancelLoading] = useState(false);
   // v5m: admin re-date dialog + no-show / reinstate actions
   const [redate, setRedate] = useState(null);   // { booking, check_in, check_out, check_in_time, reason }
+  // v6m: admin edit dialog - { booking, tab, details:{...}, lines:[...], reason, preview }
+  const [edit, setEdit] = useState(null);
+  const [editBusy, setEditBusy] = useState(false);
+  const [allRoomTypes, setAllRoomTypes] = useState([]);
   const [redateBusy, setRedateBusy] = useState(false);
 
   // Column -> the server's whitelisted sort key (routers/bookings.py SORTABLE). Kept as a map so a
@@ -194,6 +199,61 @@ const Bookings = () => {
       loadBookings();
     } catch (e) { showToast(e.message || "Could not reinstate", "error"); }
   };
+  const openEdit = async (b) => {
+    try {
+      const [detail, rts] = await Promise.all([getBookingById(b.booking_id), getRoomTypes()]);
+      setAllRoomTypes(Array.isArray(rts) ? rts : rts.data || []);
+      const stay = detail.stay || {};
+      setEdit({
+        booking: b, tab: "details", reason: "", preview: null,
+        details: {
+          guest_name: detail.guest?.name || b.guest_name || "", phone: detail.guest?.phone || "",
+          email: detail.guest?.email || "", adults: stay.adults ?? b.adults ?? 1, children: stay.children ?? 0,
+          check_in_time: "",
+        },
+        lines: (detail.rooms || []).map((r) => ({
+          booking_item_id: r.booking_item_id, room_type_id: r.room_type_id, quantity: r.quantity, rate: "",
+        })),
+      });
+    } catch (e) { showToast(e.message || "Could not load the booking", "error"); }
+  };
+  const setEditLine = (i, patch) => setEdit((e) => ({ ...e, preview: null,
+    lines: e.lines.map((l, j) => (j === i ? { ...l, ...patch } : l)) }));
+  const roomsPayload = (dry) => ({
+    reason: edit.reason.trim(), dry_run: dry,
+    lines: edit.lines.map((l) => ({
+      ...(l.booking_item_id ? { booking_item_id: l.booking_item_id } : {}),
+      room_type_id: Number(l.room_type_id), quantity: Number(l.quantity) || 1,
+      ...(l.rate !== "" && l.rate != null ? { price_per_night: Number(l.rate) } : {}),
+    })),
+  });
+  const submitEdit = async (dry = false) => {
+    if (!edit || edit.reason.trim().length < 3) { showToast("A reason is required (3+ characters).", "error"); return; }
+    setEditBusy(true);
+    try {
+      if (edit.tab === "details") {
+        const d = edit.details;
+        const payload = { reason: edit.reason.trim(), guest_name: d.guest_name, adults: Number(d.adults) || 1,
+          children: Number(d.children) || 0, email: d.email ?? "" };
+        if (d.phone) payload.phone = d.phone;
+        if (d.check_in_time) payload.check_in_time = d.check_in_time;
+        await editBookingDetails(edit.booking.booking_id, payload);
+        showToast(`Booking #${edit.booking.booking_id} updated.`);
+        setEdit(null);
+        loadBookings();
+      } else {
+        const res = await editBookingRooms(edit.booking.booking_id, roomsPayload(dry));
+        if (dry) { setEdit((e) => ({ ...e, preview: res })); }
+        else {
+          showToast(`Booking #${edit.booking.booking_id}: rooms updated — new total ₹${Number(res.after.grand_total).toFixed(2)}`);
+          setEdit(null);
+          loadBookings();
+        }
+      }
+    } catch (e) { showToast(e.message || "Save failed", "error"); }
+    finally { setEditBusy(false); }
+  };
+
   const openRedate = (b) => setRedate({ booking: b, check_in: b.check_in, check_out: b.check_out, check_in_time: "", reason: "" });
   const submitRedate = async () => {
     if (!redate || redate.reason.trim().length < 3) { showToast("A reason is required (3+ characters).", "error"); return; }
@@ -479,6 +539,16 @@ const Bookings = () => {
                                 <FaTrash size={12} /> Cancel
                               </button>
                             )}
+                            {/* v6m: admin edits the booking - guest details, rooms and price. */}
+                            {role === "admin" && b.status !== "cancelled" && b.status !== "checked_out" && (
+                              <button
+                                onClick={() => openEdit(b)}
+                                title="Edit guest details, rooms or price"
+                                className="bg-[#E5C07B]/80 hover:bg-[#E5C07B] px-3 py-2 rounded-lg text-slate-900 text-sm font-semibold transition inline-flex items-center gap-1"
+                              >
+                                <FaEdit size={12} /> Edit
+                              </button>
+                            )}
                             {/* v5m: arrival lifecycle - re-date (admin only, with an availability check),
                                 mark no-show, reinstate a no-show. */}
                             {role === "admin" && (b.status === "confirmed" || b.status === "no_show") && (
@@ -759,6 +829,106 @@ const Bookings = () => {
                 </button>
               </div>
 
+            </div>
+          </div>
+        )}
+
+        {/* v6m: admin edit dialog */}
+        {edit && (
+          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
+            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-7 rounded-2xl w-full max-w-2xl text-white border border-slate-700 shadow-2xl max-h-[92vh] overflow-y-auto">
+              <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">Edit booking #{edit.booking.booking_id}</h2>
+              <p className="text-sm text-slate-400 mb-4">
+                {edit.booking.guest_name} · {edit.booking.check_in} → {edit.booking.check_out} · {edit.booking.status}.
+                The desk shows the change on its next refresh.
+              </p>
+              <div className="flex gap-2 mb-5">
+                {[["details", "Guest details"], ["rooms", "Rooms & price"]].map(([k, l]) => (
+                  <button key={k} onClick={() => setEdit({ ...edit, tab: k, preview: null })}
+                    className={`px-4 py-1.5 rounded-full text-sm font-semibold border ${edit.tab === k
+                      ? "bg-[#E5C07B]/20 border-[#E5C07B] text-[#E5C07B]" : "border-slate-600 text-slate-400"}`}>{l}</button>
+                ))}
+              </div>
+
+              {edit.tab === "details" ? (
+                <div className="grid grid-cols-2 gap-3">
+                  {[["guest_name", "Guest name", "text"], ["phone", "Phone", "tel"], ["email", "Email", "email"],
+                    ["check_in_time", "Arrival time (optional)", "time"], ["adults", "Adults", "number"], ["children", "Children", "number"]].map(([k, l, t]) => (
+                    <div key={k}>
+                      <label className="block text-xs font-semibold text-slate-300 mb-1">{l}</label>
+                      <input type={t} value={edit.details[k] ?? ""} min={t === "number" ? 0 : undefined}
+                        onChange={(e) => setEdit({ ...edit, details: { ...edit.details, [k]: e.target.value } })}
+                        className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]" />
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div>
+                  {!(edit.booking.status === "confirmed" || edit.booking.status === "no_show") && (
+                    <p className="text-sm text-amber-300 mb-3">Rooms can only be changed before check-in. For a guest already in, use Room Shift at the desk.</p>
+                  )}
+                  <div className="space-y-2">
+                    {edit.lines.map((l, i) => (
+                      <div key={i} className="flex items-center gap-2">
+                        <select value={l.room_type_id} onChange={(e) => setEditLine(i, { room_type_id: e.target.value })}
+                          className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white">
+                          {allRoomTypes.map((rt) => <option key={rt.room_type_id} value={rt.room_type_id}>{rt.name}</option>)}
+                        </select>
+                        <input type="number" min="1" max="40" value={l.quantity} title="Rooms"
+                          onChange={(e) => setEditLine(i, { quantity: e.target.value })}
+                          className="w-20 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white" />
+                        <input type="number" min="0" step="1" value={l.rate} placeholder="rate card"
+                          title="Nightly rate per room, BEFORE GST. Blank = the rate card for this booking's channel and dates."
+                          onChange={(e) => setEditLine(i, { rate: e.target.value })}
+                          className="w-32 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white" />
+                        <button onClick={() => setEdit((e) => ({ ...e, preview: null, lines: e.lines.filter((_, j) => j !== i) }))}
+                          disabled={edit.lines.length <= 1} title="Remove this line"
+                          className="text-slate-400 hover:text-red-400 disabled:opacity-30 px-2"><FaTimes /></button>
+                      </div>
+                    ))}
+                  </div>
+                  <button onClick={() => setEdit((e) => ({ ...e, preview: null, lines: [...e.lines,
+                    { booking_item_id: null, room_type_id: allRoomTypes[0]?.room_type_id, quantity: 1, rate: "" }] }))}
+                    className="mt-3 text-sm text-[#E5C07B] hover:underline inline-flex items-center gap-1"><FaPlus size={11} /> Add a room line</button>
+                  <p className="text-xs text-slate-500 mt-2">
+                    Rate is per room per night, before GST; blank uses the rate card. Availability is checked for the booking's dates.
+                  </p>
+                  {edit.preview && (
+                    <div className="mt-4 p-3 rounded-lg bg-slate-900/60 border border-slate-700 text-sm">
+                      <div className="font-semibold text-slate-300 mb-1">Preview ({edit.preview.after.nights} night{edit.preview.after.nights === 1 ? "" : "s"})</div>
+                      {edit.preview.after.lines.map((l, i) => (
+                        <div key={i} className="flex justify-between text-slate-400">
+                          <span>{l.quantity} × {l.room_type} @ ₹{l.price_per_night} ({l.basis})</span><span>₹{l.total.toFixed(2)}</span>
+                        </div>
+                      ))}
+                      <div className="flex justify-between mt-2 text-white font-semibold">
+                        <span>New total (was ₹{edit.preview.before.grand_total.toFixed(2)})</span>
+                        <span>₹{edit.preview.after.grand_total.toFixed(2)}</span>
+                      </div>
+                    </div>
+                  )}
+                </div>
+              )}
+
+              <div className="mt-5">
+                <label className="block text-xs font-semibold text-slate-300 mb-1">Reason*</label>
+                <input type="text" value={edit.reason} placeholder="e.g. guest called to add a room"
+                  onChange={(e) => setEdit({ ...edit, reason: e.target.value })}
+                  className="w-full px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]" />
+              </div>
+              <div className="flex justify-end gap-3 mt-6">
+                <button onClick={() => setEdit(null)} disabled={editBusy}
+                  className="bg-slate-700 hover:bg-slate-600 px-5 py-2 rounded-lg text-white font-medium transition">Close</button>
+                {edit.tab === "rooms" && (
+                  <button onClick={() => submitEdit(true)} disabled={editBusy}
+                    className="bg-slate-600 hover:bg-slate-500 px-5 py-2 rounded-lg text-white font-medium transition disabled:opacity-50">Preview</button>
+                )}
+                <button onClick={() => submitEdit(false)} disabled={editBusy || (edit.tab === "rooms" && !edit.preview)}
+                  title={edit.tab === "rooms" && !edit.preview ? "Preview the new totals first" : ""}
+                  className="bg-[#E5C07B] hover:bg-[#D4AF37] px-5 py-2 rounded-lg text-slate-900 font-semibold transition disabled:opacity-50">
+                  {editBusy ? "Saving..." : "Save"}
+                </button>
+              </div>
             </div>
           </div>
         )}

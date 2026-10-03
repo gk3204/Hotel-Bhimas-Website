@@ -121,6 +121,10 @@ OTA_AUTO_CONFIRM_VARIANCE_KEY = "ota_auto_confirm_max_variance_percent"
 # check-in can complete, and the date from which an unarrived booking becomes an automatic no-show.
 CHECKIN_ID_SCOPE_KEY = "checkin_id_scope"              # lead | per_room | all_adults
 CHECKIN_SCANS_REQUIRED_KEY = "checkin_scans_required"
+# v6m: WHOSE ID must be scanned, separately from whose ID must be shown (owner: details for every
+# room, scans for the lead only). "all" = everyone who must show an ID (the old behaviour).
+CHECKIN_SCANS_SCOPE_KEY = "checkin_scans_scope"
+SCANS_SCOPES = ("all", "lead")
 # v6f: a travel agent arriving with thirty rooms cannot produce thirty IDs at the counter, so an
 # agent booking asks for the lead guest's only. On by default, because it is what the owner asked
 # for; turn it off and agent bookings obey `checkin_id_scope` like everything else.
@@ -438,6 +442,9 @@ def get_frontdesk_config(db) -> dict:
         "lost_card_fee_gst_percent": max(0.0, _as_float(
             get_setting(db, LOST_CARD_FEE_GST_KEY, "18"), 18.0)),
         "scans_required": _as_bool(get_setting(db, CHECKIN_SCANS_REQUIRED_KEY, "true")),
+        "scans_scope": ((get_setting(db, CHECKIN_SCANS_SCOPE_KEY, "all") or "all").strip().lower()
+                        if (get_setting(db, CHECKIN_SCANS_SCOPE_KEY, "all") or "all").strip().lower()
+                        in SCANS_SCOPES else "all"),
         "no_show_from_date": cutoff.isoformat() if cutoff else None,
         # v5r: numbers that may never be stored as a guest contact (the OTAs' own lines).
         "blocked_guest_phones": (get_setting(db, BLOCKED_PHONES_KEY, "") or "").strip(),

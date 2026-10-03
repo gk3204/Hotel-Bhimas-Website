@@ -55,6 +55,7 @@ OTP_ACTIONS = frozenset({
     "ota_unverified",          # v5: accept an OTA booking whose id has no confirming OTA email yet
     "arrival_fee",             # v5m: early check-in fee changed from the rule's quote (or rule says always)
     "extend_hours",            # v5m: hourly extension fee changed from the rule's quote (or rule says always)
+    "lost_card_waive",         # v6m: reception waives the lost-key-card fee (charged by default)
 })
 
 
@@ -275,7 +276,13 @@ def _sum_extend_hours(ctx):
             f"({_booking_label(ctx)})")
 
 
+def _sum_lost_card_waive(ctx):
+    return (f"Waive the {_inr(abs(ctx.get('amount') or 0))} lost key card fee for "
+            f"{_guest_label(ctx)} — {_rooms_label(ctx.get('rooms'))}")
+
+
 _SUMMARY_BUILDERS = {
+    "lost_card_waive": _sum_lost_card_waive,
     "refund": _sum_refund,
     "discount_below_floor": _sum_discount,
     "void": _sum_void,

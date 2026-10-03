@@ -131,6 +131,22 @@ def desk_availability(
 
 
 # ---- Create a desk booking (walk-in or advance; single or group) ----
+# v6m: a fixed nightly rate per room line (BEFORE GST, per room), for an OTA voucher confirmed at the
+# rate the guest was SOLD at rather than today's rate card. A ContextVar, not a request field, so only
+# server code can set it (create_desk_booking_at_rates); the desk's own booking form cannot.
+import contextvars as _cv
+_RATE_OVERRIDES: _cv.ContextVar = _cv.ContextVar("desk_rate_overrides", default=None)
+
+
+def create_desk_booking_at_rates(data, db, user, rates):
+    """create_desk_booking, with `rates[i]` (or None = rate card) pricing `data.rooms[i]`."""
+    token = _RATE_OVERRIDES.set(list(rates or []))
+    try:
+        return create_desk_booking(data, db=db, user=user)
+    finally:
+        _RATE_OVERRIDES.reset(token)
+
+
 @router.post("/bookings")
 def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
                         user=Depends(require_reception_or_admin)):
@@ -257,11 +273,17 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
         nights = (data.check_out - data.check_in).days
         total_base = total_gst = total_discount = total_room = 0.0
         items_data = []
-        for item in data.rooms:
+        _overrides = _RATE_OVERRIDES.get() or []
+        for _idx, item in enumerate(data.rooms):
             rt = rt_map[item.room_type_id]
-            base = quote_stay(db, rt, data.check_in, data.check_out,
-                              channel=channel, agent_id=data.agent_id,
-                              quantity=item.quantity)["base"]
+            _rate = _overrides[_idx] if _idx < len(_overrides) else None
+            if _rate is not None:
+                # v6m: the OTA voucher's own nightly rate (see _RATE_OVERRIDES).
+                base = round(float(_rate) * nights * int(item.quantity), 2)
+            else:
+                base = quote_stay(db, rt, data.check_in, data.check_out,
+                                  channel=channel, agent_id=data.agent_id,
+                                  quantity=item.quantity)["base"]
             disc = 0.0
             dbase = round(base - disc, 2)
             gst = round(dbase * float(rt.gst_percent) / 100, 2)
@@ -628,6 +650,26 @@ def recompute_stay(db, booking) -> None:
     from routers.folio import _recompute
     for _f in folio_resolver.folios_for_booking(db, booking.booking_id):
         _recompute(db, _f)
+
+
+def guest_display_phone(booking) -> str | None:
+    """The guest's phone as the desk should SHOW it (v6m): blank when it is the placeholder the PMS
+    stamped from the OTA reference (the channel masks the real number), so the desk asks the guest
+    instead of showing a made-up number."""
+    from utils.phone import is_ota_placeholder
+    g = getattr(booking, "guest", None)
+    phone = g.phone if g else None
+    if not phone or is_ota_placeholder(phone, getattr(booking, "ota_booking_id", None)):
+        return None
+    return phone
+
+
+def guest_display_email(booking) -> str | None:
+    """The guest's email as the desk should SHOW it (v6m): blank for the OTA's own address
+    (no-reply@go-mmt.com and friends), which 485 production drafts carried as the guest's."""
+    g = getattr(booking, "guest", None)
+    email = g.email if g else None
+    return None if (not email or ota_service.is_ota_contact_email(email)) else email
 
 
 def _effective_id_scope(db, booking: Booking, cfg: dict | None = None) -> str:
@@ -1554,7 +1596,18 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
 
         # The scanned document must be on file for whoever had to show an ID (the number alone is not
         # a record). Guests who were never required to identify themselves are not asked for scans.
-        if roster and scans_required:
+        if roster and scans_required and fd_cfg.get("scans_scope", "all") == "lead":
+            # v6m: the owner's "scans for the lead guest only" - every room still names and
+            # identifies its guest per the ID rule above, but only the lead's document is scanned.
+            _lead = next((g for g in identified if getattr(g, "is_primary", False)), None)
+            # A later car of the same booking: the lead's scans from the first arrival count.
+            if not (_lead_scans_on_file
+                    or (_lead is not None and _lead.id_scan_ref and _lead.id_scan_back_ref)):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Scan the front AND back of the LEAD guest's ID — go back to the Guest ID "
+                           "step and scan it there.")
+        elif roster and scans_required:
             with_scans = sum(1 for g in identified if g.id_scan_ref and g.id_scan_back_ref)
             # v6h: the second gate behind the same door. A lead whose ID is on file has his scans
             # in the archive too - re-scanning the same passport for the same stay is exactly the
@@ -3669,9 +3722,9 @@ def _build_desk_board(db: Session):
             "booking_id": b.booking_id,
             "guest_id": b.guest_id,
             "guest_name": b.display_guest_name or None,
-            "phone": b.guest.phone if b.guest else None,
+            "phone": guest_display_phone(b),   # v6m: blank for an OTA placeholder
             # Website bookings carry a real email; surfaced so the desk pre-fills it at check-in.
-            "email": b.guest.email if b.guest else None,
+            "email": guest_display_email(b),   # v6m: blank for the OTA's own address
             "check_in": str(b.check_in),
             "check_in_time": str(b.check_in_time) if b.check_in_time else None,
             "check_out": str(b.check_out),
@@ -3817,9 +3870,9 @@ def _build_desk_board(db: Session):
             "booking_id": b.booking_id,
             "guest_id": b.guest_id,
             "guest_name": b.display_guest_name or None,
-            "phone": b.guest.phone if b.guest else None,
+            "phone": guest_display_phone(b),   # v6m: blank for an OTA placeholder
             # Website bookings carry a real email; surfaced so the desk pre-fills it at check-in.
-            "email": b.guest.email if b.guest else None,
+            "email": guest_display_email(b),   # v6m: blank for the OTA's own address
             "check_in": str(b.check_in),
             "check_out": str(b.check_out),
             # v4b9 R13: the in-house row carried no source, so the desk could tell where an

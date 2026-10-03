@@ -1,5 +1,5 @@
 # backend/routers/payment.py
-from fastapi import APIRouter, Depends, HTTPException, Request, BackgroundTasks
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, BackgroundTasks
 from fastapi.responses import FileResponse, Response
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func
@@ -329,22 +329,20 @@ async def verify_payment(
         raise HTTPException(status_code=400, detail="Invalid signature")
 
     # ✅ Payment success
-    payment.payment_id_gateway = razorpay_payment_id
-    payment.status = "paid"
-    
-    # 🔒 Check booking hasn't expired before confirming
-    if booking.status == "cancelled":
-        logger.warning(f"Cannot confirm expired booking {booking.booking_id}")
-        payment.status = "failed"
-        db.commit()
-        raise HTTPException(
-            status_code=400,
-            detail="Booking has expired. Please create a new booking."
-        )
-    
-    booking.status = "confirmed"
-
+    # v6m: settled in ONE place (services/late_payments). A payment that arrives after the 15-minute
+    # hold expired used to be marked FAILED here - the guest's money, recorded as a failure (booking
+    # 181). Now the booking is reinstated if its rooms are still free, else the money is recorded
+    # and the owner is alerted to refund.
+    from services import late_payments
+    settled = late_payments.settle_website_payment(db, payment, booking, razorpay_payment_id,
+                                                   source="verify")
     db.commit()
+    if settled["outcome"] == "paid_no_room":
+        raise HTTPException(
+            status_code=409,
+            detail=("We have received your payment, but the booking had timed out and the room has "
+                    "since been taken. The hotel has been alerted and will contact you to rebook or "
+                    "refund the full amount."))
 
     logger.info(f"✅ Payment verified for booking {booking.booking_id}. Starting background confirmation task...")
 
@@ -397,6 +395,18 @@ async def verify_payment(
     logger.info(f"✨ Background task added to queue for booking {booking.booking_id}")
 
     return {"message": "Payment successful"}
+
+@router.post("/razorpay/reconcile", dependencies=[Depends(require_admin)])
+def razorpay_reconcile(days: int = Query(14, ge=1, le=120), dry_run: bool = Query(True),
+                       db: Session = Depends(get_db)):
+    """v6m: ask Razorpay about every recent website order we still think is unpaid.
+
+    Production had never received a single Razorpay webhook, so a guest who paid and did not make it
+    back to the site (booking 181) was recorded nowhere. Dry run lists what Razorpay says was paid;
+    dry_run=false settles each one (reinstating the booking when its rooms are still free)."""
+    from services import late_payments
+    return late_payments.reconcile_razorpay(db, days=days, dry_run=dry_run)
+
 
 @router.post("/mark-failed/{booking_id}")
 def mark_failed(booking_id: int, db: Session = Depends(get_db)):
@@ -577,16 +587,13 @@ async def payment_webhook(request: Request, db: Session = Depends(get_db)):
 
         # 🎯 Success events
         if event == "payment.authorized":
-            # Website checkout flow (unchanged): mark paid + confirm the booking.
-            if booking and booking.status == "cancelled":
-                logger.warning(f"❌ Cannot confirm expired booking {booking.booking_id}")
-                payment.status = "failed"
-                webhook_event_status = "booking_expired"
-            else:
-                _mark_payment_paid(db, payment, razorpay_payment_id)
-                if booking:
-                    booking.status = "confirmed"
-                webhook_event_status = "processed"
+            # Website checkout: v6m - settled through late_payments, so an expired hold is reinstated
+            # (or, with the rooms gone, recorded + flagged for refund) instead of marked failed.
+            from services import late_payments
+            res = late_payments.settle_website_payment(db, payment, booking, razorpay_payment_id,
+                                                       source="webhook")
+            webhook_event_status = ("processed" if res["outcome"] != "paid_no_room"
+                                    else "paid_no_room")
             db.commit()
 
         elif event in ("payment.captured", "qr_code.credited", "payment_link.paid"):
@@ -605,11 +612,12 @@ async def payment_webhook(request: Request, db: Session = Depends(get_db)):
                                    "booking_id": payment.booking_id, "amount": float(payment.amount or 0)},
                             client="system", commit=True)
             else:
-                # Website capture: payment.authorized already marked this paid + confirmed the
-                # booking. Settle idempotently; do NOT mislabel it as a desk collection in the audit.
-                logger.info(f"↩️ Website capture for payment {payment.payment_id} via {event} "
-                            f"(already settled by payment.authorized)")
-                _mark_payment_paid(db, payment, razorpay_payment_id)
+                # Website capture: usually already settled by payment.authorized. v6m: when it was
+                # NOT (the authorized event never came), settle it the same way.
+                logger.info(f"↩️ Website capture for payment {payment.payment_id} via {event}")
+                from services import late_payments
+                late_payments.settle_website_payment(db, payment, booking, razorpay_payment_id,
+                                                     source="webhook_capture")
                 webhook_event_status = "processed"
                 db.commit()
 

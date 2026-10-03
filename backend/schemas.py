@@ -245,6 +245,9 @@ class OtaDraftRoomLine(BaseModel):
     """One room type on a mixed-type OTA voucher (F-18): which PMS type, and how many rooms of it."""
     room_type_id: int = Field(..., gt=0)
     quantity: int = Field(1, ge=1, le=40)   # v6h: per-type cap, same reason as the line total
+    # v6m: the nightly rate for this line, BEFORE GST, per room. Omitted = the voucher's own rate
+    # (or the rate card when the voucher did not state one). Changing it needs an admin.
+    price_per_night: Optional[float] = Field(None, ge=0, le=1000000)
 
 
 class OtaDraftConfirm(BaseModel):
@@ -275,6 +278,8 @@ class OtaDraftConfirm(BaseModel):
     # that pair, one booking item per line. `room_type_id`/`quantity` above stay required so an old
     # client keeps working unchanged.
     room_lines: Optional[List[OtaDraftRoomLine]] = None
+    # v6m: the single-line form's nightly rate (same rules as OtaDraftRoomLine.price_per_night).
+    price_per_night: Optional[float] = Field(None, ge=0, le=1000000)
     accept_price_variance: bool = False
 
 
@@ -540,7 +545,11 @@ class CardIssueRequest(BaseModel):
     # v6f: the desk may waive the lost-card fee, but never silently - the reason is recorded on
     # the audit row, so "we let them off" is a decision somebody made rather than a gap.
     fee_waived: bool = False
-    fee_waive_reason: Optional[str] = Field(None, min_length=3, max_length=200)           # issuance to mark "lost" on lost_reissue
+    fee_waive_reason: Optional[str] = Field(None, min_length=3, max_length=200)
+    # v6m: the fee is charged by default; reception WAIVING it needs the owner's code (an admin
+    # login waives without one). Separate from owner_otp_* above, which approves the card itself.
+    waive_otp_id: Optional[int] = Field(None, gt=0)
+    waive_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)           # issuance to mark "lost" on lost_reissue
     owner_otp_id: Optional[int] = Field(None, gt=0)           # owner approval for extra/lost_reissue (ALT-1)
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     station_id: Optional[str] = Field(None, max_length=50)

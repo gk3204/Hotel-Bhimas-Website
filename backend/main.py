@@ -14,7 +14,7 @@ from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-da
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
-APP_BUILD = "v6l.1"
+APP_BUILD = "v6m"
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
@@ -239,6 +239,41 @@ def _start_ota_scheduler():
         return None
 
 
+def _start_razorpay_reconcile_scheduler():
+    """v6m: every 15 minutes, ask Razorpay about the last two days' website orders still marked
+    unpaid, and settle any that were paid. The backstop for a webhook that never arrives (production
+    had received none) and a guest who closed the tab after paying. Advisory-locked, so only one
+    worker runs it. Off with RAZORPAY_RECONCILE_ENABLED=false."""
+    if os.getenv("RAZORPAY_RECONCILE_ENABLED", "true").strip().lower() in ("false", "0", "no"):
+        return None
+    if not (os.getenv("RAZORPAY_KEY_ID") and os.getenv("RAZORPAY_KEY_SECRET")):
+        logger.info("Razorpay reconcile idle (keys not set)")
+        return None
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from database import SessionLocal
+        from services import late_payments
+
+        def _tick():
+            _db = SessionLocal()
+            try:
+                res = late_payments.reconcile_razorpay_locked(_db, days=2)
+                if res and res.get("found"):
+                    logger.warning(f"Razorpay reconcile settled {len(res['found'])} missed payment(s)")
+            finally:
+                _db.close()
+
+        sched = BackgroundScheduler(daemon=True, timezone="UTC")
+        sched.add_job(_tick, "interval", minutes=15, id="razorpay_reconcile",
+                      max_instances=1, coalesce=True)
+        sched.start()
+        logger.info("✅ Razorpay reconcile scheduler started (every 15 min)")
+        return sched
+    except Exception as e:
+        logger.error(f"❌ Razorpay reconcile scheduler failed to start: {e}")
+        return None
+
+
 def _start_review_scheduler():
     """In-process APScheduler for the Google-review pipeline (prompt 20). Every
     `review_poll_interval_minutes` it runs poll → generate → post. It still ticks when GBP is not
@@ -293,12 +328,13 @@ async def lifespan(app: FastAPI):
     ota_scheduler = _start_ota_scheduler()
     review_scheduler = _start_review_scheduler()
     overstay_scheduler = _start_overstay_scheduler()
+    razorpay_scheduler = _start_razorpay_reconcile_scheduler()
 
     yield  # app runs here
 
     # Optional shutdown logic
     for sched in (scheduler, night_audit_scheduler, ota_scheduler, review_scheduler,
-                  overstay_scheduler):
+                  overstay_scheduler, razorpay_scheduler):
         if sched is not None:
             try:
                 sched.shutdown(wait=False)

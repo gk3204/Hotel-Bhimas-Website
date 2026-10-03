@@ -146,6 +146,14 @@ export const SETTINGS_GROUPS = [
       { key: "scans_required", type: "toggle", label: "Require front + back ID scans",
         hint: "Applies only to the guests who must show an ID. Off = the ID number alone is accepted.",
         wide: true },
+      { key: "scans_scope", type: "select", label: "Whose ID must be SCANNED", wide: true,
+        hint: "Separate from whose ID must be shown. 'Lead guest only' keeps every room's guest " +
+              "details and ID number (per the rule above) but asks for front + back scans of the " +
+              "lead guest's document only. Has no effect while scans are switched off.",
+        options: [
+          { value: "all", label: "Everyone who must show an ID" },
+          { value: "lead", label: "Lead guest only" },
+        ] },
       { key: "lost_card_fee_amount", type: "number", min: 0, step: "1",
         label: "Lost key card fee (₹, GST inclusive)",
         hint: "Charged to the room's bill automatically when the desk reissues a lost card. " +

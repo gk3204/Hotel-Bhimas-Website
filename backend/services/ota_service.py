@@ -32,6 +32,7 @@ from models import Booking, OtaChannel, OtaSettlement, OtaDraftBooking, RoomType
 # logged as a harmless "skipped draft". Production ran for weeks with 143 pending drafts and not one OTA
 # booking created.
 from utils.phone import ota_placeholder as _ota_placeholder_phone
+from utils.phone import is_ota_placeholder as _is_ota_placeholder
 from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
@@ -625,6 +626,36 @@ def _first(patterns, text, flags=re.IGNORECASE):
     return None
 
 
+# v6m: addresses that are the CHANNEL's (or the hotel's own), never a guest's. Every Go-MMT voucher
+# ends "add no-reply@go-mmt.com to your contact list", so the first address in the body was that one:
+# 485 production drafts carried it as the guest's email, and the desk showed it on every OTA guest.
+OTA_EMAIL_DOMAINS = ("go-mmt.com", "makemytrip.com", "goibibo.com", "travelguru.com", "desiya.com",
+                     "yatra.com", "booking.com", "agoda.com", "cleartrip.com", "easemytrip.com",
+                     "expedia.com", "airbnb.com")
+
+
+def is_ota_contact_email(email_addr) -> bool:
+    """True for an OTA's / relay / no-reply address, which is not a guest contact."""
+    e = (email_addr or "").strip().lower()
+    if not e:
+        return False
+    if "noreply" in e or "no-reply" in e:
+        return True
+    if "@" not in e:
+        return True
+    domain = e.rsplit("@", 1)[1]
+    return any(domain == d or domain.endswith("." + d) for d in OTA_EMAIL_DOMAINS)
+
+
+def _guest_email_from(text: str):
+    """The first address in the voucher that is not the channel's (or the hotel's) own."""
+    for m in re.finditer(r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})", text or ""):
+        addr = m.group(1)
+        if not is_ota_contact_email(addr) and "hotelbhimas" not in addr.lower():
+            return addr
+    return None
+
+
 def _keep_parsed_phone(phone) -> bool:
     """Whether a phone scraped from a voucher body is worth storing (v5r). A helpline or relay number
     is not a guest contact; `is_valid_mobile` also rejects the zero-padded and repeated-digit shapes."""
@@ -653,7 +684,7 @@ def _parse_common(text: str) -> dict:
     phone = _first([
         r"(?:phone|mobile|contact\s*(?:number|no\.?))\s*[:\-]?\s*(\+?\d[\d \-]{7,14}\d)",
     ], text)
-    email_addr = _first([r"([A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,})"], text)
+    email_addr = _guest_email_from(text)   # v6m: never the channel's own address
     checkin = _first([
         r"check\s*in\s*from\s*[:\-]\s*([0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4})",   # Yatra "Amended" mails
         r"(?:check[\-\s]?in|arrival|from\s*date|check in date)\s*[:\-]?\s*([0-9A-Za-z ,\/\-]{6,20})",
@@ -775,24 +806,46 @@ def _room_breakup(text: str) -> list | None:
     and the existing `room_type_hint` still drives it. Lines keep the voucher's own order, and
     repeated types are merged with their count.
     """
-    heads = re.findall(r"^[ 	]*([A-Za-z][A-Za-z0-9 /()&'\-]{2,60}?)\s*\(\s*Room\s+(\d+)\s*\)\s*$",
-                       text, re.IGNORECASE | re.MULTILINE)
-    if not heads:
+    # v6m: the name may START WITH A DIGIT. "4 Bedded Non AC Family Room (Room 1)" failed the old
+    # `[A-Za-z]` first character, so on NH71176512741374 (2 x Four Bed + 1 x Double Non-AC) only the
+    # Double was seen, "one type" fell through to the single-type path, and all three rooms were
+    # booked as Four Bed Non-AC. Lines that are not room headings never end in "(Room n)".
+    heading = re.compile(r"^[ \t]*([A-Za-z0-9][A-Za-z0-9 /()&'\-]{2,60}?)\s*\(\s*Room\s+(\d+)\s*\)\s*$",
+                         re.IGNORECASE | re.MULTILINE)
+    matches = list(heading.finditer(text))
+    if not matches:
         return None
     lines, seen = [], {}
-    for raw_name, _idx in heads:
+    for k, m in enumerate(matches):
+        raw_name = m.group(1)
         name = _clean_room_hint(raw_name) or raw_name.strip()
         if not name:
             continue
+        # v6m: this room's own nightly charges ("Room Charges (R)" - the first figure after each
+        # date), up to the next room heading or the grand total.
+        end = matches[k + 1].start() if k + 1 < len(matches) else len(text)
+        block = text[m.end():end]
+        stop = re.search(r"grand\s+total", block, re.IGNORECASE)
+        if stop:
+            block = block[:stop.start()]
+        nightly = [float(x.replace(",", "")) for x in re.findall(
+            r"[A-Za-z]{3,9}\s+\d{1,2},\s*\d{4}\s+([0-9][0-9,]*(?:\.\d+)?)", block)]
         if name in seen:
             seen[name]["rooms"] += 1
+            seen[name]["_nights"].extend(nightly)
         else:
-            seen[name] = {"hint": name, "rooms": 1}
+            seen[name] = {"hint": name, "rooms": 1, "_nights": list(nightly)}
             lines.append(seen[name])
-    # One type is what the ordinary path already handles; only speak up when the voucher is mixed.
-    if len(lines) <= 1:
+    for ln in lines:
+        nights = ln.pop("_nights")
+        if nights:
+            # The voucher's own rate, BEFORE tax, per room per night (v6m): an OTA booking made
+            # months ago is billed at what the guest was sold, not at today's rate card.
+            ln["rate"] = round(sum(nights) / len(nights), 2)
+    # v6m: kept for ONE type too when the table priced it, so the voucher's rate reaches the confirm.
+    if len(lines) <= 1 and not any("rate" in ln for ln in lines):
         return None
-    return lines
+    return lines or None
 
 
 def _occupancy(text: str) -> dict:
@@ -979,7 +1032,9 @@ def parse_email_bytes(raw: bytes, force_channel=None) -> dict | None:
     fields["message_id"] = message_id
     fields["subject"] = subject
     # keep a bounded raw snippet for audit / manual fallback
-    fields["raw_source"] = (subject + "\n\n" + body)[:4000]
+    # v6m: was 4000. A Go-MMT voucher's room-wise table starts past 4000 characters, so the stored
+    # copy of NH71176512741374 stopped after "Room 1" and could never be re-read for the rest.
+    fields["raw_source"] = (subject + "\n\n" + body)[:20000]
     return fields
 
 
@@ -1269,6 +1324,17 @@ def auto_confirm_draft(db, d, user=None):
     if not (d.guest_name and d.check_in and d.check_out):
         return _hold_draft(db, d, "The email did not give a guest name and both dates — complete them here.")
 
+    # v6m: a voucher whose rooms are DIFFERENT types cannot be booked as one type x quantity, which is
+    # all this path can do. NH71176512741374 (2 x Four Bed + 1 x Double Non-AC) went in as three Four
+    # Beds. A person confirms it, one picker per line.
+    _vlines = _load_room_lines(d) or []
+    if len({(ln.get("hint") or "").lower() for ln in _vlines if isinstance(ln, dict)}) > 1:
+        return _hold_draft(db, d, "The voucher has rooms of different types — confirm it here, one "
+                                  "room type per line.")
+    # ...and a single-type voucher is booked at the rate it was SOLD at, when the voucher states it.
+    _voucher_rate = (_vlines[0].get("rate") if len(_vlines) == 1 and isinstance(_vlines[0], dict)
+                     else None)
+
     # Already booked under this OTA id? Link + confirm, don't create a second one.
     if d.ota_booking_id:
         existing = (db.query(Booking)
@@ -1305,8 +1371,13 @@ def auto_confirm_draft(db, d, user=None):
     variance_note = None
     if d.amount and cfg["max_variance_percent"] > 0:
         try:
-            quoted = _quote_rooms_total(db, room_type_id, rooms_wanted, d.check_in, d.check_out,
-                                        d.channel_code)
+            if _voucher_rate is not None:
+                _rt = db.query(RoomType).filter(RoomType.room_type_id == room_type_id).first()
+                quoted = round(float(_voucher_rate) * max(1, (d.check_out - d.check_in).days)
+                               * rooms_wanted * (1 + float((_rt.gst_percent if _rt else 0) or 0) / 100), 2)
+            else:
+                quoted = _quote_rooms_total(db, room_type_id, rooms_wanted, d.check_in, d.check_out,
+                                            d.channel_code)
             voucher = float(d.amount)
             if quoted and voucher > 0:
                 gap = abs(quoted - voucher) / voucher * 100
@@ -1338,7 +1409,7 @@ def auto_confirm_draft(db, d, user=None):
 
     try:
         from schemas import DeskBookingCreate, BookingItemCreate
-        from routers.reception import create_desk_booking
+        from routers.reception import create_desk_booking_at_rates
         commission_pct = float(d.commission_percent) if d.commission_percent is not None else None
         booking_req = DeskBookingCreate(
             rooms=[BookingItemCreate(room_type_id=room_type_id, quantity=rooms_wanted)],
@@ -1358,7 +1429,7 @@ def auto_confirm_draft(db, d, user=None):
         )
         # System actor (user=None): create_desk_booking's audit + write_audit already tolerate it,
         # exactly like the overstay auto-biller.
-        result = create_desk_booking(booking_req, db=db, user=None)
+        result = create_desk_booking_at_rates(booking_req, db=db, user=None, rates=[_voucher_rate])
     except Exception as e:
         # No availability, pricing gap, mapping miss — leave it PENDING for the desk. Never abort the poll.
         try:
@@ -1669,8 +1740,10 @@ def serialize_draft(d: OtaDraftBooking, db=None) -> dict:
         "kind": d.kind,
         "status": d.status,
         "guest_name": d.guest_name,
-        "phone": d.phone,
-        "email": d.email,
+        # v6m: blank, never the channel's own contact (drafts parsed before the parser fix still
+        # hold no-reply@go-mmt.com) - the desk must ask the guest, not show them MakeMyTrip's.
+        "phone": None if (not d.phone or _is_ota_placeholder(d.phone, d.ota_booking_id)) else d.phone,
+        "email": None if is_ota_contact_email(d.email) else d.email,
         "check_in": str(d.check_in) if d.check_in else None,
         "check_out": str(d.check_out) if d.check_out else None,
         "room_type_hint": d.room_type_hint,

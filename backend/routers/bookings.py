@@ -520,6 +520,7 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
     rooms = []
     for item in booking.booking_items:
         rooms.append({
+            "booking_item_id": item.booking_item_id,   # v6m: the admin edit dialog edits by line
             "room_type_id": item.room_type.room_type_id,
             "room_type_name": item.room_type.name,
             "price_per_night": float(item.room_type.price_per_night),
@@ -548,6 +549,8 @@ def read_booking(booking_id: int, db: Session = Depends(get_db)):
             "checked_in_at": booking.checked_in_at.isoformat() if booking.checked_in_at else None,
             "checked_out_at": booking.checked_out_at.isoformat() if booking.checked_out_at else None,
             "nights": (booking.check_out - booking.check_in).days,
+            "adults": int(booking.adults or 1),      # v6m: the edit dialog starts from these
+            "children": int(booking.children or 0),
         },
 
         "charges": {

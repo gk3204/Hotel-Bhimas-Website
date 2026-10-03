@@ -115,6 +115,15 @@ export async function reinstateBooking(bookingId, reason = null) {
   return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/reinstate`, {
     method: "POST", headers: authHeader(), body: JSON.stringify({ reason }) }), "Could not reinstate");
 }
+// v6m — admin edits a booking: guest details, and rooms / price (before check-in)
+export async function editBookingDetails(bookingId, payload) {
+  return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/details`, {
+    method: "PATCH", headers: authHeader(), body: JSON.stringify(payload) }), "Could not save the details");
+}
+export async function editBookingRooms(bookingId, payload) {
+  return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/rooms`, {
+    method: "PUT", headers: authHeader(), body: JSON.stringify(payload) }), "Could not change the rooms");
+}
 export async function redateBooking(bookingId, payload) {
   return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/redate`, {
     method: "POST", headers: authHeader(), body: JSON.stringify(payload) }), "Could not re-date");

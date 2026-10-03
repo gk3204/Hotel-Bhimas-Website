@@ -175,6 +175,7 @@ def set_frontdesk_config(id_scope: str | None = Body(None),
                          lost_card_fee_amount: float | None = Body(None),
                          lost_card_fee_gst_percent: float | None = Body(None),
                          scans_required: bool | None = Body(None),
+                         scans_scope: str | None = Body(None),
                          no_show_from_date: str | None = Body(None),
                          blocked_guest_phones: str | None = Body(None),
                          db: Session = Depends(get_db),
@@ -204,6 +205,12 @@ def set_frontdesk_config(id_scope: str | None = Body(None),
     if scans_required is not None:
         app_settings.set_setting(db, app_settings.CHECKIN_SCANS_REQUIRED_KEY,
                                  "true" if scans_required else "false", user=user)
+    if scans_scope is not None:
+        sc = (scans_scope or "").strip().lower()
+        if sc not in app_settings.SCANS_SCOPES:
+            raise HTTPException(status_code=422,
+                                detail="scans_scope must be one of: " + ", ".join(app_settings.SCANS_SCOPES))
+        app_settings.set_setting(db, app_settings.CHECKIN_SCANS_SCOPE_KEY, sc, user=user)
     if no_show_from_date is not None:
         raw = (no_show_from_date or "").strip()
         if raw:

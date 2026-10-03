@@ -4,6 +4,7 @@ import { FaSync } from "react-icons/fa";
 import { usePaged, Paginator } from "../../components/admin/Paginator";
 import { PageShell, SortTh } from "../../components/admin/BackofficeUI";
 import { useTableSort } from "../../utils/tableSort";
+import RazorpayReconcilePanel from "../../components/admin/RazorpayReconcilePanel";
 
 const filterInputCls =
   "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
@@ -91,6 +92,7 @@ const Payments = () => {
   return (
     <PageShell icon="💰" title="Payments Management" subtitle="Track all payment transactions">
 
+        <RazorpayReconcilePanel onDone={fetchPayments} />
         {/* Stats Cards */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
           <div className="bg-gradient-to-br from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl">

@@ -62,7 +62,8 @@ def _active_count(db: Session, room_id: int) -> int:
 
 
 def _issue_response(db: Session, card: CardIssuance, duplicate=False, flagged=False,
-                    fraud_alert_id=None, reasons=None, fee_amount=0.0, fee_skipped=None):
+                    fraud_alert_id=None, reasons=None, fee_amount=0.0, fee_skipped=None,
+                    fee_note=None):
     room = db.query(Room).filter(Room.room_id == card.room_id).first() if card.room_id else None
     return {
         "card_id": card.id,
@@ -82,6 +83,9 @@ def _issue_response(db: Session, card: CardIssuance, duplicate=False, flagged=Fa
         "fee_amount": fee_amount,
         "fee_charge_id": card.fee_charge_id,
         "fee_skipped": fee_skipped,
+        # v6m: said out loud when the desk asked to waive the fee but had no valid owner code,
+        # so the fee was charged anyway (the card was already cut, so it could not be refused).
+        "fee_note": fee_note,
     }
 
 
@@ -190,7 +194,7 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
         # Idempotent on the LOST CARD, not on the request: /cards/issue legitimately runs twice for
         # one reissue (Card Management pre-checks with encoded=false, and a valid pre-check records
         # a row), and `client_ref` only dedupes an outbox re-flush. One fee per lost card, ever.
-        fee_amount, fee_skipped = 0.0, None
+        fee_amount, fee_skipped, fee_note = 0.0, None, None
         if data.issue_type == "lost_reissue" and old_card is not None:
             card.replaces_card_id = old_card.id
             cfg = app_settings.get_frontdesk_config(db)
@@ -199,7 +203,24 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
                 CardIssuance.replaces_card_id == old_card.id,
                 CardIssuance.fee_charge_id.isnot(None),
                 CardIssuance.id != card.id).first()
-            if data.fee_waived:
+            waive = bool(data.fee_waived)
+            if waive and price > 0 and (user or {}).get("role") != "admin":
+                # v6m (owner): the fee is charged unless an admin agrees to waive it. Reception
+                # needs the owner's code. A missing / wrong code on the pre-check (nothing cut yet)
+                # refuses, so the desk asks for it; on an already-encoded card the card is still
+                # recorded and the fee is CHARGED - an unapproved waiver is not a waiver.
+                try:
+                    consume_otp(db, data.waive_otp_id, data.waive_otp_code, "lost_card_waive", user)
+                except HTTPException:
+                    if not data.encoded:
+                        raise HTTPException(
+                            status_code=403,
+                            detail="owner_otp_required: waiving the lost card fee needs the owner's "
+                                   "approval code (or an admin login).")
+                    waive = False
+                    fee_note = ("The waiver was not approved (owner code missing, wrong or already "
+                                "used), so the lost card fee was charged.")
+            if waive:
                 if not (data.fee_waive_reason or "").strip():
                     raise HTTPException(status_code=400,
                                         detail="Waiving the lost-card fee needs a reason")
@@ -293,7 +314,7 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
 
         return _issue_response(db, card, flagged=bool(reasons),
                                fraud_alert_id=fraud_alert_id, reasons=reasons,
-                               fee_amount=fee_amount, fee_skipped=fee_skipped)
+                               fee_amount=fee_amount, fee_skipped=fee_skipped, fee_note=fee_note)
     except HTTPException:
         db.rollback()
         raise

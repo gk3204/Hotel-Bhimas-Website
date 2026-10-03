@@ -571,8 +571,12 @@ const DraftsTab = ({ showToast }) => {
         hint: l.hint,
         rooms: l.rooms || 1,
         room_type_id: pickRoomType(l.hint),
+        // v6m: the voucher's own nightly rate (before GST). Booked at this unless changed here.
+        voucher_rate: l.rate ?? null,
+        rate: l.rate ?? "",
       })),
       room_type_id: pickRoomType(d.room_type_hint),
+      rate: "",   // v6m: single-type form - blank = rate card
       // v5r: default to the room count the voucher itself stated. It used to default to 1 whatever the
       // email said, so a 2-room reservation was confirmed as one room and the other stayed on sale.
       quantity: d.rooms || 1,
@@ -596,11 +600,17 @@ const DraftsTab = ({ showToast }) => {
         room_type_id: Number(hasLines ? cform.room_lines[0].room_type_id : cform.room_type_id),
         quantity: Number(hasLines ? cform.room_lines[0].rooms : cform.quantity) || 1,
         ...(hasLines ? {
-          room_lines: cform.room_lines.map((l) => ({
-            room_type_id: Number(l.room_type_id),
-            quantity: Number(l.rooms) || 1,
-          })),
-        } : {}),
+          room_lines: cform.room_lines.map((l) => {
+            const typed = l.rate === "" || l.rate == null ? null : Number(l.rate);
+            // Only send a rate that differs from the voucher's (the server books the voucher's anyway).
+            const changed = typed != null && (l.voucher_rate == null || Math.abs(typed - Number(l.voucher_rate)) > 0.005);
+            return {
+              room_type_id: Number(l.room_type_id),
+              quantity: Number(l.rooms) || 1,
+              ...(changed ? { price_per_night: typed } : {}),
+            };
+          }),
+        } : (cform.rate !== "" && cform.rate != null ? { price_per_night: Number(cform.rate) } : {})),
         guest_name: cform.guest_name || null,
         phone: cform.phone || null,
         email: cform.email || null,
@@ -810,12 +820,26 @@ const DraftsTab = ({ showToast }) => {
                           }}
                           className={`${inputCls} w-20`}
                         />
+                        <input
+                          type="number" min="0" step="1" value={ln.rate}
+                          placeholder="rate card"
+                          title={ln.voucher_rate != null
+                            ? `Voucher rate ₹${ln.voucher_rate} / night, before GST. Change it only to correct the voucher.`
+                            : "The voucher states no rate: blank = today's rate card, or type the rate the guest was sold at."}
+                          onChange={(e) => {
+                            const next = [...cform.room_lines];
+                            next[i] = { ...next[i], rate: e.target.value };
+                            setCform({ ...cform, room_lines: next });
+                          }}
+                          className={`${inputCls} w-28`}
+                        />
                       </div>
                     ))}
                   </div>
                   <span className="text-xs text-slate-500 mt-1">
-                    Map each of the voucher's room types to one of yours. The total must price within
-                    tolerance of the voucher, or the confirm is refused.
+                    Map each of the voucher's room types to one of yours. The last box is the nightly
+                    rate per room, BEFORE GST — filled from the voucher, so an old booking is billed at
+                    the rate the guest was sold at, not today's. Change it only to correct the voucher.
                   </span>
                 </div>
               ) : (
@@ -825,6 +849,12 @@ const DraftsTab = ({ showToast }) => {
                       {roomTypes.map((rt) => <option key={rt.room_type_id} value={rt.room_type_id}>{rt.name}</option>)}
                     </select>
                     {confirmFor.room_type_hint && <span className="text-xs text-slate-500 mt-1">OTA room: “{confirmFor.room_type_hint}”</span>}
+                    <label className="text-xs text-slate-400 mt-3 mb-1">Rate per room per night (₹, before GST)</label>
+                    <input type="number" min="0" step="1" value={cform.rate} placeholder="blank = today's rate card"
+                      onChange={(e) => setCform({ ...cform, rate: e.target.value })} className={inputCls} />
+                    <span className="text-xs text-slate-500 mt-1">
+                      For an old booking whose voucher was sold at an earlier rate, type that rate.
+                    </span>
                   </div>
                   <div className="flex flex-col"><label className="text-xs text-slate-400 mb-1">Quantity</label>
                     <input type="number" min="1" max="5" value={cform.quantity} onChange={(e) => setCform({ ...cform, quantity: e.target.value })} className={inputCls} /></div>

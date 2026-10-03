@@ -20,7 +20,7 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import Booking, OtaSettlement, OtaDraftBooking
+from models import Booking, OtaSettlement, OtaDraftBooking, RoomType
 from schemas import OtaChannelUpdate, OtaSettlementCreate, OtaDraftConfirm, DeskBookingCreate, BookingItemCreate
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
@@ -267,8 +267,37 @@ def _confirm_lines(data) -> list:
     """
     lines = getattr(data, "room_lines", None)
     if lines:
-        return [{"room_type_id": ln.room_type_id, "quantity": ln.quantity} for ln in lines]
-    return [{"room_type_id": data.room_type_id, "quantity": data.quantity}]
+        return [{"room_type_id": ln.room_type_id, "quantity": ln.quantity,
+                 "price_per_night": getattr(ln, "price_per_night", None)} for ln in lines]
+    return [{"room_type_id": data.room_type_id, "quantity": data.quantity,
+             "price_per_night": getattr(data, "price_per_night", None)}]
+
+
+def _confirm_rates(d, data, user) -> list:
+    """v6m: the nightly rate (before GST, per room) each confirm line is booked at, or None = rate card.
+
+    An OTA booking made weeks ago was SOLD at that day's rate; billing today's rate card instead is
+    how a Rs 9,765 voucher came out 58% off. The voucher's room-wise table states the rate per room
+    type (`room_lines[i].rate`), and that is the default. The desk may confirm at it without asking;
+    any OTHER rate - or a rate on a voucher that stated none - is a price decision, so admin only.
+    Lines are matched to the voucher's by position (both screens send them in voucher order)."""
+    voucher = ota_service._load_room_lines(d) or []
+    lines = _confirm_lines(data)
+    out = []
+    for i, ln in enumerate(lines):
+        v_rate = voucher[i].get("rate") if i < len(voucher) and isinstance(voucher[i], dict) else None
+        asked = ln.get("price_per_night")
+        if asked is None:
+            out.append(float(v_rate) if v_rate is not None else None)
+            continue
+        if (v_rate is None or abs(float(asked) - float(v_rate)) > 0.005) and (user or {}).get("role") != "admin":
+            raise HTTPException(
+                status_code=403,
+                detail=("Only an admin can change the room rate on an OTA booking"
+                        + (f" (the voucher says Rs {float(v_rate):,.0f} a night)." if v_rate is not None
+                           else " (the voucher did not state one).")))
+        out.append(round(float(asked), 2))
+    return out
 
 
 @router.post("/drafts/{draft_id}/confirm")
@@ -318,10 +347,20 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
         if tol > 0:
             try:
                 # F-18: price every line of a mixed-type voucher, not just the first.
-                quoted = sum(
-                    ota_service._quote_rooms_total(db, ln["room_type_id"], ln["quantity"],
-                                                   check_in, check_out, d.channel_code) or 0
-                    for ln in _confirm_lines(data))
+                # v6m: at the rate each line is being BOOKED at (the voucher's, normally).
+                _rates = _confirm_rates(d, data, user)
+                _nights = max(1, (check_out - check_in).days)
+                quoted = 0.0
+                for ln, rate in zip(_confirm_lines(data), _rates):
+                    if rate is not None:
+                        _rt = db.query(RoomType).filter(RoomType.room_type_id == ln["room_type_id"]).first()
+                        _g = float(_rt.gst_percent or 0) if _rt else 0.0
+                        quoted += rate * _nights * ln["quantity"] * (1 + _g / 100)
+                    else:
+                        quoted += ota_service._quote_rooms_total(db, ln["room_type_id"], ln["quantity"],
+                                                                 check_in, check_out, d.channel_code) or 0
+            except HTTPException:
+                raise
             except Exception as e:                       # pricing must never hard-fail a confirm
                 logger.debug(f"OTA confirm variance check skipped for draft {d.id}: {e}")
                 quoted = None
@@ -357,8 +396,10 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
     )
 
     # Call the desk-booking handler directly (plain function — Depends bypassed by explicit args).
-    from routers.reception import create_desk_booking
-    result = create_desk_booking(booking_req, db=db, user=user)
+    # v6m: at the voucher's rates (or the admin's), not today's rate card.
+    from routers.reception import create_desk_booking_at_rates
+    result = create_desk_booking_at_rates(booking_req, db=db, user=user,
+                                          rates=_confirm_rates(d, data, user))
 
     d.status = "confirmed"
     d.linked_booking_id = result["booking_id"]
