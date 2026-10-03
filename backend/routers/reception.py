@@ -9,6 +9,7 @@ superseded, new-room card-encode payload returned).
 Anti-fraud rule enforced here + in routers/cards.py: a key card is only issued against a
 booking WITH a recorded payment (see routers/payments.py total_paid).
 """
+import json
 import io
 import logging
 import os
@@ -30,13 +31,13 @@ from utils import settings as app_settings
 from utils.settings import validate_category
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, ComplimentaryRequest, \
     ExtendStayRequest, FolioOpenRequest, ReverseOverstayRequest, RoomShiftRequest, EarlyCheckoutRequest, \
-    CheckinQuoteRequest, ExtendHoursRequest
+    CheckinQuoteRequest, ExtendHoursRequest, ShiftOldCardRequest
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
 from utils.rate_engine import quote_stay
 from utils.housekeeping import on_room_dirtied, set_hk_status, cleaning_card_state
-from models import HousekeepingStatus, Payment
+from models import HousekeepingStatus, Payment, FraudAlert
 from routers.promotions import get_active_promotions, best_promotion_for_item
 from routers.payments import total_paid, total_paid_including_prepaid, prepaid_slice
 from routers.folio import (open_folio, _recompute, _get_invoice, _active_charges,
@@ -2474,6 +2475,60 @@ def _shift_waive_requires_admin() -> bool:
 def _incl_rate(rt: RoomType) -> float:
     """Rack rate per night, GST-inclusive (FolioCharge amounts are GST-inclusive)."""
     return round(float(rt.price_per_night) * (1 + float(rt.gst_percent or 0) / 100), 2)
+
+
+@router.post("/shift/old-card")
+def shift_old_card(data: ShiftOldCardRequest, db: Session = Depends(get_db),
+                   user=Depends(require_reception_or_admin)):
+    """v6m.3: record the guest's OLD-room card after a shift - wiped on the encoder, or why not.
+
+    /shift marks the old room's issuances `superseded`, but that is only the database: the old
+    room's lock never sees the new card, so a card that is not wiped goes on opening the old room
+    until its own expiry - after housekeeping has cleaned it, and possibly with the next guest in.
+    An erase marks the matching issuance `erased` (by the uid read off the card, else the oldest
+    superseded one still on file for that room). Not erasing needs a reason and raises an alert so
+    the owner sees which rooms still have a live guest card out."""
+    booking = db.query(Booking).filter(Booking.booking_id == data.booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    room = db.query(Room).filter(Room.room_id == data.room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    reason = (data.reason or "").strip()
+    if not data.erased and len(reason) < 3:
+        raise HTTPException(status_code=400,
+                            detail="Say why the old card was not wiped (e.g. the guest has lost it).")
+    olds = (db.query(CardIssuance)
+            .filter(CardIssuance.booking_id == booking.booking_id,
+                    CardIssuance.room_id == room.room_id,
+                    CardIssuance.status == "superseded")
+            .order_by(CardIssuance.id.asc()).all())
+    marked = []
+    if data.erased:
+        uid = (data.card_uid or "").strip().lower()
+        hit = [c for c in olds if uid and (c.card_uid or "").lower() == uid] or olds[:1]
+        for c in hit:
+            c.status = "erased"
+            c.erased_at = clock.now_utc()
+            c.erased_by = _resolve_user_id(db, user)
+            marked.append(c.id)
+    else:
+        db.add(FraudAlert(
+            type="shift_old_card_live", severity="med", booking_id=booking.booking_id, room_id=room.room_id,
+            detail=json.dumps({
+                "room": room.room_number, "reason": reason,
+                "note": (f"After a room shift the guest's card for room {room.room_number} was NOT wiped. "
+                         f"It still opens room {room.room_number} until it expires - let the next "
+                         f"guest's card into that lock (or cut a new card for the room) before re-letting it."),
+            })))
+    write_audit(db, user, "reception.shift_old_card", "booking", booking.booking_id,
+                after={"room_id": room.room_id, "room_number": room.room_number, "erased": data.erased,
+                       "card_uid": data.card_uid, "reason": reason or None, "erased_card_ids": marked,
+                       "client_ref": data.client_ref},
+                client="desktop")
+    db.commit()
+    return {"booking_id": booking.booking_id, "room_id": room.room_id, "erased": data.erased,
+            "erased_card_ids": marked}
 
 
 @router.post("/shift")

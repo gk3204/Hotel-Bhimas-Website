@@ -586,6 +586,18 @@ class CheckoutRequest(BaseModel):
     invoice_now: bool = False
 
 
+class ShiftOldCardRequest(BaseModel):
+    """v6m.3: what happened to the guest's card for the room they LEFT on a shift. The lock of the
+    old room never sees the new card (it is for a different room), so the old card keeps opening
+    the old room until its own expiry unless the desk physically wipes it."""
+    booking_id: int
+    room_id: int                       # the room the guest left
+    erased: bool
+    card_uid: Optional[str] = None     # read off the card before the wipe, when the encoder gave one
+    reason: Optional[str] = None       # required when erased is false
+    client_ref: Optional[str] = None
+
+
 class RoomShiftRequest(BaseModel):
     """Move an in-house guest to a different room mid-stay (prompt 09). from_room_id is
     required because a group booking holds several rooms. applied_adjustment None = accept
