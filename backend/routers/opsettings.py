@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from utils import settings as app_settings
 from utils.audit import write_audit
-from utils.auth_utils import require_admin, require_reception_or_admin
+from utils.auth_utils import require_admin, require_reception_or_admin, get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -41,7 +41,12 @@ def health():
 
 # ---------------------------------------------------------------- category lists
 
-@router.get("/categories", dependencies=[Depends(require_reception_or_admin)])
+# v6m.1: readable by EVERY signed-in staff role. It was reception/admin only, so the
+# housekeeping app's "Cleaned by" / "Inspected by" dropdowns (and the maintenance and
+# room-service category pickers) got a 403 and silently fell back to the shipped default -
+# the names the owner added in Settings never appeared. The lists are just labels; editing
+# them (PUT below) stays admin-only.
+@router.get("/categories", dependencies=[Depends(get_current_user)])
 def get_categories(db: Session = Depends(get_db)):
     """Every editable category family with its current option-list, plus the seed defaults
     (so the UI can offer a 'reset to default' and show what shipped)."""
