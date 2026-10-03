@@ -316,6 +316,14 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
     if d.status == "cancelled":
         # b5: the OTA cancelled this stay; booking it would sell a room to a guest who is not coming.
         raise HTTPException(status_code=409, detail="The OTA cancelled this booking — there is nothing to confirm.")
+    # v6m.2: ...and the same when the cancellation mail is on file but never retired this draft.
+    # Production #325 was confirmed by hand three days after Yatra's cancellation had arrived.
+    if d.ota_booking_id and db.query(OtaDraftBooking).filter(
+            OtaDraftBooking.channel_code == d.channel_code,
+            OtaDraftBooking.ota_booking_id == ota_service.canonical_ota_id(d.channel_code, d.ota_booking_id),
+            OtaDraftBooking.kind == "cancellation").first():
+        raise HTTPException(status_code=409, detail="The OTA has sent a CANCELLATION for this booking "
+                                                    "— there is nothing to confirm.")
 
     guest_name = data.guest_name or d.guest_name
     check_in = data.check_in or d.check_in
@@ -418,6 +426,23 @@ def dismiss_draft(draft_id: int,
     d.status = "dismissed"
     write_audit(db, user, "ota.draft_dismiss", "ota_draft_booking", d.id, commit=True)
     return {"draft_id": d.id, "status": d.status}
+
+
+# ============================================================
+# v6m.2 Yatra repair (also runs at the start of every poll)
+# ============================================================
+@router.post("/repair")
+def repair_drafts(dry_run: bool = Query(True), db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Re-pair Yatra cancellations saved under a wrapped id ("YATMB0012309231") with their voucher -
+    cancelling a booking whose guest has not arrived - clean guest names that swallowed "Guest Email
+    Address", and read the voucher rate into pending drafts. dry_run (default) only reports."""
+    res = ota_service.repair_yatra_drafts(db, dry_run=dry_run)
+    if dry_run:
+        db.rollback()
+    else:
+        write_audit(db, user, "ota.repair_yatra", "ota_draft", None, after=res, client="web")
+        db.commit()
+    return {"dry_run": dry_run, **res}
 
 
 # ============================================================

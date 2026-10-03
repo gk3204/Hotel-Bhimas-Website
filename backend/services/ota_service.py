@@ -956,7 +956,10 @@ def parse_yatra(text: str) -> dict:
     if bid:
         out["ota_booking_id"] = re.sub(r"\s+", "", bid)
 
-    guest = between(r"name\s+of\s+guest", r"booking\s+date", r"check\s*in") \
+    # v6m.2: the row after the name is "Guest Email Address" - it was not a stop label, so every
+    # Yatra guest was saved as "Harish Jayakumar Guest Email Address harish_jcivil@yahoo.com ...".
+    guest = between(r"name\s+of\s+guest", r"guest\s+email", r"guest\s+phone", r"email\s+address",
+                    r"booking\s+date", r"check\s*in") \
         or between(r"name\s+of\s+traveller", r"cancellation\s+id", r"booking\s+id", r"room\s+type", r"hotel\s+name")
     if guest and re.search(r"[A-Za-z]", guest):
         out["guest_name"] = guest
@@ -981,6 +984,29 @@ def parse_yatra(text: str) -> dict:
         or between(r"room\s*type", r"cancelled\s+from", r"room\s*nights", r"number\s+of\s+rooms")
     out["room_type_hint"] = _clean_room_hint(room)
 
+    # v6m.2: the rate the room was SOLD at. "Tariff Applicable" lists one row per night ("06 Nov 2026
+    # 07 Nov 2026 1 INR 1150.00 [3450.00]"); "Total Room Charges" is the whole stay before tax. The
+    # per-room nightly rate is that total over nights x rooms - correct whether Yatra's "Rate per
+    # Night" is per room or for all rooms, and it ignores the "Other Charges" (the GST).
+    rooms_n = out.get("rooms") or 1
+    total_rc = _num(_first([r"total\s+room\s+charges[\s:*|]*(?:₹|rs\.?|inr)?\s*([\d,]+\.?\d*)"], text))
+    nights = 0
+    if out.get("check_in") and out.get("check_out"):
+        nights = (out["check_out"] - out["check_in"]).days
+    if not nights:
+        nights = sum(int(n) for n in re.findall(
+            r"\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\s+\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\s+(\d{1,2})\s+INR", text))
+    rate = None
+    if total_rc and nights > 0:
+        rate = round(total_rc / (nights * rooms_n), 2)
+    else:
+        per = re.findall(r"\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\s+\d{1,2}\s+[A-Za-z]{3,9}\s+\d{4}\s+\d{1,2}\s+INR\s+([\d,]+\.?\d*)", text)
+        vals = [v for v in (_num(p) for p in per) if v]
+        if vals:
+            rate = round(sum(vals) / len(vals), 2)
+    if out["room_type_hint"] and rate:
+        out["room_lines"] = [{"hint": out["room_type_hint"], "rooms": int(rooms_n), "rate": rate}]
+
     # Amount = "(A) Hotel Gross Charges" (what the hotel invoices the guest), else room charges.
     _cur = r"[\s:*|]*(?:₹|rs\.?|inr)?\s*"
     gross = _num(_first([r"hotel\s+gross\s+charges" + _cur + r"([\d,]+\.?\d*)",
@@ -988,6 +1014,18 @@ def parse_yatra(text: str) -> dict:
     if gross is not None:
         out["amount"] = gross
     out.update(_occupancy(text))
+    # v6m.2: Yatra prints the label FIRST ("Adults 3"), right under "Number of rooms 1" - so the
+    # number-first pattern read "1\nAdults" and every Yatra guest party became one adult.
+    for key, pat in (("adults", r"\badults?\b[\s:*|]*(\d{1,2})\b"),
+                     ("children", r"\bchild(?:ren)?\b[\s:*|]*(\d{1,2})\b")):
+        v = _first([pat], text)
+        if v and v.isdigit():
+            out[key] = int(v)
+    # ...and its phone row is "Guest Phone Number +91 9440401944", which the generic phone pattern
+    # (label then digits) never reached past the word "Number".
+    ph = _first([r"guest\s+phone\s+number[\s:*|]*(\+?\d[\d \-]{7,14}\d)"], text)
+    if ph and _keep_parsed_phone(ph):
+        out["phone"] = ph
     out.update(_commission_net(text))
     return out
 
@@ -1014,6 +1052,24 @@ _PARSERS = {
 }
 
 
+def canonical_ota_id(channel, oid):
+    """The OTA booking id in the ONE form every mail about that stay agrees on (v6m.2).
+
+    Yatra / Travelguru print the voucher as "VOUCHER NUMBER 0012309231" but the cancellation as
+    "Booking Id: YATMB 0012309231" (or "YAT0012260109", "IXIJ P0002515148"): a wrapper of letters in
+    front of the same number. Compared as-is the two never matched, so the cancellation reached no
+    booking - production bookings #214 and #325 stayed live for guests who had cancelled, and #325
+    was even confirmed by hand three days AFTER the cancellation arrived. The wrapper (two or more
+    letters) is dropped; a single leading "P" is part of the real voucher number and is kept."""
+    if not oid:
+        return oid
+    s = re.sub(r"\s+", "", str(oid)).strip()
+    if channel == "yatra":
+        # lazy, so "IXIJP0002515148" loses "IXIJ" and keeps the voucher's own "P"
+        s = re.sub(r"^[A-Za-z]{2,6}?(?=P?\d{6,}$)", "", s)
+    return s
+
+
 def parse_email_bytes(raw: bytes, force_channel=None) -> dict | None:
     """Parse a raw RFC822 email into a normalized draft dict. Returns None when no OTA channel can
     be detected (and no `force_channel` given). PURE — no DB. Testable with `.eml` fixtures."""
@@ -1027,6 +1083,7 @@ def parse_email_bytes(raw: bytes, force_channel=None) -> dict | None:
         return None
     parser = _PARSERS.get(channel, parse_other)
     fields = parser(body)
+    fields["ota_booking_id"] = canonical_ota_id(channel, fields.get("ota_booking_id"))
     fields["channel_code"] = channel
     fields["kind"] = detect_kind(subject, body)
     fields["message_id"] = message_id
@@ -1540,7 +1597,13 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
              .first())
         if b is None and pend:
             # the stay only ever existed as a draft: retiring it is the whole job — no separate
-            # cancellation row for the desk to wade through.
+            # cancellation row for the desk to wade through. (v6m.2: a row already saved for this
+            # very mail - re-imported - takes the canonical id, so it pairs with its voucher.)
+            if fields.get("message_id"):
+                prior = (db.query(OtaDraftBooking)
+                         .filter(OtaDraftBooking.message_id == fields["message_id"]).first())
+                if prior is not None:
+                    prior.ota_booking_id = fields["ota_booking_id"]
             db.flush()
             if commit:
                 db.commit()
@@ -1554,30 +1617,11 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
                     "channel": channel, "ota_booking_id": fields.get("ota_booking_id")}
     d, created = _upsert_draft(db, fields)
     if fields.get("kind") == "cancellation" and fields.get("ota_booking_id"):
-        b = (db.query(Booking)
-             .filter(Booking.ota_booking_id == fields["ota_booking_id"],
-                     Booking.status.in_(_LIVE_STATUSES))
-             .first())
-        if b is not None:
-            flagged_booking_id = b.booking_id
-            d.linked_booking_id = b.booking_id
-            d.status = "flagged"
-            # The OTA is authoritative: a cancellation for a stay that has NOT arrived yet cancels
-            # the booking outright — it then drops off the desk's Arrivals (status filter) and
-            # check-in is refused (status guard). A guest already checked in can't be un-checked-in,
-            # so leave that one flagged for the desk to handle. No Razorpay refund — the OTA refunds.
-            if b.status == "confirmed":
-                b.status = "cancelled"
-                b.cancelled_at = clock.now_utc()   # F-03: an instant, stored UTC
-                b.cancel_reason = f"OTA cancellation ({channel}) {fields['ota_booking_id']}"
-                cancelled_booking_id = b.booking_id
-                try:
-                    from utils.audit import write_audit
-                    write_audit(db, None, "ota.auto_cancel", "booking", b.booking_id,
-                                after={"channel": channel, "ota_booking_id": fields["ota_booking_id"]},
-                                client="ota_poller")
-                except Exception:
-                    logger.exception("OTA auto-cancel audit failed")
+        # A cancellation for a stay that has NOT arrived cancels the booking outright - it drops off
+        # Arrivals and check-in is refused. A checked-in guest stays flagged for the desk. No Razorpay
+        # refund - the OTA refunds.
+        flagged_booking_id, cancelled_booking_id = _apply_cancellation_to_booking(
+            db, d, channel, fields["ota_booking_id"])
 
     # A confident NEW-booking draft is auto-created into a real booking (owner: auto-confirm OTA
     # bookings). Unresolvable drafts stay pending for the desk. auto_confirm_draft never raises.
@@ -1592,6 +1636,128 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
             "kind": fields.get("kind"), "flagged_booking_id": flagged_booking_id,
             "cancelled_booking_id": cancelled_booking_id,
             "auto_confirmed_booking_id": auto_booking_id}
+
+
+def _apply_cancellation_to_booking(db, d, channel, oid):
+    """Link a cancellation draft to the live booking with that OTA id and cancel the booking when the
+    guest has not arrived. Returns (flagged_booking_id, cancelled_booking_id)."""
+    b = (db.query(Booking)
+         .filter(Booking.ota_booking_id == oid, Booking.status.in_(_LIVE_STATUSES))
+         .first())
+    if b is None:
+        return None, None
+    d.linked_booking_id = b.booking_id
+    d.status = "flagged"
+    cancelled = None
+    # The OTA is authoritative: a cancellation for a stay that has NOT arrived yet cancels the
+    # booking outright. A guest already checked in can't be un-checked-in, so that one stays flagged.
+    if b.status == "confirmed":
+        b.status = "cancelled"
+        b.cancelled_at = clock.now_utc()   # F-03: an instant, stored UTC
+        b.cancel_reason = f"OTA cancellation ({channel}) {oid}"
+        cancelled = b.booking_id
+        try:
+            from utils.audit import write_audit
+            write_audit(db, None, "ota.auto_cancel", "booking", b.booking_id,
+                        after={"channel": channel, "ota_booking_id": oid}, client="ota_poller")
+        except Exception:
+            logger.exception("OTA auto-cancel audit failed")
+    return b.booking_id, cancelled
+
+
+_NAME_JUNK = re.compile(r"\s+(?:guest\s+email|guest\s+phone|email\s+address)\b.*$", re.IGNORECASE | re.DOTALL)
+
+
+def repair_yatra_drafts(db, dry_run=False) -> dict:
+    """One-off-but-idempotent repair for what the old Yatra parser left behind (v6m.2). Runs at the
+    start of every mailbox poll and from POST /ota/repair; once a row is fixed it no longer matches,
+    so later runs do nothing.
+
+      * cancellation drafts saved with the wrapped id ("YATMB0012309231") get the canonical id and are
+        applied: the pending voucher is retired, a booking not yet arrived is cancelled;
+      * guest names saved as "<name> Guest Email Address <email>" are cut back to the name - on the
+        draft, and on the booking's guest record it created;
+      * a pending voucher re-reads its stored mail for the rate it was sold at.
+    """
+    from models import Guest
+    out = {"ids": [], "cancelled_bookings": [], "retired_drafts": [], "names": [], "rates": []}
+    for c in (db.query(OtaDraftBooking)
+              .filter(OtaDraftBooking.channel_code == "yatra",
+                      OtaDraftBooking.kind == "cancellation",
+                      OtaDraftBooking.linked_booking_id.is_(None))
+              .all()):
+        canon = canonical_ota_id("yatra", c.ota_booking_id)
+        if not canon or canon == c.ota_booking_id:
+            continue
+        out["ids"].append({"draft_id": c.id, "from": c.ota_booking_id, "to": canon})
+        if dry_run:
+            b = (db.query(Booking).filter(Booking.ota_booking_id == canon,
+                                          Booking.status == "confirmed").first())
+            if b is not None:
+                out["cancelled_bookings"].append(b.booking_id)
+            continue
+        c.ota_booking_id = canon
+        for pd in (db.query(OtaDraftBooking)
+                   .filter(OtaDraftBooking.channel_code == "yatra",
+                           OtaDraftBooking.ota_booking_id == canon,
+                           OtaDraftBooking.kind == "confirmation",
+                           OtaDraftBooking.status.in_(("pending", "flagged")))
+                   .all()):
+            pd.status = "cancelled"
+            pd.last_error = "Cancelled by yatra - no booking was made; nothing to confirm."
+            out["retired_drafts"].append(pd.id)
+        _flag, cancelled = _apply_cancellation_to_booking(db, c, "yatra", canon)
+        if cancelled:
+            out["cancelled_bookings"].append(cancelled)
+
+    for d in (db.query(OtaDraftBooking)
+              .filter(OtaDraftBooking.channel_code == "yatra",
+                      OtaDraftBooking.guest_name.ilike("%email address%"))
+              .all()):
+        clean = _NAME_JUNK.sub("", d.guest_name or "").strip()
+        if not clean or clean == d.guest_name:
+            continue
+        out["names"].append({"draft_id": d.id, "to": clean})
+        if dry_run:
+            continue
+        old = d.guest_name
+        d.guest_name = clean
+        if d.linked_booking_id:
+            b = db.query(Booking).filter(Booking.booking_id == d.linked_booking_id).first()
+            g = db.query(Guest).filter(Guest.guest_id == b.guest_id).first() if b and b.guest_id else None
+            if g is not None and g.name and _NAME_JUNK.search(g.name):
+                g.name = _NAME_JUNK.sub("", g.name).strip() or g.name
+            if b is not None and b.guest_name and _NAME_JUNK.search(b.guest_name):
+                b.guest_name = _NAME_JUNK.sub("", b.guest_name).strip() or b.guest_name
+        logger.info("yatra repair: draft %s name %r -> %r", d.id, old, clean)
+
+    for d in (db.query(OtaDraftBooking)
+              .filter(OtaDraftBooking.channel_code == "yatra",
+                      OtaDraftBooking.kind == "confirmation",
+                      OtaDraftBooking.status.in_(("pending", "flagged")),
+                      OtaDraftBooking.raw_source.isnot(None))
+              .all()):
+        try:
+            got = parse_yatra(d.raw_source)
+        except Exception:
+            continue
+        lines = _load_room_lines(d) or []
+        if got.get("room_lines") and not any(isinstance(ln, dict) and ln.get("rate") for ln in lines):
+            out["rates"].append({"draft_id": d.id, "rate": got["room_lines"][0]["rate"]})
+            if not dry_run:
+                d.room_lines = json.dumps(got["room_lines"])
+        # the party size and phone the old parser misread / missed
+        if got.get("adults") and got["adults"] != d.adults:
+            out.setdefault("adults", []).append({"draft_id": d.id, "from": d.adults, "to": got["adults"]})
+            if not dry_run:
+                d.adults = got["adults"]
+        if got.get("phone") and not d.phone:
+            out.setdefault("phones", []).append(d.id)
+            if not dry_run:
+                d.phone = got["phone"]
+    if not dry_run:
+        db.flush()
+    return out
 
 
 def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -> dict:
@@ -1646,6 +1812,16 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
     processed = created = errors = skipped_past = 0
     drafts = []
     conn = None
+    # v6m.2: fix what the old Yatra parser left behind (wrapped cancellation ids, "Guest Email
+    # Address" in names, no voucher rate). Idempotent - a no-op once the rows are clean.
+    try:
+        fixed = repair_yatra_drafts(db)
+        if any(fixed.values()):
+            logger.info("OTA poll: yatra repair %s", fixed)
+        db.commit()
+    except Exception:
+        logger.exception("OTA poll: yatra repair failed")
+        db.rollback()
     try:
         conn = imaplib.IMAP4_SSL(cfg["host"], cfg["port"]) if cfg["ssl"] else imaplib.IMAP4(cfg["host"], cfg["port"])
         conn.login(cfg["user"], cfg["password"])

@@ -792,7 +792,7 @@ const DraftsTab = ({ showToast }) => {
               {(cform.room_lines || []).length > 0 ? (
                 <div className="flex flex-col col-span-2">
                   <label className="text-xs text-slate-400 mb-1">
-                    Rooms on this voucher <span className="text-slate-500">({cform.room_lines.length} types)</span>
+                    Rooms on this voucher <span className="text-slate-500">({cform.room_lines.length} {cform.room_lines.length === 1 ? "type" : "types"})</span>
                   </label>
                   <div className="space-y-2">
                     {cform.room_lines.map((ln, i) => (
