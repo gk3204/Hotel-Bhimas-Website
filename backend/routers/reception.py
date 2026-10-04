@@ -3935,6 +3935,45 @@ def _build_desk_board(db: Session):
 
     # Read the overstay config ONCE for the whole board rather than per row.
     ov_cfg = app_settings.get_overstay_config(db)
+
+    # v6m.7 (owner): each in-house room's type and RENT PER DAY, from what the stay is actually
+    # billed - its per-night folio room charges - so an OTA booking sold at an old voucher rate shows
+    # that rate, and an extended night shows the rate it was extended at. One query for the board.
+    _in_item_ids = [i.booking_item_id for b in _in_b for i in b.booking_items if i.room_id and i.checked_in_at]
+    _rates = {}
+    if _in_item_ids:
+        _ch = db.query(FolioCharge.id, FolioCharge.booking_item_id, FolioCharge.charge_date,
+                       FolioCharge.amount, FolioCharge.qty, FolioCharge.gst_percent,
+                       FolioCharge.void, FolioCharge.reversal_of_id).filter(
+            FolioCharge.type == "room", FolioCharge.booking_item_id.in_(_in_item_ids)).all()
+        _reversed = {c.reversal_of_id for c in _ch if c.reversal_of_id}
+        for c in _ch:
+            if c.void or c.reversal_of_id or c.id in _reversed or c.charge_date is None:
+                continue
+            q = float(c.qty or 1) or 1.0
+            incl = float(c.amount or 0) / q
+            pre = incl / (1 + float(c.gst_percent or 0) / 100)
+            _rates.setdefault(c.booking_item_id, []).append((c.charge_date, round(pre, 2), round(incl, 2)))
+    _tonight = clock.business_today()
+
+    def _room_rate(b, i):
+        rows = sorted(_rates.get(i.booking_item_id, []))
+        if rows:
+            night = (next((r for r in rows if r[0] == _tonight), None)
+                     or ([r for r in rows if r[0] <= _tonight] or rows)[-1])
+            pres = [r[1] for r in rows]
+            return {"rate_per_night": night[1], "rate_incl_gst": night[2],
+                    "rate_min": min(pres), "rate_max": max(pres), "rate_source": "bill"}
+        # no nights on the bill yet: the booked price, per room per night
+        ci = getattr(i, "check_in", None) or b.check_in
+        co = getattr(i, "check_out", None) or b.check_out
+        nights = max(1, (co - ci).days) if ci and co else 1
+        qty = int(i.quantity or 1) or 1
+        pre = float(i.base_amount or 0) / nights / qty
+        gst = float(getattr(i.room_type, "gst_percent", 0) or 0)
+        return {"rate_per_night": round(pre, 2), "rate_incl_gst": round(pre * (1 + gst / 100), 2),
+                "rate_min": round(pre, 2), "rate_max": round(pre, 2), "rate_source": "booking"}
+
     inhouse = []
     for b in _in_b:
         paid, folio_id, folio_balance = _paid_and_folio(b.booking_id)
@@ -3961,6 +4000,9 @@ def _build_desk_board(db: Session):
                         "expected_check_out": booking_checkout_moment(b, item=i).isoformat(),
                         "valid_from": _r_vf.isoformat(),
                         "valid_to": _r_vt.isoformat(),
+                        # v6m.7: the type this room is BOOKED as, and its rent per day
+                        "room_type_name": i.room_type.name if i.room_type else None,
+                        **_room_rate(b, i),
                     })
         # v5s: a stay's own rooms read ascending ("9, 10", never "10, 9").
         rooms.sort(key=lambda r: ordering.room_number_sort_key(r["room_number"]))

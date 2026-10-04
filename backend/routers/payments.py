@@ -344,79 +344,13 @@ async def verify_payment(
                     "since been taken. The hotel has been alerted and will contact you to rebook or "
                     "refund the full amount."))
 
-    logger.info(f"✅ Payment verified for booking {booking.booking_id}. Starting background confirmation task...")
-
-    # Extract booking data BEFORE session closes (prevent detached instance issues)
-    booking_data = booking_pdf_payload(booking)
-
-    # Extract payment data BEFORE session closes (detached instance error prevention)
-    payment_data = {
-        "payment_id_gateway": payment.payment_id_gateway,
-        "order_id": payment.order_id,
-        "gateway": payment.gateway,
-        "status": payment.status
-    }
-
-    def process_confirmation(booking_data, payment_data):
-        """Synchronous confirmation task - PDF generation and email sending"""
-        try:
-            logger.info(f"🔄 Background task started for booking {booking_data['booking_id']}")
-            logger.info(f"Starting confirmation process for booking {booking_data['booking_id']}")
-
-            # Generate PDF
-            try:
-                pdf_path = generate_booking_pdf(booking_data, payment_data)
-                logger.info(f"PDF generated successfully: {pdf_path}")
-            except Exception as e:
-                logger.error(f"PDF generation failed for booking {booking_data['booking_id']}: {str(e)}", exc_info=True)
-                return
-
-            # Send email (now synchronous)
-            try:
-                send_booking_email(booking_data, pdf_path)
-                logger.info(f"Email sent successfully for booking {booking_data['booking_id']}")
-            except Exception as e:
-                logger.error(f"Email sending failed for booking {booking_data['booking_id']}: {str(e)}", exc_info=True)
-                return
-
-            # Cleanup PDF
-            try:
-                if os.path.exists(pdf_path):
-                    os.remove(pdf_path)
-                    logger.info(f"PDF cleaned up: {pdf_path}")
-            except Exception as e:
-                logger.warning(f"Failed to cleanup PDF {pdf_path}: {str(e)}")
-
-        except Exception as e:
-            logger.error(f"Unexpected error in confirmation process for booking {booking_data['booking_id']}: {str(e)}", exc_info=True)
-
-    logger.info(f"📋 Registering background task for booking {booking.booking_id}")
-    background_tasks.add_task(process_confirmation, booking_data, payment_data)
-    logger.info(f"✨ Background task added to queue for booking {booking.booking_id}")
+    # v6m.7: e-mail AND WhatsApp (with the confirmation PDF), through the one sender every
+    # settlement path uses.
+    from services.booking_confirmation import send_website_confirmation
+    logger.info(f"✅ Payment verified for booking {booking.booking_id}. Sending the confirmation...")
+    background_tasks.add_task(send_website_confirmation, booking.booking_id)
 
     return {"message": "Payment successful"}
-
-def send_booking_confirmation_now(booking_data: dict, payment_data: dict) -> tuple[bool, str | None]:
-    """PDF + confirmation e-mail (guest and hotel). Returns (ok, error) instead of only logging, so
-    an admin resend can show WHY it failed (e.g. the Mailjet daily limit)."""
-    pdf_path = None
-    try:
-        pdf_path = generate_booking_pdf(booking_data, payment_data)
-    except Exception as e:
-        logger.error(f"PDF generation failed for booking {booking_data.get('booking_id')}: {e}", exc_info=True)
-    try:
-        if send_booking_email(booking_data, pdf_path) is False:   # SAFE_MODE: nothing left the server
-            return False, "SAFE_MODE is on - e-mail is switched off on this server"
-        return True, None
-    except Exception as e:
-        return False, str(e) or "Email sending failed"
-    finally:
-        try:
-            if pdf_path and os.path.exists(pdf_path):
-                os.remove(pdf_path)
-        except Exception:
-            pass
-
 
 @router.post("/bookings/{booking_id}/resend-confirmation", dependencies=[Depends(require_admin)])
 def resend_booking_confirmation(booking_id: int, db: Session = Depends(get_db),
@@ -432,15 +366,18 @@ def resend_booking_confirmation(booking_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail="This booking has no paid payment to confirm.")
     if booking.status not in ("confirmed", "checked_in", "checked_out"):
         raise HTTPException(status_code=409, detail=f"The booking is '{booking.status}' - nothing to confirm.")
-    booking_data = booking_pdf_payload(booking)
-    payment_data = {"payment_id_gateway": payment.payment_id_gateway, "order_id": payment.order_id,
-                    "gateway": payment.gateway, "status": payment.status}
-    ok, err = send_booking_confirmation_now(booking_data, payment_data)
+    from services.booking_confirmation import send_website_confirmation
+    res = send_website_confirmation(booking_id)
+    em = res.get("email") or {"ok": False, "error": "not attempted"}
+    wa = res.get("whatsapp") or {}
+    guest_email = booking.guest.email if booking.guest else None
     write_audit(db, user, "booking.confirmation_resend", "booking", booking_id,
-                after={"ok": ok, "error": err, "to": booking_data.get("guest_email")}, client="web", commit=True)
-    if not ok:
-        raise HTTPException(status_code=502, detail=f"The e-mail could not be sent: {err}")
-    return {"booking_id": booking_id, "sent_to": [booking_data.get("guest_email"), "hotelbhimas@gmail.com"]}
+                after={"email_ok": em["ok"], "email_error": em["error"], "to": guest_email,
+                       "whatsapp": wa.get("detail")}, client="web", commit=True)
+    if not em["ok"]:
+        raise HTTPException(status_code=502, detail=f"The e-mail could not be sent: {em['error']}")
+    return {"booking_id": booking_id, "sent_to": [guest_email, "hotelbhimas@gmail.com"],
+            "whatsapp": wa.get("detail")}
 
 
 @router.post("/razorpay/reconcile", dependencies=[Depends(require_admin)])
@@ -642,6 +579,8 @@ async def payment_webhook(request: Request, db: Session = Depends(get_db)):
             webhook_event_status = ("processed" if res["outcome"] != "paid_no_room"
                                     else "paid_no_room")
             db.commit()
+            if res["outcome"] in ("confirmed", "reinstated"):
+                late_payments.confirm_in_background(res["booking_id"])
 
         elif event in ("payment.captured", "qr_code.credited", "payment_link.paid"):
             # qr_code.credited / payment_link.paid are always desk-collect. payment.captured also
@@ -663,10 +602,12 @@ async def payment_webhook(request: Request, db: Session = Depends(get_db)):
                 # NOT (the authorized event never came), settle it the same way.
                 logger.info(f"↩️ Website capture for payment {payment.payment_id} via {event}")
                 from services import late_payments
-                late_payments.settle_website_payment(db, payment, booking, razorpay_payment_id,
-                                                     source="webhook_capture")
+                _res = late_payments.settle_website_payment(db, payment, booking, razorpay_payment_id,
+                                                            source="webhook_capture")
                 webhook_event_status = "processed"
                 db.commit()
+                if _res["outcome"] in ("confirmed", "reinstated"):
+                    late_payments.confirm_in_background(_res["booking_id"])
 
         # 🎯 Handle payment.failed event
         elif event == "payment.failed":

@@ -228,7 +228,7 @@ def _is_placeholder_number(db, phone, booking_id) -> bool:
 
 
 def notify_guest(db, guest, *, template, params=None, setting_key=None, booking_id=None,
-                 client_ref=None):
+                 client_ref=None, email_fallback=True):
     """Transactional guest message, gated by an app_settings toggle (the shape
     `routers/reception.py::_wa_notify` had). Never raises."""
     try:
@@ -253,7 +253,7 @@ def notify_guest(db, guest, *, template, params=None, setting_key=None, booking_
                               "Capture the guest's own mobile at check-in."}
         return notify(db, template=template, params=params,
                       to_phone=phone,
-                      to_email=getattr(guest, "email", None),
+                      to_email=getattr(guest, "email", None) if email_fallback else None,
                       to_name=getattr(guest, "name", None),
                       guest_id=getattr(guest, "guest_id", None),
                       booking_id=booking_id, client_ref=client_ref)
@@ -264,7 +264,7 @@ def notify_guest(db, guest, *, template, params=None, setting_key=None, booking_
 
 def notify_guest_document(db, guest, *, doc_template, text_template, doc_params, text_params,
                           pdf_path, filename, caption, setting_key=None, booking_id=None,
-                          client_ref=None):
+                          client_ref=None, email_fallback=True):
     """Send a system-generated PDF to the guest as a document-header template, falling back to the
     plain text template (and from there to email) whenever the document cannot go. Never raises.
 
@@ -294,7 +294,8 @@ def notify_guest_document(db, guest, *, doc_template, text_template, doc_params,
                 row = whatsapp_service.send_document(
                     db, phone, pdf_path, filename, caption,
                     template=doc_template, params=doc_params, client_ref=client_ref)
-                if row is not None and getattr(row, "status", None) == "sent":
+                # v6m.7: delivered / read count (a retry gets the existing row back) - see notify().
+                if row is not None and getattr(row, "status", None) in _DELIVERED:
                     return {"channel": "whatsapp", "ok": True, "detail": "Sent on WhatsApp with the PDF attached."}
                 # Unapproved template, media upload failure, bad number -- all land here.
                 logger.info("notify_guest_document: %s not delivered (%s) -- falling back to %s",
@@ -307,7 +308,8 @@ def notify_guest_document(db, guest, *, doc_template, text_template, doc_params,
 
         return notify_guest(db, guest, template=text_template, params=text_params,
                             setting_key=None,            # already checked above
-                            booking_id=booking_id, client_ref=client_ref)
+                            booking_id=booking_id, client_ref=client_ref,
+                            email_fallback=email_fallback)
     except Exception as e:
         logger.warning(f"notify_guest_document ({doc_template}) failed: {e}")
         return dict(_RESULT_NONE)

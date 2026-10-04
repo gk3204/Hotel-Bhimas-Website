@@ -159,8 +159,17 @@ def reconcile_razorpay(db, days: int = 14, dry_run: bool = True) -> dict:
                                "outcome": res["outcome"]}, client="system")
             db.commit()
             entry["outcome"] = res["outcome"]
+            if res["outcome"] in ("confirmed", "reinstated"):
+                confirm_in_background(res["booking_id"])
         found.append(entry)
     return {"configured": True, "checked": len(rows), "found": found, "errors": errors, "dry_run": dry_run}
+
+
+def confirm_in_background(booking_id: int):
+    """v6m.7: send the confirmation (e-mail + WhatsApp) off the request / sweep thread."""
+    import threading
+    from services.booking_confirmation import send_website_confirmation
+    threading.Thread(target=send_website_confirmation, args=(booking_id,), daemon=True).start()
 
 
 def reconcile_razorpay_locked(db, days: int = 2) -> dict | None:
