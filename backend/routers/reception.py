@@ -31,7 +31,7 @@ from utils import settings as app_settings
 from utils.settings import validate_category
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, ComplimentaryRequest, \
     ExtendStayRequest, FolioOpenRequest, ReverseOverstayRequest, RoomShiftRequest, EarlyCheckoutRequest, \
-    CheckinQuoteRequest, ExtendHoursRequest, ShiftOldCardRequest
+    CheckinQuoteRequest, ExtendHoursRequest, ShiftOldCardRequest, CardDeferredRequest
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
@@ -2150,6 +2150,20 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
             else:
                 c.status = "checked_out"
         cards_erased_count = len(matched)
+        # v6m.5: the card the guest hands back may be one the system had already SUPERSEDED (an
+        # extension / overstay whose re-cut was never done - prod #314). Its uid still identifies
+        # it; record that wipe too instead of reporting "0 erased".
+        if uid_set:
+            for c in db.query(CardIssuance).filter(
+                    CardIssuance.booking_id == booking.booking_id,
+                    CardIssuance.status == "superseded",
+                    CardIssuance.card_type == "guest").all():
+                if (c.card_uid or "").lower() in uid_set and (
+                        not _leaving_room_ids or c.room_id in _leaving_room_ids):
+                    c.status = "erased"
+                    c.erased_at = now_ts
+                    c.erased_by = _resolve_user_id(db, user)
+                    cards_erased_count += 1
 
         # v6e: the desk's choice - raise the departing room's tax invoice now, or leave it to be
         # raised from the folio screen later. Deliberately never automatic: an invoice number is
@@ -2475,6 +2489,35 @@ def _shift_waive_requires_admin() -> bool:
 def _incl_rate(rt: RoomType) -> float:
     """Rack rate per night, GST-inclusive (FolioCharge amounts are GST-inclusive)."""
     return round(float(rt.price_per_night) * (1 + float(rt.gst_percent or 0) / 100), 2)
+
+
+@router.post("/cards/deferred")
+def card_deferred(data: CardDeferredRequest, db: Session = Depends(get_db),
+                  user=Depends(require_reception_or_admin)):
+    """v6m.5: the desk is leaving a check-in / extension / shift card step with a key card NOT
+    written, because the encoder is out of order. The desk now refuses to leave that step otherwise
+    (the owner: "it has to be retried before moving to the next step"); this is the one way out,
+    and it is never silent: the stay is flagged `card_reencode_required` (the board shows "No key
+    card") and a low alert tells the owner which room has a guest without a working key."""
+    booking = db.query(Booking).filter(Booking.booking_id == data.booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    rooms = []
+    if data.room_ids:
+        rooms = [r.room_number for r in db.query(Room).filter(Room.room_id.in_(data.room_ids)).all()]
+    booking.card_reencode_required = True
+    db.add(FraudAlert(
+        type="card_not_cut", severity="low", booking_id=booking.booking_id,
+        room_id=(data.room_ids[0] if data.room_ids else None),
+        detail=json.dumps({"step": data.step, "rooms": rooms, "reason": data.reason.strip(),
+                           "note": "The desk left the card step without writing the guest's key card. "
+                                   "Cut it from Keys as soon as the encoder works."})))
+    write_audit(db, user, "reception.card_deferred", "booking", booking.booking_id,
+                after={"step": data.step, "rooms": rooms, "reason": data.reason.strip(),
+                       "client_ref": data.client_ref},
+                client="desktop")
+    db.commit()
+    return {"booking_id": booking.booking_id, "card_reencode_required": True, "rooms": rooms}
 
 
 @router.post("/shift/old-card")

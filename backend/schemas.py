@@ -586,6 +586,16 @@ class CheckoutRequest(BaseModel):
     invoice_now: bool = False
 
 
+class CardDeferredRequest(BaseModel):
+    """v6m.5: the desk could not write a guest's key card (encoder out of order) and is leaving the
+    card step anyway. Recorded, the stay is flagged for a re-cut, and the owner sees it."""
+    booking_id: int
+    room_ids: Optional[List[int]] = None
+    step: str = Field(..., max_length=20)          # checkin | extend | shift
+    reason: str = Field(..., min_length=3, max_length=300)
+    client_ref: Optional[str] = None
+
+
 class ShiftOldCardRequest(BaseModel):
     """v6m.3: what happened to the guest's card for the room they LEFT on a shift. The lock of the
     old room never sees the new card (it is for a different room), so the old card keeps opening
