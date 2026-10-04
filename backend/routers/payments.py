@@ -396,6 +396,53 @@ async def verify_payment(
 
     return {"message": "Payment successful"}
 
+def send_booking_confirmation_now(booking_data: dict, payment_data: dict) -> tuple[bool, str | None]:
+    """PDF + confirmation e-mail (guest and hotel). Returns (ok, error) instead of only logging, so
+    an admin resend can show WHY it failed (e.g. the Mailjet daily limit)."""
+    pdf_path = None
+    try:
+        pdf_path = generate_booking_pdf(booking_data, payment_data)
+    except Exception as e:
+        logger.error(f"PDF generation failed for booking {booking_data.get('booking_id')}: {e}", exc_info=True)
+    try:
+        if send_booking_email(booking_data, pdf_path) is False:   # SAFE_MODE: nothing left the server
+            return False, "SAFE_MODE is on - e-mail is switched off on this server"
+        return True, None
+    except Exception as e:
+        return False, str(e) or "Email sending failed"
+    finally:
+        try:
+            if pdf_path and os.path.exists(pdf_path):
+                os.remove(pdf_path)
+        except Exception:
+            pass
+
+
+@router.post("/bookings/{booking_id}/resend-confirmation", dependencies=[Depends(require_admin)])
+def resend_booking_confirmation(booking_id: int, db: Session = Depends(get_db),
+                                user=Depends(require_admin)):
+    """v6m.6: e-mail a paid website booking's confirmation again (guest + hotel). Booking 381 paid
+    on 4 Oct while the Mailjet day was used up by repeated owner alerts, so neither copy went out."""
+    booking = db.query(Booking).filter(Booking.booking_id == booking_id).first()
+    if not booking:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    payment = (db.query(Payment).filter(Payment.booking_id == booking_id, Payment.status == "paid")
+               .order_by(Payment.payment_id.desc()).first())
+    if not payment:
+        raise HTTPException(status_code=409, detail="This booking has no paid payment to confirm.")
+    if booking.status not in ("confirmed", "checked_in", "checked_out"):
+        raise HTTPException(status_code=409, detail=f"The booking is '{booking.status}' - nothing to confirm.")
+    booking_data = booking_pdf_payload(booking)
+    payment_data = {"payment_id_gateway": payment.payment_id_gateway, "order_id": payment.order_id,
+                    "gateway": payment.gateway, "status": payment.status}
+    ok, err = send_booking_confirmation_now(booking_data, payment_data)
+    write_audit(db, user, "booking.confirmation_resend", "booking", booking_id,
+                after={"ok": ok, "error": err, "to": booking_data.get("guest_email")}, client="web", commit=True)
+    if not ok:
+        raise HTTPException(status_code=502, detail=f"The e-mail could not be sent: {err}")
+    return {"booking_id": booking_id, "sent_to": [booking_data.get("guest_email"), "hotelbhimas@gmail.com"]}
+
+
 @router.post("/razorpay/reconcile", dependencies=[Depends(require_admin)])
 def razorpay_reconcile(days: int = Query(14, ge=1, le=120), dry_run: bool = Query(True),
                        db: Session = Depends(get_db)):
@@ -1803,22 +1850,22 @@ def booking_pdf_payload(booking) -> dict:
         "check_in_time": str(booking.check_in_time) if booking.check_in_time else None,
         "check_out": booking.check_out,
         "status": booking.status,
-        "base_amount": float(booking.base_amount),
-        "gst_amount": float(booking.gst_amount),
+        "base_amount": float(booking.base_amount or 0),
+        "gst_amount": float(booking.gst_amount or 0),
         "discount_amount": float(booking.discount_amount or 0),
-        "total_amount": float(booking.total_amount),
-        "convenience_fee": float(booking.convenience_fee),
-        "convenience_gst": float(booking.convenience_gst),
-        "grand_total": float(booking.grand_total),
+        "total_amount": float(booking.total_amount or 0),
+        "convenience_fee": float(booking.convenience_fee or 0),
+        "convenience_gst": float(booking.convenience_gst or 0),
+        "grand_total": float(booking.grand_total or 0),
         "booking_items": [
             {
                 "room_type_name": item.room_type.name,
                 "room_type_id": item.room_type.room_type_id,
                 "quantity": item.quantity,
-                "base_amount": float(item.base_amount),
-                "gst_amount": float(item.gst_amount),
-                "total_amount": float(item.total_amount),
-                "price_per_night": float(item.room_type.price_per_night)
+                "base_amount": float(item.base_amount or 0),
+                "gst_amount": float(item.gst_amount or 0),
+                "total_amount": float(item.total_amount or 0),
+                "price_per_night": float(item.room_type.price_per_night or 0)
             }
             for item in booking.booking_items
         ],

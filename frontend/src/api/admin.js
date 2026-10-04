@@ -124,6 +124,11 @@ export async function editBookingRooms(bookingId, payload) {
   return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/rooms`, {
     method: "PUT", headers: authHeader(), body: JSON.stringify(payload) }), "Could not change the rooms");
 }
+// v6m.6: e-mail a paid website booking's confirmation again (guest + hotel).
+export async function resendBookingConfirmation(bookingId) {
+  return detailOrThrow(await fetch(`${BASE_URL}/payments/bookings/${bookingId}/resend-confirmation`, {
+    method: "POST", headers: authHeader() }), "Could not send the confirmation");
+}
 export async function redateBooking(bookingId, payload) {
   return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/redate`, {
     method: "POST", headers: authHeader(), body: JSON.stringify(payload) }), "Could not re-date");

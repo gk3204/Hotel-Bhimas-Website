@@ -90,6 +90,39 @@ def safe_mode() -> bool:
     return (os.getenv("SAFE_MODE", "") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+_DELIVERED = ("sent", "delivered", "read", "email_sent")
+
+
+def _record_email(db, template, params, body, to_email, client_ref, *, guest_id=None, booking_id=None,
+                  commit=True):
+    """v6m.6: an e-mail fallback leaves a record under the same client_ref, so the next sweep's
+    already_sent() sees it. Without one, an owner reachable only by e-mail - or whose WhatsApp send
+    had failed - was mailed again on every sweep. Best-effort; never raises."""
+    if not client_ref:
+        return
+    try:
+        from models import WhatsAppMessage
+        row = db.query(WhatsAppMessage).filter(WhatsAppMessage.client_ref == client_ref).first()
+        if row is not None:
+            row.status = "email_sent"
+            row.provider = "email"
+            row.error = f"WhatsApp not delivered; e-mailed {to_email}"[:300]
+        else:
+            whatsapp_service._log_row(db, "out", "email", template, params, body, status="email_sent",
+                                      provider="email", client_ref=client_ref, guest_id=guest_id,
+                                      booking_id=booking_id, commit=False)
+        if commit:
+            db.commit()
+        else:
+            db.flush()
+    except Exception as e:
+        logger.warning(f"notify: could not record the e-mail for {client_ref}: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
 def notify(db, *, template, params=None, to_phone=None, to_email=None, to_name=None,
            guest_id=None, booking_id=None, client_ref=None, commit=True,
            respect_optout=None):
@@ -120,8 +153,13 @@ def notify(db, *, template, params=None, to_phone=None, to_email=None, to_name=N
             row = whatsapp_service.send_template(
                 db, to_phone, template, params, guest_id=guest_id, booking_id=booking_id,
                 client_ref=client_ref, respect_optout=respect_optout, commit=commit)
-            if row is not None and getattr(row, "status", None) == "sent":
-                return {"channel": "whatsapp", "ok": True, "detail": "Sent on WhatsApp."}
+            # v6m.6: a re-run gets the EXISTING row back (send_template is idempotent), whose status
+            # Meta's callback has since moved on to delivered / read. Only "sent" counted, so every
+            # re-run of an owner alert fell through to the e-mail fallback.
+            if row is not None and getattr(row, "status", None) in _DELIVERED:
+                by_email = getattr(row, "provider", None) == "email"
+                return {"channel": "email" if by_email else "whatsapp", "ok": True,
+                        "detail": "Already sent by email." if by_email else "Sent on WhatsApp."}
             reason = getattr(row, "error", None) if row is not None else "send failed"
             # An opt-out is a deliberate guest choice — respect it rather than
             # routing around it by email.
@@ -144,6 +182,8 @@ def notify(db, *, template, params=None, to_phone=None, to_email=None, to_name=N
             ok = email_service.send_notification_email(
                 to_email, _SUBJECTS.get(template, "Hotel Bhimas"), body, to_name=to_name)
             if ok:
+                _record_email(db, template, params, body, to_email, client_ref,
+                              guest_id=guest_id, booking_id=booking_id, commit=commit)
                 return {"channel": "email", "ok": True, "detail": "Sent by email."}
             return {"channel": "none", "ok": False,
                     "detail": "WhatsApp and email both unavailable."}

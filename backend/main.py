@@ -14,7 +14,7 @@ from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-da
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
-APP_BUILD = "v6m.5"
+APP_BUILD = "v6m.6"
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
@@ -81,13 +81,26 @@ def _start_whatsapp_scheduler():
             db.close()
 
         def _tick():
+            # v6m.6: ONE worker at a time. uvicorn runs 4 workers and each started this scheduler, so
+            # every owner alert / reminder went out four times. The lock lives on its own connection
+            # (closing it always releases the lock - see the OTA poller note on pooled connections).
+            from sqlalchemy import text as _text
             _db = SessionLocal()
+            lock_conn = None
             try:
+                lock_conn = _db.get_bind().connect()
+                if not lock_conn.execute(_text("SELECT pg_try_advisory_lock(7140215)")).scalar():
+                    return
                 run_whatsapp_jobs(_db)
             except Exception as e:
                 logger.error(f"WhatsApp scheduled sweep failed: {e}")
             finally:
                 _db.close()
+                if lock_conn is not None:
+                    try:
+                        lock_conn.close()
+                    except Exception:
+                        pass
 
         sched = BackgroundScheduler(daemon=True, timezone="UTC")
         sched.add_job(_tick, "interval", minutes=interval, id="whatsapp_sweep",

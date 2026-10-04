@@ -118,8 +118,15 @@ def already_sent(db, client_ref) -> bool:
     skip work + count only genuinely-new sends (send_template is idempotent regardless)."""
     if not client_ref:
         return False
-    row = db.query(WhatsAppMessage).filter(WhatsAppMessage.client_ref == client_ref).first()
-    return row is not None and row.status != "failed"
+    # v6m.6: notify_owner() stores one row PER OWNER as "<ref>:0", "<ref>:1" (client_ref is unique),
+    # so an exact match on "<ref>" never found them and every owner alert was re-sent on every
+    # 15-minute sweep - 377 e-mails on 3-4 Oct, which used up the Mailjet day (200) and blocked the
+    # guest's booking confirmation (booking 381). Match the per-owner rows too.
+    pattern = client_ref.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + ":%"
+    rows = db.query(WhatsAppMessage.status).filter(
+        (WhatsAppMessage.client_ref == client_ref)
+        | (WhatsAppMessage.client_ref.like(pattern, escape="\\"))).all()
+    return any(r.status != "failed" for r in rows)
 
 
 # ---------------------------------------------------------------------------

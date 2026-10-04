@@ -165,15 +165,15 @@ def reconcile_razorpay(db, days: int = 14, dry_run: bool = True) -> dict:
 
 def reconcile_razorpay_locked(db, days: int = 2) -> dict | None:
     """The scheduled sweep: one worker at a time (uvicorn runs several), never raises."""
+    lock_conn = None
     try:
-        got = db.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _RECONCILE_LOCK_KEY}).scalar()
+        # v6m.6: the lock on its OWN connection (closing it releases it). On the ORM session, a commit
+        # inside the sweep returns that connection to the pool and the unlock runs elsewhere.
+        lock_conn = db.get_bind().connect()
+        got = lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _RECONCILE_LOCK_KEY}).scalar()
         if not got:
             return None
-        try:
-            return reconcile_razorpay(db, days=days, dry_run=False)
-        finally:
-            db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _RECONCILE_LOCK_KEY})
-            db.commit()
+        return reconcile_razorpay(db, days=days, dry_run=False)
     except Exception as e:
         logger.error(f"Razorpay reconcile sweep failed: {e}")
         try:
@@ -181,3 +181,9 @@ def reconcile_razorpay_locked(db, days: int = 2) -> dict | None:
         except Exception:
             pass
         return None
+    finally:
+        if lock_conn is not None:
+            try:
+                lock_conn.close()
+            except Exception:
+                pass

@@ -7,7 +7,7 @@ import {
   getBookingGuests,
   getGuestScanObjectUrl,
 } from "../../api/bookings";
-import { adminCancelBooking, markNoShow, reinstateBooking, redateBooking, editBookingDetails, editBookingRooms } from "../../api/admin";
+import { adminCancelBooking, markNoShow, reinstateBooking, redateBooking, editBookingDetails, editBookingRooms, resendBookingConfirmation } from "../../api/admin";
 import { getRoomTypes } from "../../api/roomTypes";
 import { jwtDecode } from "jwt-decode";
 import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard, FaUserSlash, FaUndo, FaCalendarAlt, FaEdit, FaPlus, FaTimes } from "react-icons/fa";
@@ -198,6 +198,13 @@ const Bookings = () => {
       showToast("Booking reinstated.");
       loadBookings();
     } catch (e) { showToast(e.message || "Could not reinstate", "error"); }
+  };
+  const resendConfirmation = async (b) => {
+    if (!window.confirm(`E-mail booking #${b.booking_id}'s confirmation again to the guest and the hotel?`)) return;
+    try {
+      const res = await resendBookingConfirmation(b.booking_id);
+      showToast(`Confirmation e-mailed to ${(res.sent_to || []).join(" and ")}`);
+    } catch (e) { showToast(e.message || "Could not send the confirmation", "error"); }
   };
   const openEdit = async (b) => {
     try {
@@ -537,6 +544,16 @@ const Bookings = () => {
                                 className="bg-red-600 hover:bg-red-700 px-3 py-2 rounded-lg text-white text-sm font-medium transition inline-flex items-center gap-1"
                               >
                                 <FaTrash size={12} /> Cancel
+                              </button>
+                            )}
+                            {/* v6m.6: a paid website booking whose confirmation e-mail did not go out. */}
+                            {role === "admin" && b.booking_source === "website" && ["confirmed", "checked_in", "checked_out"].includes(b.status) && (
+                              <button
+                                onClick={() => resendConfirmation(b)}
+                                title="E-mail the booking confirmation again (guest + hotel)"
+                                className="bg-slate-700 hover:bg-slate-600 px-3 py-2 rounded-lg text-white text-sm font-semibold transition"
+                              >
+                                Resend email
                               </button>
                             )}
                             {/* v6m: admin edits the booking - guest details, rooms and price. */}
