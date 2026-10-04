@@ -94,7 +94,12 @@ def _detect_card_anomalies(db, new_alerts, keys):
     # v4b1: counts an OTA/website prepayment, otherwise this detector raised a
     # `card_without_payment` alert on EVERY OTA guest — noise that trains staff to ignore it.
     from routers.payments import total_paid_including_prepaid
-    cards = db.query(CardIssuance).filter(CardIssuance.status == "active").all()
+    # v6m.4: GUEST keys only. A cleaning card is linked to the stay that just checked out (so the
+    # clean is traced to it), which made every cleaning card a "card without booking" - all 13 such
+    # alerts on production were cleaning cards. A cleaning card has its own checks
+    # (cleaning_too_long / cleaning_too_fast).
+    cards = db.query(CardIssuance).filter(CardIssuance.status == "active",
+                                          CardIssuance.card_type == "guest").all()
     for c in cards:
         booking = db.query(Booking).filter(Booking.booking_id == c.booking_id).first() if c.booking_id else None
         reason = None
@@ -296,6 +301,22 @@ def _detect_ota_no_email(db, new_alerts, keys):
 
 def run_reconciliation(db) -> dict:
     """Run every detector, persist new (de-duplicated) alerts, return per-type counts."""
+    # v6m.4: clear what the cleaning-card bug left behind, before detecting anything.
+    try:
+        from utils.housekeeping import retire_stale_cleaning_cards
+        retire_stale_cleaning_cards(db)
+        stale = (db.query(FraudAlert).join(CardIssuance, CardIssuance.id == FraudAlert.card_id)
+                 .filter(FraudAlert.type == "card_without_booking", FraudAlert.status == "open",
+                         CardIssuance.card_type == "cleaning").all())
+        for a in stale:
+            a.status = "dismissed"
+            a.reviewed_at = datetime.utcnow()
+            a.review_note = ("Auto-dismissed (v6m.4): a housekeeping CLEANING card, not a guest key - "
+                             "this alert was raised in error.")
+        db.commit()
+    except Exception as e:
+        logger.error(f"cleaning-card cleanup failed: {e}", exc_info=True)
+        db.rollback()
     keys = _existing_open_keys(db)
     new_alerts = []
     for detector in (_detect_card_anomalies, _detect_cleaning_too_long,

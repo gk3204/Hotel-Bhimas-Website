@@ -59,10 +59,27 @@ def cleaning_card_state(db, room) -> str:
         CardIssuance.room_id == room.room_id,
         CardIssuance.card_type == "cleaning",
         CardIssuance.issued_at >= since,
+        CardIssuance.status != "cancelled",   # v6m.4: a card never written does not use up the cycle
     ).all()
     if not cards:
         return "none"
     return "active" if any(c.status == "active" for c in cards) else "used"
+
+
+def retire_stale_cleaning_cards(db) -> int:
+    """v6m.4: a cleaning card still 'active' for a room that is no longer being cleaned is a ghost -
+    the room was inspected and re-let without the card being returned (on production, five rooms
+    whose card was never written because the encode crashed). Left active it reads as a live card
+    out in the building, so retire it. Caller commits. Returns how many."""
+    from models import Room
+    n = 0
+    for c in (db.query(CardIssuance)
+              .filter(CardIssuance.card_type == "cleaning", CardIssuance.status == "active").all()):
+        room = db.query(Room).filter(Room.room_id == c.room_id).first()
+        if room is None or room.status != "cleaning":
+            c.status = "expired"
+            n += 1
+    return n
 
 
 def set_hk_status(db, room_id: int, status: str, user=None, photo_url=None):

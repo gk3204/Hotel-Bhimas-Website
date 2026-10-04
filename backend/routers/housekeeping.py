@@ -434,7 +434,11 @@ def encode_cleaning_card(room_id: int, data: CleaningCardRequest, db: Session = 
     db.refresh(card)
     write_audit(db, user, "housekeeping.cleaning_card_issue", "card", card.id,
                 after={"room_id": room.room_id, "room_number": room.room_number,
-                       "valid_to": valid_to.isoformat(), "hours": hours,
+                       # v6m.4: was `"hours": hours` - a name v6i removed when the window moved to
+                       # minutes. Every encode on production raised NameError HERE, after the card was
+                       # committed: the desk got a 500, never wrote the card, and the room showed
+                       # "card out" with nothing in the housekeeper's hand (18 of 18 cards, Oct 2-4).
+                       "valid_to": valid_to.isoformat(), "minutes": minutes,
                        "station_id": data.station_id, "client_ref": data.client_ref},
                 client="desktop", commit=True)
     return _cleaning_card_payload(room, card)
@@ -474,6 +478,48 @@ def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
                 after={"room_id": room_id, "room_number": room.room_number},
                 client="desktop", commit=True)
     return {"room_id": room_id, "cleaning_card": "used", "task_done": bool(task)}
+
+
+CANCEL_WINDOW_MINUTES = 10
+
+
+@router.post("/rooms/{room_id}/cleaning-card/cancel")
+def cancel_cleaning_card(room_id: int, db: Session = Depends(get_db),
+                         user=Depends(require_reception_or_admin)):
+    """v6m.4: undo a cleaning card that was recorded but never WRITTEN (the encoder failed).
+
+    The cleaning card is once per cleaning cycle, and the desk's own advice after an encoder failure
+    was "Return, then retry" - but a returned card counts as this cycle's card, so the retry was
+    refused. A cancelled card does not count: the task goes back to pending (its start time cleared,
+    so the retry is not judged "cleaned too fast") and the room back to dirty. Reception may cancel
+    within 10 minutes of the encode (the desk does it automatically on a failed write); admin any
+    time. Audited."""
+    room = db.query(Room).filter(Room.room_id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    card = active_cleaning_card(db, room_id)
+    if not card:
+        raise HTTPException(status_code=409, detail="No outstanding cleaning card for this room")
+    age_min = ((datetime.now() - card.valid_from).total_seconds() / 60) if card.valid_from else 0
+    if user.get("role") != "admin" and age_min > CANCEL_WINDOW_MINUTES:
+        raise HTTPException(status_code=403,
+                            detail=f"This cleaning card was cut {int(age_min)} minutes ago - only an admin can "
+                                   f"cancel it now. If it was written, take it back with Return instead.")
+    card.status = "cancelled"
+    card.erased_at = clock.now_utc()
+    card.erased_by = _resolve_user_id(db, user)
+    task = open_checkout_clean_task(db, room_id)
+    if task and task.status == "in_progress":
+        task.status = "pending"
+        task.started_at = None
+    if room.status == "cleaning":
+        set_hk_status(db, room_id, "dirty", user=user)
+    db.commit()
+    write_audit(db, user, "housekeeping.cleaning_card_cancel", "card", card.id,
+                after={"room_id": room_id, "room_number": room.room_number,
+                       "minutes_after_issue": round(age_min, 1)},
+                client="desktop", commit=True)
+    return {"room_id": room_id, "cleaning_card": "none", "cancelled_card_id": card.id}
 
 
 # ---------------------------------------------------------------- minibar -> folio
