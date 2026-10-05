@@ -36,7 +36,7 @@ from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
 from utils.rate_engine import quote_stay
-from utils.housekeeping import on_room_dirtied, set_hk_status, cleaning_card_state
+from utils.housekeeping import on_room_dirtied, set_hk_status, cleaning_card_state, effective_hk_status
 from models import HousekeepingStatus, Payment, FraudAlert
 from routers.promotions import get_active_promotions, best_promotion_for_item
 from routers.payments import total_paid, total_paid_including_prepaid, prepaid_slice
@@ -1738,6 +1738,9 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         for room in rooms_by_id.values():
             room.status = "occupied"
             room.status_changed_at = datetime.utcnow()  # prompt 11: cleaning-too-long detection
+            # v6m.8: the housekeeping board reads this row, which stayed "inspected" after check-in
+            # (room shift has always set it; check-in never did).
+            set_hk_status(db, room.room_id, "occupied", user=user)
         db.commit()
 
         # FE-10: raise a "turn on AC" maintenance ticket for each assigned AC-type room.
@@ -4102,7 +4105,7 @@ def _build_desk_board(db: Session):
             "room_id": r.room_id,
             "room_number": r.room_number,
             "room_status": r.status,
-            "housekeeping_status": hk.status if hk else None,
+            "housekeeping_status": effective_hk_status(r, hk.status if hk else None),   # v6m.8
             "updated_at": hk.updated_at.isoformat() if hk and hk.updated_at else None,
             # cleaning-card controls on the desk housekeeping board (card-lock rooms only)
             "lock_type": r.lock_type,

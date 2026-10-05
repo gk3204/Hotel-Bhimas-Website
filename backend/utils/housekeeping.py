@@ -82,6 +82,22 @@ def retire_stale_cleaning_cards(db) -> int:
     return n
 
 
+# v6m.8: housekeeping states that only make sense for an EMPTY room. A room the front desk has
+# checked a guest into but whose housekeeping row still says one of these is stale.
+_VACANT_HK = ("", "clean", "inspected", "vacant")
+
+
+def effective_hk_status(room, hk_status):
+    """The housekeeping status to SHOW for a room. Check-in set Room.status = occupied but never
+    touched the housekeeping row, so a room let after inspection went on reading "inspected" on the
+    desk and web housekeeping boards (production rooms 16 and 17, and 18 others, 4 Oct). An occupied
+    room with a vacant-only housekeeping status is shown as occupied; a real in-stay state (a
+    touch-up "cleaning", "dnd", ...) is left as it is."""
+    if getattr(room, "status", None) == "occupied" and (hk_status or "").strip().lower() in _VACANT_HK:
+        return "occupied"
+    return hk_status
+
+
 def set_hk_status(db, room_id: int, status: str, user=None, photo_url=None):
     """Upsert the current housekeeping status for a room. Returns the row."""
     row = db.query(HousekeepingStatus).filter(HousekeepingStatus.room_id == room_id).first()

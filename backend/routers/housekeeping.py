@@ -37,7 +37,7 @@ _board_viewer = require_roles("admin", "housekeeper")
 from services import folio_resolver
 from utils.audit import write_audit, _resolve_user_id
 from utils.housekeeping import (set_hk_status, cleaning_card_state, active_cleaning_card,
-                                open_checkout_clean_task)
+                                open_checkout_clean_task, effective_hk_status)
 from utils.settings import (HK_AUTO_INSPECT_KEY, get_fraud_config, get_housekeeping_config,
                             set_setting, validate_category)
 from routers.folio import _recompute
@@ -160,7 +160,7 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
             "room_id": r.room_id,
             "room_number": r.room_number,
             "room_status": r.status,
-            "housekeeping_status": hk.status if hk else None,
+            "housekeeping_status": effective_hk_status(r, hk.status if hk else None),   # v6m.8
             "updated_at": hk.updated_at.isoformat() if hk and hk.updated_at else None,
             "photo_url": hk.photo_url if hk else None,
             # card-lock rooms are cleaning-card driven (no manual start); key rooms keep manual buttons.
