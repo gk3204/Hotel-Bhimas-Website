@@ -2747,7 +2747,14 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             _assert_booked_type_sold_out(db, item, new_room)
             reasons.append("alt_room_type")
         if reasons:
-            consume_otp(db, data.owner_otp_id, data.owner_otp_code, "room_assignment", user)
+            # v6m.9: the comment above promised `ac_downgrade` would keep working, but only
+            # `room_assignment` was accepted - and the desk asks for the shift's code as
+            # `ac_downgrade`, so every AC -> non-AC shift was refused "Invalid owner approval
+            # code" with a correct, unexpired code (prod, room 8 -> 7, 10 Oct). An ac_downgrade
+            # code covers exactly that one reason; an alternate-type sale still needs its own.
+            accepted = (("room_assignment", "ac_downgrade") if reasons == ["ac_downgrade"]
+                        else "room_assignment")
+            consume_otp(db, data.owner_otp_id, data.owner_otp_code, accepted, user)
 
         # ---- mutate (single transaction) ----
         before = {"room_id": old_room.room_id, "room_number": old_room.room_number,

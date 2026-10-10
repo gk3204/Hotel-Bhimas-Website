@@ -435,16 +435,17 @@ def build_context(db, action: str, *, booking=None, rooms=None, folio=None, gues
     return ctx
 
 
-def consume_otp(db, otp_id, code, action: str, user=None):
-    """Validate + single-use an owner OTP for `action`. Raises HTTPException on any
-    failure (missing, wrong action, expired, already used, wrong code). On success the
-    row is marked used and the caller may proceed. Does NOT commit — it joins the caller's
-    transaction so the OTP is only spent if the action itself commits."""
+def consume_otp(db, otp_id, code, action, user=None):
+    """Validate + single-use an owner OTP for `action` (one action, or a tuple of acceptable
+    ones). Raises HTTPException on any failure (missing, wrong action, expired, already used,
+    wrong code). On success the row is marked used and the caller may proceed. Does NOT commit
+    — it joins the caller's transaction so the OTP is only spent if the action itself commits."""
     if not otp_id or not code:
         raise HTTPException(status_code=403,
                             detail="owner_otp_required: this action needs an owner approval code")
+    actions = (action,) if isinstance(action, str) else tuple(action)
     otp = db.query(OwnerOtp).filter(OwnerOtp.id == otp_id).first()
-    if not otp or otp.action != action:
+    if not otp or otp.action not in actions:
         raise HTTPException(status_code=403, detail="Invalid owner approval code")
     if otp.used:
         raise HTTPException(status_code=403, detail="Owner approval code already used")
