@@ -18,10 +18,12 @@ export default function OwnerDashboard() {
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
   const [closing, setClosing] = useState(false);
+  // v6m.10: the day to close / re-send; blank = yesterday (what the 03:00 night audit closes).
+  const [closeDate, setCloseDate] = useState("");
 
   const showToast = (msg) => {
     setToast(msg);
-    setTimeout(() => setToast(""), 3500);
+    setTimeout(() => setToast(""), 6000);
   };
 
   const load = async () => {
@@ -50,8 +52,11 @@ export default function OwnerDashboard() {
   const doDayClose = async () => {
     setClosing(true);
     try {
-      const res = await runDayClose();
-      showToast(`Day-close done for ${res.business_date} (${res.folios_posted} folio(s) posted)`);
+      const res = await runDayClose(closeDate || undefined);
+      const mail = res.eod_email?.sent
+        ? ` — reports e-mailed to ${res.eod_email.recipients}`
+        : res.eod_email?.reason ? ` — no e-mail (${res.eod_email.reason})` : "";
+      showToast(`Day-close done for ${res.business_date}${mail}`);
       load();
     } catch (e) {
       showToast(e.message || "Day-close failed");
@@ -83,6 +88,13 @@ export default function OwnerDashboard() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            <input
+              type="date"
+              value={closeDate}
+              onChange={(e) => setCloseDate(e.target.value)}
+              title="Day to close and e-mail to accounts — leave blank for yesterday"
+              className="bg-slate-800 border border-slate-600 rounded-lg px-3 py-2 text-white text-sm"
+            />
             <button
               onClick={doDayClose}
               disabled={closing}

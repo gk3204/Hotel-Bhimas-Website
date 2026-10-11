@@ -20,24 +20,23 @@ from datetime import date, datetime, timedelta
 from services import folio_resolver
 from models import Booking, CashShift, DayCloseSummary, Folio
 from sqlalchemy import func, text
-from utils.settings import (get_reports_config, set_setting, BUSINESS_DATE_KEY)
+from utils.settings import (set_setting, BUSINESS_DATE_KEY)
 from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
 
 
 def _target_date(db, business_date=None):
-    """The date to close. Explicit arg wins; else the stored business_date; else yesterday
-    (the most recently completed day). Falls back to today only if yesterday would be negative."""
+    """The date to close. Explicit arg wins; else the day that has just ENDED - yesterday at the
+    hotel (the audit runs in the small hours, `night_audit_hour`, default 03:00 IST).
+
+    v6m.10: this used to close the STORED business date, and roll_business_date() then stored that
+    same date again - so the audit closed one date for ever. Production's stored date was the
+    go-live 2026-09-15: every night closed 15 Sep and e-mailed its (empty) cashier and check-out
+    summaries to accounts. The stored setting is now only a record of the last day closed."""
     if business_date is not None:
         return business_date
-    cfg = get_reports_config(db)
-    if cfg["business_date"]:
-        try:
-            return date.fromisoformat(cfg["business_date"])
-        except ValueError:
-            pass
-    return date.today() - timedelta(days=1)
+    return clock.business_today() - timedelta(days=1)
 
 
 def ensure_folios_posted(db):
@@ -243,6 +242,7 @@ def _run_night_audit_locked(db, business_date=None, user=None, generated_by="sch
 
     # v5d-C: email the configured end-of-day reports (00:00–23:59 of `target`) to the accounting
     # address. Best-effort — a mail failure must never fail the day-close.
+    eod = None
     try:
         from routers.reports import deliver_eod_reports
         eod = deliver_eod_reports(db, target)
@@ -265,4 +265,5 @@ def _run_night_audit_locked(db, business_date=None, user=None, generated_by="sch
         logger.warning(f"night-audit: arrival-exceptions summary failed: {e}")
         arrival_totals = {}
     return {"business_date": str(target), "folios_posted": folios_posted, "snapshot": snapshot,
-            "no_shows": no_shows, "arrival_exceptions": arrival_totals}
+            "no_shows": no_shows, "arrival_exceptions": arrival_totals,
+            "eod_email": eod}   # v6m.10: whether the accounts e-mail went, for the dashboard
