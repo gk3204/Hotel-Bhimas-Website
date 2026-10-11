@@ -37,7 +37,8 @@ _board_viewer = require_roles("admin", "housekeeper")
 from services import folio_resolver
 from utils.audit import write_audit, _resolve_user_id
 from utils.housekeeping import (set_hk_status, cleaning_card_state, active_cleaning_card,
-                                open_checkout_clean_task, effective_hk_status)
+                                open_checkout_clean_task, effective_hk_status,
+                                active_viewing_card, resolve_card_alerts)
 from utils.settings import (HK_AUTO_INSPECT_KEY, get_fraud_config, get_housekeeping_config,
                             set_setting, validate_category)
 from routers.folio import _recompute
@@ -462,6 +463,7 @@ def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
     card.status = "erased"
     card.erased_at = clock.now_utc()          # F-03: an instant, stored UTC
     card.erased_by = _resolve_user_id(db, user)
+    resolve_card_alerts(db, card.id, f"Cleaning card returned at {datetime.now():%d-%m %H:%M}.")   # v6x
 
     # Auto-finish cleaning -> awaiting inspection. Deliberately leave Room.status == "cleaning"
     # (even if auto-inspect is on) so the housekeeper still records cleaned-by/inspected-by.
@@ -520,6 +522,109 @@ def cancel_cleaning_card(room_id: int, db: Session = Depends(get_db),
                        "minutes_after_issue": round(age_min, 1)},
                 client="desktop", commit=True)
     return {"room_id": room_id, "cleaning_card": "none", "cancelled_card_id": card.id}
+
+
+# ---------------------------------------------------------------- v6x: room-VIEWING card
+# Reception shows a vacant, ready room to a walk-in customer: a guest-style card for that room,
+# valid for `viewing_card_minutes` (web Settings -> Front desk). It must come back and be wiped;
+# one still out past its time raises a high `viewing_card_overdue` alert (utils/fraud_detection).
+
+def _viewing_card_payload(room: Room, card: CardIssuance) -> dict:
+    p = _cleaning_card_payload(room, card)
+    p.pop("cleaning_card", None)
+    p["viewing_card"] = "active" if card.status == "active" else card.status
+    return p
+
+
+@router.post("/rooms/{room_id}/viewing-card")
+def encode_viewing_card(room_id: int, data: CleaningCardRequest, db: Session = Depends(get_db),
+                        user=Depends(require_reception_or_admin)):
+    """Record a room-viewing card for a VACANT card-lock room; the desk then writes it."""
+    from routers.reception import _room_code
+    from utils.settings import get_frontdesk_config
+    room = db.query(Room).filter(Room.room_id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    if data.client_ref:
+        existing = db.query(CardIssuance).filter(CardIssuance.client_ref == data.client_ref,
+                                                 CardIssuance.card_type == "viewing").first()
+        if existing:
+            return {**_viewing_card_payload(room, existing), "duplicate": True}
+    if room.lock_type == "key":
+        raise HTTPException(status_code=409, detail="Key-lock room - show it with the key; no card is needed")
+    if not room.is_active or room.status != "vacant":
+        raise HTTPException(status_code=409,
+                            detail=f"Room {room.room_number} is not vacant and ready ({room.status}) - "
+                                   f"only an empty, inspected room can be shown")
+    if active_viewing_card(db, room.room_id):
+        raise HTTPException(status_code=409,
+                            detail=f"A viewing card for room {room.room_number} is already out - return it first")
+    minutes = get_frontdesk_config(db)["viewing_card_minutes"]
+    valid_from = datetime.now()
+    valid_to = valid_from + timedelta(minutes=minutes)
+    card = CardIssuance(room_id=room.room_id, card_uid=data.card_uid, card_type="viewing",
+                        room_code=_room_code(room), valid_from=valid_from, valid_to=valid_to,
+                        issued_by=_resolve_user_id(db, user), station_id=data.station_id,
+                        status="active", issue_type="viewing", client_ref=data.client_ref)
+    db.add(card)
+    db.commit()
+    db.refresh(card)
+    write_audit(db, user, "housekeeping.viewing_card_issue", "card", card.id,
+                after={"room_id": room.room_id, "room_number": room.room_number,
+                       "valid_to": valid_to.isoformat(), "minutes": minutes,
+                       "station_id": data.station_id, "client_ref": data.client_ref},
+                client="desktop", commit=True)
+    return _viewing_card_payload(room, card)
+
+
+@router.post("/rooms/{room_id}/viewing-card/return")
+def return_viewing_card(room_id: int, db: Session = Depends(get_db),
+                        user=Depends(require_reception_or_admin)):
+    """The viewing card came back and was wiped: mark it erased and close any overdue alert."""
+    room = db.query(Room).filter(Room.room_id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    card = active_viewing_card(db, room_id)
+    if not card:
+        raise HTTPException(status_code=409, detail="No viewing card is out for this room")
+    card.status = "erased"
+    card.erased_at = clock.now_utc()
+    card.erased_by = _resolve_user_id(db, user)
+    late = card.valid_to is not None and datetime.now() > card.valid_to
+    resolve_card_alerts(db, card.id, f"Viewing card returned and wiped "
+                                     f"{'(late) ' if late else ''}at {datetime.now():%d-%m %H:%M}.")
+    db.commit()
+    write_audit(db, user, "housekeeping.viewing_card_return", "card", card.id,
+                after={"room_id": room_id, "room_number": room.room_number, "late": late},
+                client="desktop", commit=True)
+    return {"room_id": room_id, "viewing_card": "none", "returned_card_id": card.id, "late": late}
+
+
+@router.post("/rooms/{room_id}/viewing-card/cancel")
+def cancel_viewing_card(room_id: int, db: Session = Depends(get_db),
+                        user=Depends(require_reception_or_admin)):
+    """Undo a viewing card the encoder never WROTE (reception within 10 minutes, admin any time)."""
+    room = db.query(Room).filter(Room.room_id == room_id).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Room not found")
+    card = active_viewing_card(db, room_id)
+    if not card:
+        raise HTTPException(status_code=409, detail="No viewing card is out for this room")
+    age_min = ((datetime.now() - card.valid_from).total_seconds() / 60) if card.valid_from else 0
+    if user.get("role") != "admin" and age_min > CANCEL_WINDOW_MINUTES:
+        raise HTTPException(status_code=403,
+                            detail=f"This viewing card was cut {int(age_min)} minutes ago - only an admin can "
+                                   f"cancel it now. If it was written, take it back with Return instead.")
+    card.status = "cancelled"
+    card.erased_at = clock.now_utc()
+    card.erased_by = _resolve_user_id(db, user)
+    resolve_card_alerts(db, card.id, "Viewing card cancelled - it was never written.")
+    db.commit()
+    write_audit(db, user, "housekeeping.viewing_card_cancel", "card", card.id,
+                after={"room_id": room_id, "room_number": room.room_number,
+                       "minutes_after_issue": round(age_min, 1)},
+                client="desktop", commit=True)
+    return {"room_id": room_id, "viewing_card": "none", "cancelled_card_id": card.id}
 
 
 # ---------------------------------------------------------------- minibar -> folio

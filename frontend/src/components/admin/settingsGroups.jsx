@@ -154,6 +154,11 @@ export const SETTINGS_GROUPS = [
           { value: "all", label: "Everyone who must show an ID" },
           { value: "lead", label: "Lead guest only" },
         ] },
+      { key: "viewing_card_minutes", type: "number", min: 1, max: 240, step: "1",
+        label: "Room-viewing card (minutes)",
+        hint: "How long a card cut to SHOW a vacant room to a customer opens the door. It must come " +
+              "back and be wiped at the desk; one still out 5 minutes after this time raises a high " +
+              "fraud alert to the owner." },
       { key: "lost_card_fee_amount", type: "number", min: 0, step: "1",
         label: "Lost key card fee (₹, GST inclusive)",
         hint: "Charged to the room's bill automatically when the desk reissues a lost card. " +

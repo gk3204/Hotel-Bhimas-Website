@@ -47,6 +47,26 @@ def active_cleaning_card(db, room_id: int):
     ).order_by(CardIssuance.id.desc()).first()
 
 
+def active_viewing_card(db, room_id: int):
+    """v6x: the room's outstanding (un-returned) room-viewing card, if any."""
+    return db.query(CardIssuance).filter(
+        CardIssuance.room_id == room_id,
+        CardIssuance.card_type == "viewing",
+        CardIssuance.status == "active",
+    ).order_by(CardIssuance.id.desc()).first()
+
+
+def resolve_card_alerts(db, card_id: int, note: str):
+    """v6x: close the open overdue alert(s) on a card once it is handed back. Caller commits."""
+    from models import FraudAlert
+    for a in db.query(FraudAlert).filter(FraudAlert.card_id == card_id, FraudAlert.status == "open",
+                                         FraudAlert.type.in_(("viewing_card_overdue",
+                                                              "cleaning_card_overdue"))).all():
+        a.status = "reviewed"
+        a.reviewed_at = datetime.utcnow()
+        a.review_note = note[:500]
+
+
 def cleaning_card_state(db, room) -> str:
     """'none' | 'active' | 'used' for the room's CURRENT cleaning cycle.
     active = an outstanding cleaning card exists (offer Return); used = one was issued this cycle

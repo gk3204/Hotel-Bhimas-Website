@@ -4102,10 +4102,19 @@ def _build_desk_board(db: Session):
             return "none"
         since = room.status_changed_at or datetime.min
         cards = [c for c in _cleaning_by_room.get(room.room_id, [])
-                 if c.issued_at is not None and c.issued_at >= since]
+                 if c.issued_at is not None and c.issued_at >= since
+                 and c.status != "cancelled"]   # v6x: as cleaning_card_state - a cancel frees the cycle
         if not cards:
             return "none"
         return "active" if any(c.status == "active" for c in cards) else "used"
+
+    # v6x: room-viewing cards out right now (one query)
+    _viewing_by_room = {}
+    if _card_rooms:
+        for c in db.query(CardIssuance).filter(
+                CardIssuance.room_id.in_([r.room_id for r in _card_rooms]),
+                CardIssuance.card_type == "viewing", CardIssuance.status == "active").all():
+            _viewing_by_room[c.room_id] = c
 
     for r, hk in _hk_rows:
         rooms_hk.append({
@@ -4119,6 +4128,10 @@ def _build_desk_board(db: Session):
             "building": r.building,
             "floor": r.floor,
             "cleaning_card": _cleaning_state(r),
+            "viewing_card": "active" if r.room_id in _viewing_by_room else "none",
+            "viewing_valid_to": (_viewing_by_room[r.room_id].valid_to.isoformat()
+                                 if r.room_id in _viewing_by_room and _viewing_by_room[r.room_id].valid_to
+                                 else None),
         })
 
     # v5s, owner's explicit choice: the In-house board reads by ROOM NUMBER (Arrivals and

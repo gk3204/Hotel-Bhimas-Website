@@ -121,6 +121,36 @@ def _detect_card_anomalies(db, new_alerts, keys):
                                 "note": "active card no longer matches a paid, in-house booking"})
 
 
+CARD_OVERDUE_GRACE_MINUTES = 5
+
+
+def _detect_cards_overdue(db, new_alerts, keys):
+    """v6x (owner): a viewing or cleaning card still OUT after its time is a room left open.
+
+    The card stops opening the lock at valid_to, but nobody knows whether it was handed back - an
+    unreturned card is exactly the case to look into. Raised once per card (high, so the owner is
+    told on WhatsApp by the owner-alert sweep), closed when the card is returned."""
+    cutoff = datetime.now() - timedelta(minutes=CARD_OVERDUE_GRACE_MINUTES)
+    cards = (db.query(CardIssuance)
+             .filter(CardIssuance.card_type.in_(("viewing", "cleaning")),
+                     CardIssuance.status == "active",
+                     CardIssuance.valid_to.isnot(None), CardIssuance.valid_to < cutoff).all())
+    for c in cards:
+        r = db.query(Room).filter(Room.room_id == c.room_id).first()
+        kind = "viewing_card_overdue" if c.card_type == "viewing" else "cleaning_card_overdue"
+        what = "viewing" if c.card_type == "viewing" else "cleaning"
+        minutes_over = int((datetime.now() - c.valid_to).total_seconds() // 60)
+        _make_alert(new_alerts, keys, type=kind, severity="high",
+                    dedupe_key=f"{kind}:card:{c.id}", room_id=c.room_id, card_id=c.id,
+                    booking_id=c.booking_id,
+                    detail={"room_number": r.room_number if r else None, "card_type": c.card_type,
+                            "issued_at": str(c.issued_at) if c.issued_at else None,
+                            "valid_to": str(c.valid_to), "minutes_overdue": minutes_over,
+                            "note": f"The {what} card for room {r.room_number if r else '?'} was not "
+                                    f"returned {minutes_over} min after it expired - find the card and "
+                                    f"check the room."})
+
+
 def _detect_cleaning_too_long(db, new_alerts, keys):
     from utils.housekeeping import active_cleaning_card
     max_minutes = get_config(db)["cleaning_max_minutes"]
@@ -301,6 +331,19 @@ def _detect_ota_no_email(db, new_alerts, keys):
 
 def run_reconciliation(db) -> dict:
     """Run every detector, persist new (de-duplicated) alerts, return per-type counts."""
+    # v6x: report un-returned viewing / cleaning cards FIRST - the retirement below would otherwise
+    # quietly expire an unreturned cleaning card on a room that was inspected without it.
+    _early_keys = _existing_open_keys(db)
+    _early = []
+    try:
+        _detect_cards_overdue(db, _early, _early_keys)
+        for a in _early:
+            db.add(a)
+        db.commit()
+    except Exception as e:
+        logger.error(f"fraud detector _detect_cards_overdue failed: {e}", exc_info=True)
+        db.rollback()
+        _early = []
     # v6m.4: clear what the cleaning-card bug left behind, before detecting anything.
     try:
         from utils.housekeeping import retire_stale_cleaning_cards
@@ -332,6 +375,7 @@ def run_reconciliation(db) -> dict:
         db.add(a)
     db.commit()
 
+    new_alerts = _early + new_alerts
     by_type = {}
     for a in new_alerts:
         by_type[a.type] = by_type.get(a.type, 0) + 1

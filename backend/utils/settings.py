@@ -124,6 +124,9 @@ CHECKIN_SCANS_REQUIRED_KEY = "checkin_scans_required"
 # v6m: WHOSE ID must be scanned, separately from whose ID must be shown (owner: details for every
 # room, scans for the lead only). "all" = everyone who must show an ID (the old behaviour).
 CHECKIN_SCANS_SCOPE_KEY = "checkin_scans_scope"
+# v6x: how long a room-VIEWING card (showing a vacant room to a prospective guest) opens the door.
+VIEWING_CARD_MINUTES_KEY = "viewing_card_minutes"
+VIEWING_CARD_MINUTES_DEFAULT = 15
 SCANS_SCOPES = ("all", "lead")
 # v6f: a travel agent arriving with thirty rooms cannot produce thirty IDs at the counter, so an
 # agent booking asks for the lead guest's only. On by default, because it is what the owner asked
@@ -446,6 +449,9 @@ def get_frontdesk_config(db) -> dict:
                         if (get_setting(db, CHECKIN_SCANS_SCOPE_KEY, "all") or "all").strip().lower()
                         in SCANS_SCOPES else "all"),
         "no_show_from_date": cutoff.isoformat() if cutoff else None,
+        "viewing_card_minutes": min(240, max(1, int(_as_float(
+            get_setting(db, VIEWING_CARD_MINUTES_KEY, str(VIEWING_CARD_MINUTES_DEFAULT)),
+            VIEWING_CARD_MINUTES_DEFAULT)))),
         # v5r: numbers that may never be stored as a guest contact (the OTAs' own lines).
         "blocked_guest_phones": (get_setting(db, BLOCKED_PHONES_KEY, "") or "").strip(),
     }
