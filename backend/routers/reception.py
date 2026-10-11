@@ -2980,11 +2980,23 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         balance_before = float(folio.balance or 0)
         grand_before = float(booking.grand_total or 0)
 
+        # v6m.12 (owner): the overstay sweep already charged the night before the current check-out
+        # and moved the check-out; staff then used Extend just to get a new key card and the guest
+        # paid that night twice in effect (prod #417, #534, #543). Say so before anything is charged.
+        _ov = (db.query(FolioCharge).join(Folio, Folio.id == FolioCharge.folio_id)
+               .filter(Folio.booking_id == booking.booking_id, FolioCharge.type == "room",
+                       FolioCharge.posting_reason == room_posting.REASON_OVERSTAY,
+                       FolioCharge.void == False,  # noqa: E712
+                       FolioCharge.charge_date == old_co - timedelta(days=1))
+               .order_by(FolioCharge.id.desc()).first())
+        overstay_night = ({"night": str(_ov.charge_date), "amount": float(_ov.amount or 0)}
+                          if _ov is not None else None)
         if data.dry_run:
             resp = {
                 "booking_id": booking.booking_id, "dry_run": True, "already": False,
                 "from_check_out": str(old_co), "to_check_out": str(new_co),
                 "extra_nights": (new_co - old_co).days,
+                "overstay_night_charged": overstay_night,
                 "items": preview["per_item"],
                 "quoted_amount": quoted, "applied_amount": None,
                 "comped": comped,

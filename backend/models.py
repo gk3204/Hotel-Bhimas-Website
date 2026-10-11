@@ -310,6 +310,10 @@ class Payment(Base):
     shift_id = Column(Integer, ForeignKey("cash_shifts.id"), nullable=True, index=True)  # open cash shift a CASH payment was taken in (prompt 12 reconciles)
     refund_shift_id = Column(Integer, ForeignKey("cash_shifts.id"), nullable=True)  # open cash shift a CASH refund was paid out of
     collected_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)  # desk user who took the money (from JWT)
+    # v6m.12 (migration 052): when the refund was paid out (UTC) and by whom - the voucher printed
+    # its print time and the original collector because neither was stored.
+    refunded_at = Column(DateTime, nullable=True)
+    refunded_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     refund_mode = Column(String(20), nullable=True)  # desk refunds: cash|upi|bank (razorpay refunds leave NULL)
     refund_reference = Column(String(100), nullable=True)  # UPI / bank reference of the refund payout
     # Integrated desk collection (prompt 19): a Razorpay UPI-QR or payment-link raised at the desk.

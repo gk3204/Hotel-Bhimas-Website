@@ -444,14 +444,25 @@ def generate_folio_invoice_pdf(invoice_data):
     # Invoice / stay meta
     booking = invoice_data["booking"]
     guest = invoice_data["guest"]
+    # v6m.12 (owner): the ACTUAL check-in and check-out moments (date AND time, the room's own clock
+    # on a per-room bill), the time the invoice was issued and who issued it. The invoice printed the
+    # BOOKED dates only, with no times and no name.
+    def _moment(v):
+        if not v:
+            return "N/A"
+        return v.strftime("%d-%m-%Y %H:%M") if hasattr(v, "hour") else v.strftime("%d-%m-%Y")
+    issued_at = invoice_data.get("issued_at")
     meta_data = [
         ["Invoice No", invoice_data["invoice_no"],
-         "Invoice Date", invoice_data["invoice_date"].strftime("%d-%m-%Y")],
+         "Invoice Date", (issued_at.strftime("%d-%m-%Y %H:%M") if issued_at
+                          else invoice_data["invoice_date"].strftime("%d-%m-%Y"))],
         ["Booking ID", str(booking["booking_id"]),
          "Nights", str(booking["nights"])],
         ["Guest", guest["name"], "Phone", guest["phone"]],
-        ["Check-in", booking["check_in"].strftime("%d-%m-%Y") if booking["check_in"] else "N/A",
-         "Check-out", booking["check_out"].strftime("%d-%m-%Y") if booking["check_out"] else "N/A"],
+        ["Check-in", _moment(booking.get("checked_in_at") or booking["check_in"]),
+         "Check-out", _moment(booking.get("checked_out_at") or booking["check_out"])],
+        ["Source", booking.get("source_label") or "N/A",
+         "Issued by", invoice_data.get("issued_by_name") or "Front desk"],
     ]
     # v5m B2B: the registered buyer, printed only when the invoice carries a GSTIN.
     buyer = invoice_data.get("buyer")
@@ -928,12 +939,15 @@ def generate_payment_receipt_pdf(receipt_data):
 
     method_label = (receipt_data.get("method") or "").replace("_", " ").upper() or "N/A"
     meta_data = [
+        # v6m.12: a refund voucher is dated when the refund was PAID (it printed the print time).
         ["Receipt No", receipt_data.get("receipt_no") or "N/A",
-         "Date", _dt(receipt_data.get("date")) if not is_refund else _dt(datetime.now())],
+         "Date", _dt(receipt_data.get("refunded_at")) if is_refund else _dt(receipt_data.get("date"))],
         ["Booking ID", str(receipt_data.get("booking_id") or "N/A"),
          "Guest", receipt_data.get("guest_name") or "N/A"],
         ["Phone", receipt_data.get("guest_phone") or "N/A",
-         "Collected by", receipt_data.get("collected_by_name") or "Front desk"],
+         ("Refunded by" if is_refund else "Collected by"),
+         (receipt_data.get("refunded_by_name") if is_refund else receipt_data.get("collected_by_name"))
+         or "Front desk"],
     ]
     if is_refund:
         meta_data += [

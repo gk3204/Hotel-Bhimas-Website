@@ -15,6 +15,7 @@ Automations:
   * vendor_renewals          -- AMC/contract renewal window -> owner (prompt 18 slice 13)
 """
 import logging
+from utils import clock          # v6m.12
 from datetime import datetime, timedelta
 
 from models import Booking, Guest, BookingItem, Room, FraudAlert
@@ -283,7 +284,7 @@ def send_operational_summary_if_due(db) -> int:
     def _c(q):
         return int(q.scalar() or 0)
     checked_in = _c(db.query(func.count(Booking.booking_id)).filter(func.date(Booking.checked_in_at) == day))
-    checked_out = _c(db.query(func.count(Booking.booking_id)).filter(func.date(Booking.checked_out_at) == day))
+    checked_out = _c(db.query(func.count(Booking.booking_id)).filter(clock.business_date_sql(Booking.checked_out_at) == day))
     cleaned = _c(db.query(func.count(HousekeepingTask.id)).filter(
         HousekeepingTask.type == "checkout_clean", func.date(HousekeepingTask.done_at) == day))
     inspected = _c(db.query(func.count(HousekeepingTask.id)).filter(func.date(HousekeepingTask.inspected_at) == day))

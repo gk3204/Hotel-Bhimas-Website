@@ -14,6 +14,7 @@ import hmac
 import hashlib
 from database import SessionLocal
 from models import Booking, Payment, BookingItem, RoomType, WebhookEvent, Folio, FolioCharge, CashShift, User
+from utils import clock          # v6m.12: receipt / refund times
 from schemas import DeskPaymentRecord, PaymentRefundRequest, ExcessReturnRequest, DeskCollectRequest
 from utils.pdf_generator import generate_booking_pdf, generate_payment_receipt_pdf
 from utils.email_service import send_booking_email
@@ -1541,6 +1542,8 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
         ok, refund_id, message = process_gateway_refund(db, payment.payment_id, amount, data.reason)
         if not ok:
             raise HTTPException(status_code=502, detail=message)
+        payment.refunded_at = clock.now_utc()                 # v6m.12
+        payment.refunded_by = _resolve_user_id(db, user)
     else:
         # Desk path: record the payout (no gateway). All in one transaction below.
         refund_id = f"DESK-{uuid.uuid4().hex[:8].upper()}"
@@ -1550,6 +1553,8 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
         payment.refund_reason = data.reason
         payment.refund_mode = data.mode
         payment.refund_reference = data.reference
+        payment.refunded_at = clock.now_utc()                 # v6m.12
+        payment.refunded_by = _resolve_user_id(db, user)
         # Link the refund to the open shift whatever the mode (v3 item 6), so a shift's
         # money-out is reportable by mode. The DRAWER maths in cash_shift._compute_totals
         # still counts only refund_mode == "cash", so expected_cash is unchanged.
@@ -1695,6 +1700,8 @@ def return_excess(data: ExcessReturnRequest, db: Session = Depends(get_db),
             p.refund_reason = "Excess deposit return"
             p.refund_mode = data.mode
             p.refund_reference = data.reference
+            p.refunded_at = clock.now_utc()                   # v6m.12
+            p.refunded_by = _resolve_user_id(db, user)
             if data.mode == "cash":
                 p.refund_shift_id = shift.id if shift else None
             alloc_out.append({"payment_id": p.payment_id, "amount": take, "refund_id": p.refund_id})
@@ -1820,6 +1827,8 @@ def receipt_payload(db, payment, kind="payment") -> dict:
     guest = booking.guest if booking else None
     collector = (db.query(User).filter(User.user_id == payment.collected_by).first()
                  if payment.collected_by else None)
+    refunder = (db.query(User).filter(User.user_id == payment.refunded_by).first()
+                if getattr(payment, "refunded_by", None) else None)
     return {
         "kind": kind,
         "payment_id": payment.payment_id,
@@ -1828,7 +1837,11 @@ def receipt_payload(db, payment, kind="payment") -> dict:
         "booking_id": payment.booking_id,
         "guest_name": guest.name if guest else "\u2014",
         "guest_phone": guest.phone if guest else None,
-        "date": payment.created_at,
+        # v6m.12: created_at is stored UTC (Postgres now()); the receipt printed it raw, 5 h 30 min
+        # behind the time the guest actually paid.
+        "date": clock.to_local(payment.created_at),
+        "refunded_at": clock.to_local(getattr(payment, "refunded_at", None)),
+        "refunded_by_name": (refunder.full_name or refunder.username) if refunder else None,
         "amount": float(payment.amount or 0),
         "method": payment.method or payment.gateway,
         "reference": payment.payment_id_gateway,

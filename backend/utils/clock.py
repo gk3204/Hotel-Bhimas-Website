@@ -114,8 +114,13 @@ def business_date_sql(col):
         func.date(Payment.created_at) == day     ->  business_date_sql(Payment.created_at) == day
 
     ⛔ Only for UTC instants. Columns that hold the hotel's WALL CLOCK — `checked_in_at`,
-    `checked_out_at`, `stay_started_at`, and the card window — are already local, and running this
-    over them would shift them the wrong way.
+    `stay_started_at`, and the card window — are already local, and running this over them would
+    shift them the wrong way.
+
+    v6m.12: `checked_out_at` (booking and booking_item) is a UTC INSTANT - checkout writes
+    `now_utc()` and the review / WhatsApp jobs compare it with utcnow. It was documented here as
+    local, so the invoice and several reports printed it 5 h 30 min early. Convert it with
+    `to_local()` to show it, and filter it with `business_date_sql()`.
 
     Note it is a function over a column, so an index on that column will not be used. These are
     reporting queries over one small hotel's data; correctness is worth more than the scan here.

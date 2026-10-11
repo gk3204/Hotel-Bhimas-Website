@@ -1004,10 +1004,14 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
             "cr_no": p.payment_id_gateway or "",
             "user": _user_name(db, p.collected_by)}
 
+    # v6m.12: the printed time is the hotel's clock (payments are stored UTC).
+    _loc = clock.to_local
+    _SETTLE_WINDOW = timedelta(hours=5, minutes=30)
+
     for p in receipts:
         m = (p.method or "other")
         at = p.created_at
-        b, folio, base = _base(p, at)
+        b, folio, base = _base(p, _loc(at))
         amt = float(p.amount or 0)
         if amt:
             # A receipt taken at/after the guest's checkout moment settles their bill; earlier
@@ -1018,8 +1022,13 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
             # are anchored to it). Comparing them raw made the payment look 5.5 h EARLIER than the
             # checkout it settled, so this test was false for every normal checkout and the whole
             # cashier summary filed settlements under ADVANCE.
+            # v6m.12: both are UTC instants (checked_out_at is written with now_utc). The desk takes
+            # the settling payment BEFORE it calls checkout (checkout refuses a balance), so a strict
+            # "paid after checkout" would file every real settlement as ADVANCE. A payment within
+            # _SETTLE_WINDOW before the checkout counts as its settlement - the same 5 h 30 min the
+            # old local-vs-UTC comparison allowed by accident, now on purpose.
             is_checkout = bool(b and b.checked_out_at and at
-                               and clock.to_local(at) >= b.checked_out_at)
+                               and at >= b.checked_out_at - _SETTLE_WINDOW)
             mm = _mode(m)
             if is_checkout:
                 inv = _get_invoice(db, folio.id) if folio else None
@@ -1035,7 +1044,10 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
     for p in refunds:
         rf = float(p.refund_amount or 0)
         if rf and p.refund_status == "completed":
-            _, _, base = _base(p, p.created_at)
+            # v6m.12: the time and the user of the REFUND, not of the original payment
+            _, _, base = _base(p, _loc(getattr(p, "refunded_at", None) or p.created_at))
+            if getattr(p, "refunded_by", None):
+                base["user"] = _user_name(db, p.refunded_by)
             mm = _mode(p.refund_mode or (p.method or "other"))
             # Match the printed refund-voucher number; CR No = the refund's own payout reference.
             mm["paidout"].append({**base, "bill_no": f"RFND-{p.payment_id}",
@@ -1061,7 +1073,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
     unsettled, nil_checkouts = [], []
     receipted_bookings = {p.booking_id for p in receipts if float(p.amount or 0)}
     checkouts = (db.query(Booking).filter(Booking.status == "checked_out",
-                                          func.date(Booking.checked_out_at) == checkouts_day).all()
+                                          clock.business_date_sql(Booking.checked_out_at) == checkouts_day).all()
                  if checkouts_day else [])
     for b in checkouts:
         # v6e: ONE ROW PER BILL. A stay that bills per room leaves three bills behind, and this is
@@ -1129,7 +1141,7 @@ def checkout_summary_data(db, day):
     from routers.folio import _get_invoice
     rows = []
     bookings = (db.query(Booking).filter(Booking.status == "checked_out",
-                                         func.date(Booking.checked_out_at) == day)
+                                         clock.business_date_sql(Booking.checked_out_at) == day)
                 .order_by(Booking.checked_out_at).all())
     # v6e: ONE ROW PER BILL. A per-room stay issues a bill per room, each with its own invoice
     # number, and this report is read as the day's list of bills. `advance` and `refund` belong to
@@ -1277,8 +1289,8 @@ def room_detail_data(db, dfrom, dto):
     rows = []
     bookings = (db.query(Booking)
                 .filter(Booking.checked_out_at.isnot(None),
-                        func.date(Booking.checked_out_at) >= dfrom,
-                        func.date(Booking.checked_out_at) <= dto)
+                        clock.business_date_sql(Booking.checked_out_at) >= dfrom,
+                        clock.business_date_sql(Booking.checked_out_at) <= dto)
                 .order_by(Booking.checked_out_at).all())
     for b in bookings:
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
@@ -1305,7 +1317,7 @@ def room_detail_data(db, dfrom, dto):
                 "booking_id": b.booking_id, "room": r.room_number if r else "—",
                 "guest": b.display_guest_name or None,
                 "check_in": b.checked_in_at.isoformat() if b.checked_in_at else None,
-                "check_out": b.checked_out_at.isoformat() if b.checked_out_at else None,
+                "check_out": clock.to_local(b.checked_out_at).isoformat() if b.checked_out_at else None,
                 "cleaning_started": task.started_at.isoformat() if task and task.started_at else None,
                 "cleaning_ended": task.done_at.isoformat() if task and task.done_at else None,
                 "inspected_at": task.inspected_at.isoformat() if task and task.inspected_at else None,

@@ -30,11 +30,12 @@ from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
 from models import (Booking, BookingItem, Company, EInvoice, Folio, FolioCharge, Invoice,
-                    Payment, PaymentAllocation, RoomType)
+                    Payment, PaymentAllocation, RoomType, User)
 from schemas import (FolioBillToRequest, FolioChargeCreate, FolioDiscountRequest, FolioOpenRequest,
                      FolioVoidRequest, InvoiceBuyerRequest, ExtraPersonRequest)
 from services import company_service, folio_resolver, room_posting
 from utils import gst
+from utils import clock          # v6m.12: invoice times in the hotel clock
 from utils import ordering
 from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
@@ -355,7 +356,7 @@ def _folio_detail(db: Session, folio: Folio):
         # desk looks when a guest queries their bill, so it needs the real times.
         "check_in_time": str(booking.check_in_time) if booking and booking.check_in_time else None,
         "checked_in_at": booking.checked_in_at.isoformat() if booking and booking.checked_in_at else None,
-        "checked_out_at": booking.checked_out_at.isoformat() if booking and booking.checked_out_at else None,
+        "checked_out_at": clock.to_local(booking.checked_out_at).isoformat() if booking and booking.checked_out_at else None,
         "booking_status": booking.status if booking else None,
         # v4b6: so the bill header can say "Complimentary" before anyone asks for money.
         "comp_mode": (getattr(booking, "comp_mode", "none") or "none") if booking else "none",
@@ -1366,6 +1367,33 @@ def _frozen_totals(invoice: Invoice, charges) -> dict:
     return live
 
 
+_SOURCE_LABELS = {"walk_in": "Walk-in", "website": "Website", "makemytrip": "MakeMyTrip",
+                  "goibibo": "Goibibo", "yatra": "Yatra", "agoda": "Agoda", "booking_com": "Booking.com",
+                  "expedia": "Expedia", "cleartrip": "Cleartrip", "phone": "Phone", "agent": "Travel agent",
+                  "corporate": "Corporate", "other_ota": "OTA"}
+
+
+def _source_label(db, booking) -> str:
+    """Where the stay came from, as printed on the invoice: the channel, the agent's or the company's
+    name when the booking has one."""
+    src = (booking.booking_source or "").strip().lower()
+    label = _SOURCE_LABELS.get(src, src.replace("_", " ").title() or "Walk-in")
+    try:
+        if getattr(booking, "agent_id", None):
+            from models import TravelAgent
+            a = db.query(TravelAgent).filter(TravelAgent.id == booking.agent_id).first()
+            if a is not None:
+                label = f"Travel agent - {a.name}"
+        if getattr(booking, "company_id", None):
+            from models import Company
+            c = db.query(Company).filter(Company.id == booking.company_id).first()
+            if c is not None:
+                label = f"{label} / {c.name}"
+    except Exception:
+        pass
+    return label
+
+
 def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
     """Everything the PDF/email needs. Charges are frozen once invoiced, so
     recomputing line groups here always matches the stored snapshot."""
@@ -1391,7 +1419,7 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
             "rate_ex_gst": round(taxable / qty, 2),
             "gst_amount": round(amount - taxable, 2),
             "amount": amount,
-            "posted_at": c.posted_at,
+            "posted_at": clock.to_local(c.posted_at),   # v6m.12: printed in the hotel's clock
         }
 
     # --- Payments & refunds, itemised (backlog v2 TBC-1) -------------------
@@ -1411,6 +1439,18 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
 
     nights = (booking.check_out - booking.check_in).days if booking else 0
     einvoice = db.query(EInvoice).filter(EInvoice.invoice_id == invoice.id).first()
+    # v6m.12: the actual moments, the ROOM's own on a per-room bill (checked_in_at / checked_out_at are
+    # stored as the hotel's wall clock - see utils/clock), and who issued the invoice and when.
+    _item = None
+    if booking and getattr(folio, "booking_item_id", None):
+        _item = next((i for i in booking.booking_items if i.booking_item_id == folio.booking_item_id), None)
+    _cin = (getattr(_item, "checked_in_at", None) if _item else None) or (booking.checked_in_at if booking else None)
+    # checked_out_at is a UTC instant (checkout writes now_utc) - convert it for the page
+    _cout = clock.to_local((getattr(_item, "checked_out_at", None) if _item else None)
+                           or (booking.checked_out_at if booking else None))
+    if _item is not None and getattr(_item, "check_in", None) and getattr(_item, "check_out", None):
+        nights = (_item.check_out - _item.check_in).days
+    _issuer = db.query(User).filter(User.user_id == invoice.created_by).first() if invoice.created_by else None
     return {
         "invoice_no": invoice.invoice_no,
         "invoice_date": invoice.invoice_date,
@@ -1434,8 +1474,13 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
             "booking_id": folio.booking_id,
             "check_in": booking.check_in if booking else None,
             "check_out": booking.check_out if booking else None,
+            "checked_in_at": _cin,
+            "checked_out_at": _cout,
+            "source_label": _source_label(db, booking) if booking else None,
             "nights": nights,
         },
+        "issued_at": clock.to_local(invoice.created_at),
+        "issued_by_name": (_issuer.full_name or _issuer.username) if _issuer else None,
         "lines": [_line(c) for c in charges if c.type not in ("payment", "discount")],
         "discount_lines": [_line(c) for c in charges if c.type == "discount"],
         "payment_lines": settlement_lines,

@@ -2,6 +2,7 @@
 programmed with (card code BBFFRR). Admin manages rooms; reception reads them (desktop room grid).
 """
 import logging
+from utils import clock          # v6m.12
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -88,7 +89,7 @@ def room_history(room_id: int, limit: int = 25, db: Session = Depends(get_db)):
             "check_out": str(b.check_out) if b.check_out else None,
             "status": b.status,
             "checked_in_at": b.checked_in_at.isoformat() if b.checked_in_at else None,
-            "checked_out_at": b.checked_out_at.isoformat() if b.checked_out_at else None,
+            "checked_out_at": clock.to_local(b.checked_out_at).isoformat() if b.checked_out_at else None,
             "grand_total": float(b.grand_total or 0),
             "source": b.booking_source,
         })

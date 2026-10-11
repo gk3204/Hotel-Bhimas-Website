@@ -128,7 +128,7 @@ def compute_day_report(db, day=None) -> dict:
 
     def _departures():
         out = []
-        for b in (db.query(Booking).filter(func.date(Booking.checked_out_at) == day)
+        for b in (db.query(Booking).filter(clock.business_date_sql(Booking.checked_out_at) == day)
                   .order_by(Booking.checked_out_at).all()):
             g = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
             out.append({"room": _room_labels(db, b.booking_id), "guest": g.name if g else "—"})
