@@ -1018,8 +1018,11 @@ def send_report_email(to_emails, subject, html_body, attachments):
     for path, filename in (attachments or []):
         try:
             if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                # v6m.13: the daily receipts ZIP rides the same email
+                ctype = ("application/zip" if filename.lower().endswith(".zip")
+                         else "text/csv" if filename.lower().endswith(".csv") else "application/pdf")
                 with open(path, "rb") as f:
-                    atts.append({"ContentType": "application/pdf", "Filename": filename,
+                    atts.append({"ContentType": ctype, "Filename": filename,
                                  "Base64Content": base64.b64encode(f.read()).decode()})
         except Exception as e:
             logger.warning(f"report email attach failed ({filename}): {e}")
@@ -1033,7 +1036,9 @@ def send_report_email(to_emails, subject, html_body, attachments):
             "Attachments": atts,
         }]}
         if _safe_mode():
-            logger.warning("SAFE_MODE: not sending email %s", data)
+            # never log the attachments themselves - a receipts ZIP is megabytes of base64
+            logger.warning("SAFE_MODE: not sending report email %r to %s with %s", subject, to_emails,
+                           [a["Filename"] for a in atts])
             return False
         result = mailjet.send.create(data=data)
         if result.status_code == 200:

@@ -1092,6 +1092,11 @@ def checkin_quote(data: CheckinQuoteRequest, db: Session = Depends(get_db),
     return out
 
 
+def _src_label_slip(db, booking):
+    from utils.booking_source import source_label
+    return source_label(db, booking)
+
+
 def _checkin_response(db: Session, booking: Booking, folio: Folio | None, already: bool):
     valid_from, valid_to = _card_window(booking)     # the stay's own window, for the response
     cards = []
@@ -1950,8 +1955,23 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
             except Exception:
                 pass
 
+        # v6m.13 (owner, item 4): money paid BEFORE arrival (OTA / agent / website) gets its
+        # receipt now, dated this moment. Idempotent; best-effort.
+        _prepaid = None
+        try:
+            from services.prepaid_receipts import issue_prepaid_receipt, prepaid_receipt_summary
+            _prepaid = prepaid_receipt_summary(
+                issue_prepaid_receipt(db, booking, _resolve_user_id(db, user)))
+        except Exception as e:
+            logger.warning(f"prepaid receipt for booking {booking.booking_id} failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
         db.refresh(booking)
         resp = _checkin_response(db, booking, folio, already=False)
+        resp["prepaid_receipt"] = _prepaid
         resp["vip"] = checkin_gate["vip"]
         resp["blacklist_warning"] = (checkin_gate["reason"] or "Guest is on the watchlist") \
             if checkin_gate["blacklist"] else None
@@ -4503,6 +4523,7 @@ def registration_slip(booking_id: int, room_ids: str = Query(None),
         "checked_in_at": booking.checked_in_at,
         "expected_check_out": booking_checkout_moment(booking),
         "booking_source": booking.booking_source,
+        "source_label": _src_label_slip(db, booking),   # v6m.13 (owner, item 6)
         "grand_total": float(booking.grand_total or 0),
         "paid_total": total_paid(db, booking_id),
         "balance": float(folio.balance or 0) if folio else None,

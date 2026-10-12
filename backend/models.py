@@ -521,6 +521,23 @@ class FolioCharge(Base):
     bill_to = Column(String(10), nullable=False, default="guest", index=True)  # guest | company
 
 
+class PrepaidReceipt(Base):
+    """v6m.13: the receipt for money paid BEFORE arrival (OTA / agent / website), issued once per
+    booking at check-in. A document only - never a Payment, so nothing is counted twice and the
+    cash drawer is untouched. Number: PRE-<id>. See migration 053."""
+    __tablename__ = "prepaid_receipts"
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), unique=True, nullable=False)
+    kind = Column(String(10), nullable=False)               # ota | website | agent
+    channel = Column(String(60), nullable=False)
+    amount = Column(Numeric(12, 2), nullable=False, default=0)
+    net_to_hotel = Column(Numeric(12, 2), nullable=True)
+    reference = Column(String(200), nullable=True)
+    payment_ids = Column(String(200), nullable=True)
+    issued_at = Column(DateTime, server_default=func.now(), nullable=False, index=True)  # UTC
+    issued_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+
+
 class Invoice(Base):
     """GST tax invoice snapshot for a folio (prompt 07). One invoice per folio;
     numbers are sequential per Indian financial year (INV/2026-27/00001)."""

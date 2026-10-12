@@ -541,7 +541,7 @@ def get_reports_config(db) -> dict:
     works regardless of the enabled flag."""
     bd = (get_setting(db, BUSINESS_DATE_KEY, "") or "").strip()
     raw_keys = (get_setting(db, EOD_REPORT_KEYS_KEY,
-                            "occupancy_analysis,cashier_summary,checkout_summary") or "")
+                            "occupancy_analysis,cashier_summary,checkout_summary,receipts_zip") or "")
     eod_keys = [k.strip() for k in raw_keys.replace(";", ",").split(",") if k.strip()]
     return {
         "business_date": bd or None,

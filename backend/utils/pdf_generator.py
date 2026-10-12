@@ -130,6 +130,7 @@ def generate_booking_pdf(booking_data, payment_data):
 
     booking_table_data = [
         ["Booking ID", str(booking_data['booking_id'])],
+        ["Source", booking_data.get("source_label") or "Website"],   # v6m.13 (owner, item 6)
         ["Room Type(s)", room_types_str],
         ["Check-in", booking_data['check_in'].strftime("%d-%m-%Y")],
         ["Expected Arrival Time", arrival_display],
@@ -464,6 +465,11 @@ def generate_folio_invoice_pdf(invoice_data):
         ["Source", booking.get("source_label") or "N/A",
          "Issued by", invoice_data.get("issued_by_name") or "Front desk"],
     ]
+    # v6m.13 (owner, item 4): the receipt for what was paid before arrival
+    pre = invoice_data.get("prepaid_receipt")
+    if pre:
+        meta_data.append(["Prepaid", f"Rs. {float(pre.get('amount') or 0):,.2f} - {pre.get('channel') or ''}",
+                          "Receipt", f"{pre.get('receipt_no')}" + (f" ({pre['reference']})" if pre.get("reference") else "")])
     # v5m B2B: the registered buyer, printed only when the invoice carries a GSTIN.
     buyer = invoice_data.get("buyer")
     if buyer and buyer.get("gstin"):
@@ -744,7 +750,8 @@ def generate_registration_slip_pdf(slip_data):
         ["Guest", slip_data.get("guest_name") or "", "Phone", slip_data.get("phone") or ""],
         ["ID Type", id_label, "ID Number", slip_data.get("id_number_masked") or "N/A"],
         ["Room(s)", ", ".join(slip_data.get("rooms") or []) or "N/A",
-         "Source", (slip_data.get("booking_source") or "").replace("_", " ").title()],
+         "Source", slip_data.get("source_label")
+         or (slip_data.get("booking_source") or "").replace("_", " ").title()],
         ["Check-in", _d(slip_data.get("check_in")),
          "Exp. check-out",
          _dt(slip_data.get("expected_check_out")) if slip_data.get("expected_check_out")
@@ -900,9 +907,11 @@ def generate_payment_receipt_pdf(receipt_data):
     """
     import tempfile
     is_refund = receipt_data.get("kind") == "refund"
+    is_prepaid = receipt_data.get("kind") == "prepaid"     # v6m.13: paid to the OTA / website before arrival
     file_path = os.path.join(
         tempfile.gettempdir(),
-        f"{'refund_voucher' if is_refund else 'payment_receipt'}_{receipt_data['payment_id']}.pdf")
+        f"{'refund_voucher' if is_refund else 'prepaid_receipt' if is_prepaid else 'payment_receipt'}"
+        f"_{receipt_data['payment_id']}.pdf")
 
     doc = SimpleDocTemplate(file_path, pagesize=A4,
                             rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
@@ -932,12 +941,14 @@ def generate_payment_receipt_pdf(receipt_data):
         name="ReceiptTitle", parent=styles["Title"],
         textColor=colors.HexColor("#B8860B"), fontSize=16, alignment=1, spaceAfter=16,
     )
-    elements.append(Paragraph("REFUND VOUCHER" if is_refund else "PAYMENT RECEIPT", title_style))
+    elements.append(Paragraph("REFUND VOUCHER" if is_refund
+                              else "PREPAID RECEIPT" if is_prepaid else "PAYMENT RECEIPT", title_style))
 
     def _dt(value):
         return value.strftime("%d-%m-%Y %H:%M") if value else "N/A"
 
-    method_label = (receipt_data.get("method") or "").replace("_", " ").upper() or "N/A"
+    method_label = ((receipt_data.get("method") or "") if is_prepaid
+                    else (receipt_data.get("method") or "").replace("_", " ").upper()) or "N/A"
     meta_data = [
         # v6m.12: a refund voucher is dated when the refund was PAID (it printed the print time).
         ["Receipt No", receipt_data.get("receipt_no") or "N/A",
@@ -945,9 +956,11 @@ def generate_payment_receipt_pdf(receipt_data):
         ["Booking ID", str(receipt_data.get("booking_id") or "N/A"),
          "Guest", receipt_data.get("guest_name") or "N/A"],
         ["Phone", receipt_data.get("guest_phone") or "N/A",
-         ("Refunded by" if is_refund else "Collected by"),
+         ("Refunded by" if is_refund else "Issued by" if is_prepaid else "Collected by"),
          (receipt_data.get("refunded_by_name") if is_refund else receipt_data.get("collected_by_name"))
          or "Front desk"],
+        # v6m.13 (owner, item 6): where the stay came from, on every receipt
+        ["Source", receipt_data.get("source") or "N/A", "", ""],
     ]
     if is_refund:
         meta_data += [
@@ -959,6 +972,12 @@ def generate_payment_receipt_pdf(receipt_data):
             ["Refund ref", receipt_data.get("refund_reference") or "N/A",
              "Reason", receipt_data.get("refund_reason") or "N/A"],
         ]
+    elif is_prepaid:
+        meta_data += [
+            ["Mode", method_label, "Reference", receipt_data.get("reference") or "N/A"],
+        ]
+        if receipt_data.get("net_to_hotel") is not None:
+            meta_data += [["Net to hotel", f"Rs. {receipt_data['net_to_hotel']:,.2f} (after commission)", "", ""]]
     else:
         meta_data += [
             ["Mode", method_label, "Reference", receipt_data.get("reference") or "N/A"],
@@ -976,7 +995,8 @@ def generate_payment_receipt_pdf(receipt_data):
 
     # Big amount box + amount in words
     amount = (receipt_data.get("refund_amount") if is_refund else receipt_data.get("amount")) or 0
-    amount_label = "AMOUNT REFUNDED" if is_refund else "AMOUNT RECEIVED"
+    amount_label = ("AMOUNT REFUNDED" if is_refund
+                    else "AMOUNT PREPAID (not collected at desk)" if is_prepaid else "AMOUNT RECEIVED")
     amount_table = Table([[amount_label, f"Rs. {amount:,.2f}"]], colWidths=[220, 220])
     amount_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (-1, -1), colors.HexColor("#B8860B")),

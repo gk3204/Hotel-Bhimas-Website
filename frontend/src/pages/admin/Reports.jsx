@@ -79,7 +79,7 @@ const REPORTS = {
             x.cr_no, x.remarks || "", x.user || ""]));
         });
         rows.push({ kind: "subtotal", cells: [`Total (${m.label})`, "", "", "", "",
-          fmt(m.receipt), fmt(m.payment), "", "", "", ""] });
+          fmt(m.receipt), fmt(m.payment), "", "", m.memo ? "MEMO - not in grand total" : "", ""] });
       });
       if ((d.unsettled || []).length) rows.push({ kind: "section", label: "Unsettled Checkout Bills" });
       (d.unsettled || []).forEach((x) => rows.push([x.bill_no, "", "", x.room, x.guest || "", "", "", fmt(x.balance), "", "UNSETTLED", ""]));

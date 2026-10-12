@@ -366,6 +366,8 @@ def _folio_detail(db: Session, folio: Folio):
         # extras balance reads as the whole bill.
         "booking_source": booking.booking_source if booking else None,
         **prepaid_slice(db, booking),
+        # v6m.13 (owner, item 4): the receipt issued at check-in for what was paid before arrival
+        "prepaid_receipt": _prepaid_receipt(db, folio.booking_id),
         "invoice_no": invoice.invoice_no if invoice else None,
         "invoice_date": str(invoice.invoice_date) if invoice else None,
         "charges": [{
@@ -1367,31 +1369,20 @@ def _frozen_totals(invoice: Invoice, charges) -> dict:
     return live
 
 
-_SOURCE_LABELS = {"walk_in": "Walk-in", "website": "Website", "makemytrip": "MakeMyTrip",
-                  "goibibo": "Goibibo", "yatra": "Yatra", "agoda": "Agoda", "booking_com": "Booking.com",
-                  "expedia": "Expedia", "cleartrip": "Cleartrip", "phone": "Phone", "agent": "Travel agent",
-                  "corporate": "Corporate", "other_ota": "OTA"}
+def _prepaid_receipt(db, booking_id):
+    """v6m.13: the booking's prepaid receipt (short form), or None."""
+    from models import PrepaidReceipt
+    from services.prepaid_receipts import prepaid_receipt_summary
+    if not booking_id:
+        return None
+    return prepaid_receipt_summary(
+        db.query(PrepaidReceipt).filter(PrepaidReceipt.booking_id == booking_id).first())
 
 
 def _source_label(db, booking) -> str:
-    """Where the stay came from, as printed on the invoice: the channel, the agent's or the company's
-    name when the booking has one."""
-    src = (booking.booking_source or "").strip().lower()
-    label = _SOURCE_LABELS.get(src, src.replace("_", " ").title() or "Walk-in")
-    try:
-        if getattr(booking, "agent_id", None):
-            from models import TravelAgent
-            a = db.query(TravelAgent).filter(TravelAgent.id == booking.agent_id).first()
-            if a is not None:
-                label = f"Travel agent - {a.name}"
-        if getattr(booking, "company_id", None):
-            from models import Company
-            c = db.query(Company).filter(Company.id == booking.company_id).first()
-            if c is not None:
-                label = f"{label} / {c.name}"
-    except Exception:
-        pass
-    return label
+    """Where the stay came from (v6m.13: one helper for receipts and invoices alike)."""
+    from utils.booking_source import source_label
+    return source_label(db, booking)
 
 
 def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
@@ -1480,6 +1471,7 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
             "nights": nights,
         },
         "issued_at": clock.to_local(invoice.created_at),
+        "prepaid_receipt": _prepaid_receipt(db, folio.booking_id),
         "issued_by_name": (_issuer.full_name or _issuer.username) if _issuer else None,
         "lines": [_line(c) for c in charges if c.type not in ("payment", "discount")],
         "discount_lines": [_line(c) for c in charges if c.type == "discount"],

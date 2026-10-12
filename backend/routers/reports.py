@@ -934,10 +934,20 @@ def occupancy_analysis_data(db, as_on):
 
 
 _CASHIER_MODE_LABELS = {"cash": "Cash", "card": "C.Card", "upi": "UPI", "bank": "Bank",
-                        "other": "Other"}
+                        "other": "Other", "online": "Online (website)",
+                        "prepaid": "Prepaid before arrival (OTA / agent / website) - MEMO, not in drawer"}
 _CASHIER_SECTIONS = [("checkout", "Guest Check-out Bills"),
                      ("advance", "Advance Receipts"),
-                     ("paidout", "Paid-outs")]
+                     ("paidout", "Paid-outs"),
+                     ("prepaid", "Prepaid Receipts (issued at check-in)")]
+# v6m.13: modes listed for information only - never added to the grand total or the drawer
+_CASHIER_MEMO_MODES = {"prepaid"}
+
+
+def _online_payment(p) -> bool:
+    """A guest's own website payment: an online gateway, and nobody at the desk took it."""
+    return ((p.gateway or "") in ("razorpay", "phonepe") and not p.collected_by
+            and not getattr(p, "collect_method", None))
 
 
 def cashier_summary_data(db, day):
@@ -949,7 +959,11 @@ def cashier_summary_data(db, day):
     pays = (db.query(Payment).filter(Payment.status == "paid",
                                      clock.business_date_sql(Payment.created_at) == day)
             .order_by(Payment.created_at).all())
-    out = _cashier_summary_core(db, receipts=pays, refunds=pays, checkouts_day=day)
+    from models import PrepaidReceipt
+    prepaid = (db.query(PrepaidReceipt)
+               .filter(clock.business_date_sql(PrepaidReceipt.issued_at) == day)
+               .order_by(PrepaidReceipt.issued_at).all())
+    out = _cashier_summary_core(db, receipts=pays, refunds=pays, checkouts_day=day, prepaid=prepaid)
     return {"day": str(day), **out}
 
 
@@ -965,14 +979,21 @@ def cashier_summary_for_shift(db, shift):
                 .filter(Payment.status == "paid",
                         or_(Payment.shift_id == shift.id, and_(*_method_window(shift))))
                 .order_by(Payment.created_at).all())
+    # v6m.13: a guest paying on the website while this shift was open is not money the desk took
+    receipts = [p for p in receipts if not _online_payment(p)]
     refunds = (db.query(Payment)
                .filter(Payment.refund_status == "completed", Payment.refund_shift_id == shift.id)
                .order_by(Payment.payment_id).all())
-    out = _cashier_summary_core(db, receipts=receipts, refunds=refunds, checkouts_day=None)
+    from models import PrepaidReceipt
+    end = shift.closed_at or clock.now_utc()
+    prepaid = (db.query(PrepaidReceipt)
+               .filter(PrepaidReceipt.issued_at >= shift.opened_at, PrepaidReceipt.issued_at < end)
+               .order_by(PrepaidReceipt.issued_at).all())
+    out = _cashier_summary_core(db, receipts=receipts, refunds=refunds, checkouts_day=None, prepaid=prepaid)
     return {"shift_id": shift.id, **out}
 
 
-def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
+def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=None):
     """Shared body of the two cashier summaries. `receipts` = paid Payment rows to list as
     check-out bills / advances; `refunds` = Payment rows whose completed refund is a paid-out.
     `checkouts_day` adds the unsettled / nil-amount checkout sections for that calendar day."""
@@ -982,7 +1003,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
     modes = {}    # mode -> {section -> [rows], "receipt","payment"}
 
     def _mode(m):
-        return modes.setdefault(m, {"checkout": [], "advance": [], "paidout": [],
+        return modes.setdefault(m, {"checkout": [], "advance": [], "paidout": [], "prepaid": [],
                                     "receipt": 0.0, "payment": 0.0})
 
     def _ctx(p):
@@ -1009,7 +1030,8 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
     _SETTLE_WINDOW = timedelta(hours=5, minutes=30)
 
     for p in receipts:
-        m = (p.method or "other")
+        # v6m.13: a website payment has no desk method - call it what it is, not "Other"
+        m = (p.method or ("online" if _online_payment(p) else "other"))
         at = p.created_at
         b, folio, base = _base(p, _loc(at))
         amt = float(p.amount or 0)
@@ -1048,7 +1070,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
             _, _, base = _base(p, _loc(getattr(p, "refunded_at", None) or p.created_at))
             if getattr(p, "refunded_by", None):
                 base["user"] = _user_name(db, p.refunded_by)
-            mm = _mode(p.refund_mode or (p.method or "other"))
+            mm = _mode(p.refund_mode or p.method or ("online" if _online_payment(p) else "other"))
             # Match the printed refund-voucher number; CR No = the refund's own payout reference.
             mm["paidout"].append({**base, "bill_no": f"RFND-{p.payment_id}",
                                   "cr_no": p.refund_reference or "",
@@ -1056,18 +1078,40 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None):
                                   "remarks": (p.refund_reason or "REFUND PAIDOUT")})
             mm["payment"] += rf
 
+    # v6m.13 (owner, item 4): money paid BEFORE arrival, receipted at check-in. A memo - the hotel
+    # did not take it at the desk, so it is listed but never added to the totals or the drawer.
+    if prepaid:
+        from services.prepaid_receipts import mode_label, receipt_no
+        mp = _mode("prepaid")
+        for pr in prepaid:
+            b = db.query(Booking).filter(Booking.booking_id == pr.booking_id).first()
+            folio = folio_resolver.primary_folio(db, pr.booking_id)
+            at = _loc(pr.issued_at)
+            mp["prepaid"].append({
+                "date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
+                "room": _booking_room_label(db, pr.booking_id, rcache),
+                "guest": (b.display_guest_name if b else None), "booking_id": pr.booking_id,
+                "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
+                "bill_no": receipt_no(pr), "cr_no": pr.reference or "",
+                "receipt": round(float(pr.amount or 0), 2), "payment": 0.0,
+                "remarks": mode_label(pr).upper(), "user": _user_name(db, pr.issued_by)})
+            mp["receipt"] += float(pr.amount or 0)
+
     mode_rows = []
-    for m in sorted(modes):
+    for m in sorted(modes, key=lambda k: (k in _CASHIER_MEMO_MODES, k)):
         v = modes[m]
         mode_rows.append({
             "mode": m, "label": _CASHIER_MODE_LABELS.get(m, m.title()),
             "sections": [{"key": k, "label": lbl, "rows": v[k]} for k, lbl in _CASHIER_SECTIONS if v[k]],
             "receipt": round(v["receipt"], 2), "payment": round(v["payment"], 2),
             "net": round(v["receipt"] - v["payment"], 2),
+            "memo": m in _CASHIER_MEMO_MODES,
         })
-    grand = {"receipt": round(sum(x["receipt"] for x in mode_rows), 2),
-             "payment": round(sum(x["payment"] for x in mode_rows), 2),
-             "net": round(sum(x["net"] for x in mode_rows), 2)}
+    counted = [x for x in mode_rows if not x["memo"]]
+    grand = {"receipt": round(sum(x["receipt"] for x in counted), 2),
+             "payment": round(sum(x["payment"] for x in counted), 2),
+             "net": round(sum(x["net"] for x in counted), 2),
+             "prepaid_memo": round(sum(x["receipt"] for x in mode_rows if x["memo"]), 2)}
 
     # checked out today: unsettled (folio balance != 0) vs nil-amount (settled, no receipt today)
     unsettled, nil_checkouts = [], []
@@ -1118,6 +1162,8 @@ def _cashier_table(data):
                              x["remarks"] or "", x["user"] or ""])
         tr = _sub(f"Total ({md['label']})")
         tr[5], tr[6] = md["receipt"], md["payment"]
+        if md.get("memo"):
+            tr[9] = "MEMO - not in grand total"
         rows.append({"subtotal": tr})
     if data["unsettled"]:
         rows.append({"section": "Unsettled Checkout Bills"})
@@ -1388,7 +1434,103 @@ EOD_REPORT_CHOICES = {
     "maintenance_detail": "Maintenance Detail",
     "daily_sales": "Daily Sales",
     "lost_cards": "Lost Key Cards",
+    # v6m.13 (owner, item 5): every receipt, prepaid receipt and refund voucher of the day as PDFs
+    "receipts_zip": "All receipts & refund vouchers (ZIP)",
 }
+
+# Mailjet refuses a message over 15 MB, and base64 grows an attachment by a third. A day's ZIP is
+# split into parts of at most this many bytes; the first rides the report email, the rest follow
+# one per email ("part 2 of 3").
+RECEIPTS_ZIP_PART_BYTES = 8 * 1024 * 1024
+
+
+def receipts_of_day(db, day):
+    """Every money document of one business day, oldest first: (doc_no, type, when_local, payload).
+    Payment receipts by when the money came in; refund vouchers by when the refund was PAID OUT
+    (v6m.12 refunded_at, else the payment's time); prepaid receipts by when they were issued."""
+    from models import PrepaidReceipt
+    from routers.payments import receipt_payload
+    from services.prepaid_receipts import prepaid_receipt_payload, receipt_no
+    out = []
+    for p in (db.query(Payment).filter(Payment.status == "paid",
+                                       clock.business_date_sql(Payment.created_at) == day)
+              .order_by(Payment.created_at).all()):
+        if float(p.amount or 0):
+            out.append((f"RCPT-{p.payment_id}", "Receipt", clock.to_local(p.created_at),
+                        receipt_payload(db, p, "payment")))
+    refunded_on = func.coalesce(Payment.refunded_at, Payment.created_at)
+    for p in (db.query(Payment).filter(Payment.refund_status == "completed",
+                                       clock.business_date_sql(refunded_on) == day)
+              .order_by(refunded_on).all()):
+        if float(p.refund_amount or 0):
+            out.append((f"RFND-{p.payment_id}", "Refund voucher",
+                        clock.to_local(p.refunded_at or p.created_at), receipt_payload(db, p, "refund")))
+    for pr in (db.query(PrepaidReceipt).filter(clock.business_date_sql(PrepaidReceipt.issued_at) == day)
+               .order_by(PrepaidReceipt.issued_at).all()):
+        out.append((receipt_no(pr), "Prepaid receipt", clock.to_local(pr.issued_at),
+                    prepaid_receipt_payload(db, pr)))
+    out.sort(key=lambda r: (r[2] is None, r[2] or datetime.min))
+    return out
+
+
+def build_receipts_zip(db, day, part_bytes=None):
+    """The day's receipts as ZIP file(s): one PDF per document plus index.csv in every part.
+    Returns [(path, filename)] - empty when the day had no receipts."""
+    import tempfile
+    import zipfile
+    import os
+    from utils.pdf_generator import generate_payment_receipt_pdf
+    limit = part_bytes or RECEIPTS_ZIP_PART_BYTES
+    docs = receipts_of_day(db, day)
+    if not docs:
+        return []
+    files, index = [], []
+    for doc_no, typ, at, payload in docs:
+        try:
+            path = generate_payment_receipt_pdf(payload)
+        except Exception as e:     # one bad document must not lose the rest of the day
+            logger.error(f"receipts ZIP: {doc_no} failed: {e}")
+            continue
+        amount = payload.get("refund_amount") if typ == "Refund voucher" else payload.get("amount")
+        by = payload.get("refunded_by_name") if typ == "Refund voucher" else payload.get("collected_by_name")
+        mode = ((payload.get("refund_mode") or payload.get("gateway") or "") if typ == "Refund voucher"
+                else (payload.get("method") or ""))
+        ref = payload.get("refund_reference") if typ == "Refund voucher" else payload.get("reference")
+        name = f"{doc_no}.pdf"
+        files.append((path, name))
+        index.append([doc_no, typ, at.strftime("%d-%m-%Y %H:%M") if at else "", payload.get("booking_id") or "",
+                      payload.get("guest_name") or "", payload.get("source") or "", mode,
+                      f"{float(amount or 0):.2f}", ref or "", by or "", name])
+    if not files:
+        return []
+    head = ["Doc no", "Type", "Date time", "Booking", "Guest", "Source", "Mode", "Amount", "Reference",
+            "By", "File"]
+    # pack greedily into parts under the size limit
+    parts, cur, size = [], [], 0
+    for (path, name), row in zip(files, index):
+        n = os.path.getsize(path) if os.path.exists(path) else 0
+        if cur and size + n > limit:
+            parts.append(cur)
+            cur, size = [], 0
+        cur.append((path, name, row))
+        size += n
+    if cur:
+        parts.append(cur)
+    out = []
+    for i, part in enumerate(parts, 1):
+        suffix = f"_part{i}of{len(parts)}" if len(parts) > 1 else ""
+        zpath = os.path.join(tempfile.gettempdir(), f"receipts_{day}{suffix}.zip")
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(head)
+        for _, _, row in part:
+            w.writerow(row)
+        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr("index.csv", buf.getvalue())
+            for path, name, _ in part:
+                z.write(path, name)
+        out.append((zpath, f"receipts_{day}{suffix}.zip"))
+    return out
 
 
 def _eod_report_pdf(db, key, day):
@@ -1459,9 +1601,20 @@ def deliver_eod_reports(db, day):
     if not cfg["eod_email_enabled"] or not cfg["accounting_email"]:
         return {"sent": False, "reason": "disabled or no accounting email"}
     keys = [k for k in cfg["eod_report_keys"] if k in EOD_REPORT_CHOICES]
-    attachments = []
+    attachments, zip_extra, zip_note = [], [], ""
     for k in keys:
         try:
+            if k == "receipts_zip":
+                # v6m.13 (owner, item 5): the day's receipts as a ZIP; extra parts follow separately
+                parts = build_receipts_zip(db, day)
+                if parts:
+                    attachments.append(parts[0])
+                    zip_extra = parts[1:]
+                    zip_note = (f" — in {len(parts)} parts; parts 2–{len(parts)} follow in separate emails"
+                                if len(parts) > 1 else "")
+                else:
+                    zip_note = " — none issued this day"
+                continue
             path = _eod_report_pdf(db, k, day)
             if path:
                 attachments.append((path, f"{k}_{day}.pdf"))
@@ -1472,9 +1625,16 @@ def deliver_eod_reports(db, day):
     from utils.email_service import send_report_email
     subject = f"Hotel Bhimas — end-of-day reports {day:%d-%m-%Y}"
     html = (f"<p>End-of-day reports for <b>{day:%d-%m-%Y}</b> (00:00–23:59) attached:</p><ul>"
-            + "".join(f"<li>{EOD_REPORT_CHOICES[k]}</li>" for k in keys) + "</ul>")
+            + "".join(f"<li>{EOD_REPORT_CHOICES[k]}{zip_note if k == 'receipts_zip' else ''}</li>"
+                      for k in keys) + "</ul>")
     ok = send_report_email(cfg["accounting_email"], subject, html, attachments)
-    return {"sent": bool(ok), "reports": keys, "recipients": cfg["accounting_email"]}
+    for i, part in enumerate(zip_extra, 2):
+        send_report_email(cfg["accounting_email"],
+                          f"Hotel Bhimas — receipts {day:%d-%m-%Y} (part {i} of {len(zip_extra) + 1})",
+                          f"<p>Receipts for <b>{day:%d-%m-%Y}</b>, part {i} of {len(zip_extra) + 1}.</p>",
+                          [part])
+    return {"sent": bool(ok), "reports": keys, "recipients": cfg["accounting_email"],
+            "receipts_zip_parts": (1 + len(zip_extra)) if "receipts_zip" in keys and attachments else 0}
 
 
 # ============================================================

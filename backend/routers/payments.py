@@ -15,6 +15,7 @@ import hashlib
 from database import SessionLocal
 from models import Booking, Payment, BookingItem, RoomType, WebhookEvent, Folio, FolioCharge, CashShift, User
 from utils import clock          # v6m.12: receipt / refund times
+from sqlalchemy.orm import object_session   # v6m.13: booking_pdf_payload has no db
 from schemas import DeskPaymentRecord, PaymentRefundRequest, ExcessReturnRequest, DeskCollectRequest
 from utils.pdf_generator import generate_booking_pdf, generate_payment_receipt_pdf
 from utils.email_service import send_booking_email
@@ -1805,6 +1806,8 @@ def booking_pdf_payload(booking) -> dict:
         "convenience_fee": float(booking.convenience_fee or 0),
         "convenience_gst": float(booking.convenience_gst or 0),
         "grand_total": float(booking.grand_total or 0),
+        # v6m.13 (owner, item 6): the source on every document
+        "source_label": _src_label(object_session(booking), booking),
         "booking_items": [
             {
                 "room_type_name": item.room_type.name,
@@ -1852,7 +1855,41 @@ def receipt_payload(db, payment, kind="payment") -> dict:
         "refund_reason": payment.refund_reason,
         "refund_mode": payment.refund_mode,
         "refund_reference": payment.refund_reference,
+        # v6m.13 (owner, item 6): where the stay came from, from the booking itself
+        "source": _src_label(db, booking),
     }
+
+
+def _src_label(db, booking):
+    from utils.booking_source import source_label
+    return source_label(db, booking)
+
+
+@router.get("/booking/{booking_id}/prepaid-receipt")
+def get_prepaid_receipt(booking_id: int, db: Session = Depends(get_db),
+                        user=Depends(require_reception_or_admin)):
+    """v6m.13: the booking's prepaid receipt (OTA / agent / website), or null when none was issued."""
+    from models import PrepaidReceipt
+    from services.prepaid_receipts import prepaid_receipt_summary
+    pr = db.query(PrepaidReceipt).filter(PrepaidReceipt.booking_id == booking_id).first()
+    return {"booking_id": booking_id, "prepaid_receipt": prepaid_receipt_summary(pr)}
+
+
+@router.get("/prepaid-receipt/{receipt_id}/pdf")
+def prepaid_receipt_pdf(receipt_id: int, db: Session = Depends(get_db),
+                        user=Depends(require_reception_or_admin)):
+    """v6m.13: the PRE-<id> receipt as a PDF."""
+    from models import PrepaidReceipt
+    from services.prepaid_receipts import prepaid_receipt_payload
+    pr = db.query(PrepaidReceipt).filter(PrepaidReceipt.id == receipt_id).first()
+    if not pr:
+        raise HTTPException(status_code=404, detail="Prepaid receipt not found")
+    try:
+        pdf_path = generate_payment_receipt_pdf(prepaid_receipt_payload(db, pr))
+    except Exception as e:
+        logger.error(f"Prepaid receipt PDF {receipt_id} failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="Failed to generate receipt PDF")
+    return FileResponse(pdf_path, media_type="application/pdf", filename=f"prepaid-receipt-PRE-{receipt_id}.pdf")
 
 
 @router.get("/{payment_id}/receipt/pdf")

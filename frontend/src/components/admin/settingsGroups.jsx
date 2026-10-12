@@ -110,7 +110,7 @@ export const SETTINGS_GROUPS = [
       { key: "eod_email_enabled", type: "toggle", label: "Email the accounting reports at end of day",
         hint: "Sent for the just-closed day (00:00–23:59) when the nightly day-close runs." },
       { key: "eod_report_keys", type: "csv", label: "Reports to email each day",
-        hint: "Valid keys: occupancy_analysis, cashier_summary, checkout_summary, room_service_by_room, room_detail, maintenance_detail, daily_sales." },
+        hint: "Valid keys: occupancy_analysis, cashier_summary, checkout_summary, room_service_by_room, room_detail, maintenance_detail, daily_sales, lost_cards, receipts_zip (every receipt / refund voucher of the day as PDFs in a ZIP)." },
       { key: "ops_summary_enabled", type: "toggle", label: "6-hourly operational summary to owner WhatsApp",
         hint: "Rooms checked-in / out / cleaned / pending / inspected + occupancy, at 00:00 / 06:00 / 12:00 / 18:00. Needs owner alerts on and the owner WhatsApp number set (Messaging)." },
       { key: "night_audit_hour", type: "number", min: 0, max: 23, label: "Night-audit hour (IST)",
