@@ -604,7 +604,7 @@ def card_audit_data(db, dfrom, dto):
                      "card_uid": c.card_uid, "card_type": c.card_type, "issue_type": c.issue_type,
                      "status": c.status, "issued_by": _user_name(db, c.issued_by),
                      "station_id": c.station_id,
-                     "issued_at": c.issued_at.isoformat() if c.issued_at else None,
+                     "issued_at": clock.to_local(c.issued_at).isoformat() if c.issued_at else None,
                      "valid_to": c.valid_to.isoformat() if c.valid_to else None})
     by_type = {}
     for r in rows:
@@ -637,7 +637,7 @@ def lost_cards_data(db, dfrom, dto):
         amount = round(float(fee.amount or 0), 2) if (fee and not fee.void) else 0.0
         charged = round(charged + amount, 2)
         rows.append({
-            "reissued_at": c.issued_at.isoformat() if c.issued_at else None,
+            "reissued_at": clock.to_local(c.issued_at).isoformat() if c.issued_at else None,
             "room": room.room_number if room else None,
             "guest": (booking.display_guest_name if booking else None),
             "booking_id": c.booking_id,
@@ -799,7 +799,7 @@ def fraud_summary_data(db, dfrom, dto):
         by_status[a.status] = by_status.get(a.status, 0) + 1
         rows.append({"id": a.id, "type": a.type, "severity": a.severity, "status": a.status,
                      "booking_id": a.booking_id, "room_id": a.room_id,
-                     "detected_at": a.detected_at.isoformat() if a.detected_at else None})
+                     "detected_at": clock.to_local(a.detected_at).isoformat() if a.detected_at else None})
     return {"from": str(dfrom), "to": str(dto), "count": len(alerts),
             "by_type": by_type, "by_severity": by_severity, "by_status": by_status, "rows": rows}
 
@@ -1364,9 +1364,9 @@ def room_detail_data(db, dfrom, dto):
                 "guest": b.display_guest_name or None,
                 "check_in": b.checked_in_at.isoformat() if b.checked_in_at else None,
                 "check_out": clock.to_local(b.checked_out_at).isoformat() if b.checked_out_at else None,
-                "cleaning_started": task.started_at.isoformat() if task and task.started_at else None,
-                "cleaning_ended": task.done_at.isoformat() if task and task.done_at else None,
-                "inspected_at": task.inspected_at.isoformat() if task and task.inspected_at else None,
+                "cleaning_started": clock.to_local(task.started_at).isoformat() if task and task.started_at else None,
+                "cleaning_ended": clock.to_local(task.done_at).isoformat() if task and task.done_at else None,
+                "inspected_at": clock.to_local(task.inspected_at).isoformat() if task and task.inspected_at else None,
                 "cleaned_by": task.cleaned_by_name if task else None,
                 "inspected_by": task.inspected_by_name if task else None,
                 "frauds": fr,
@@ -1402,11 +1402,11 @@ def maintenance_detail_data(db, dfrom, dto):
             "assignee": _user_name(db, t.assignee),
             "verified_by": _user_name(db, t.verified_by),
             "resolution_notes": t.resolution_notes,
-            "created_at": t.created_at.isoformat() if t.created_at else None,
-            "assigned_at": t.assigned_at.isoformat() if t.assigned_at else None,
-            "first_responded_at": t.first_responded_at.isoformat() if t.first_responded_at else None,
-            "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
-            "verified_at": t.verified_at.isoformat() if t.verified_at else None,
+            "created_at": clock.to_local(t.created_at).isoformat() if t.created_at else None,
+            "assigned_at": clock.to_local(t.assigned_at).isoformat() if t.assigned_at else None,
+            "first_responded_at": clock.to_local(t.first_responded_at).isoformat() if t.first_responded_at else None,
+            "resolved_at": clock.to_local(t.resolved_at).isoformat() if t.resolved_at else None,
+            "verified_at": clock.to_local(t.verified_at).isoformat() if t.verified_at else None,
             "sla_breached": sla_breached, "escalation_level": int(t.escalation_level or 0),
             "compensation_amount": float(t.compensation_amount or 0),
             "items": item_list, "parts_cost": parts_cost,
@@ -1684,7 +1684,7 @@ def _meta(dfrom=None, dto=None):
     m = {}
     if dfrom is not None and dto is not None:
         m["Period"] = f"{dfrom:%d-%m-%Y} to {dto:%d-%m-%Y}"
-    m["Generated"] = datetime.utcnow().strftime("%d-%m-%Y %H:%M UTC")
+    m["Generated"] = clock.now_local().strftime("%d-%m-%Y %H:%M")   # v6m.14: the hotel's clock
     return m
 
 
@@ -2127,7 +2127,7 @@ def owner_dashboard(db: Session = Depends(get_db)):
     for a in (db.query(FraudAlert).filter(FraudAlert.status == "open")
               .order_by(FraudAlert.detected_at.desc()).limit(10).all()):
         open_alerts.append({"id": a.id, "type": a.type, "severity": a.severity,
-                            "detected_at": a.detected_at.isoformat() if a.detected_at else None})
+                            "detected_at": clock.to_local(a.detected_at).isoformat() if a.detected_at else None})
 
     # Overdue = past the actual checkout MOMENT plus the grace window.
     # v4b3: this used to be `check_out < today`, which in 24h mode flags a 22:00 check-in a
@@ -2392,5 +2392,5 @@ def _serialize_day_close(row: DayCloseSummary) -> dict:
         "cash_variance": _f(row.cash_variance),
         "arrivals": row.arrivals, "departures": row.departures, "open_alerts": row.open_alerts,
         "folios_posted": row.folios_posted, "generated_by": row.generated_by,
-        "generated_at": row.generated_at.isoformat() if row.generated_at else None,
+        "generated_at": clock.to_local(row.generated_at).isoformat() if row.generated_at else None,
     }

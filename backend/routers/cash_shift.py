@@ -151,8 +151,8 @@ def _serialize(db: Session, shift: CashShift) -> dict:
         "station_id": shift.station_id,
         "period": shift.period,
         "status": shift.status,
-        "opened_at": shift.opened_at.isoformat() if shift.opened_at else None,
-        "closed_at": shift.closed_at.isoformat() if shift.closed_at else None,
+        "opened_at": clock.to_local(shift.opened_at).isoformat() if shift.opened_at else None,
+        "closed_at": clock.to_local(shift.closed_at).isoformat() if shift.closed_at else None,
         "staff_id": shift.staff_id,
         "staff_name": _user_name(db, shift.staff_id),
         "closed_by_name": _user_name(db, shift.closed_by),
@@ -176,7 +176,7 @@ def _report_data(db: Session, shift: CashShift) -> dict:
     user_names = {u.user_id: u.username for u in db.query(User).all()} if expenses else {}
     s["expenses"] = [{"category": e.category, "description": e.description,
                       "amount": float(e.amount), "receipt_ref": e.receipt_url,
-                      "created_at": e.created_at,
+                      "created_at": clock.to_local(e.created_at),
                       "logged_by": user_names.get(e.created_by)} for e in expenses]
     # ALT-5: cash paid OUT of the drawer was printed as one lump sum, so the receipt could
     # not be reconciled line by line. The itemised rows already existed on the JSON detail
@@ -184,9 +184,12 @@ def _report_data(db: Session, shift: CashShift) -> dict:
     payouts = (db.query(Payment)
                .filter(Payment.refund_shift_id == shift.id)
                .order_by(Payment.payment_id).all())
+    # v6m.14: when each payout was paid and by whom (v6m.12 refunded_at / refunded_by), in the hotel's clock
     s["payouts"] = [{"payment_id": p.payment_id, "booking_id": p.booking_id,
                      "amount": float(p.refund_amount or 0), "reason": p.refund_reason,
-                     "reference": p.refund_reference} for p in payouts]
+                     "reference": p.refund_reference,
+                     "at": clock.to_local(getattr(p, "refunded_at", None) or p.created_at),
+                     "by": _user_name(db, getattr(p, "refunded_by", None))} for p in payouts]
     s["denominations"] = denoms
     s["close_note"] = shift.close_note
     # v5i: receipt-level rows (every payment mode) in the cashier-summary layout, scoped to this
@@ -436,11 +439,11 @@ def shift_detail(shift_id: int, db: Session = Depends(get_db)):
         "close_note": shift.close_note,
         "expenses": [{"id": e.id, "category": e.category, "description": e.description,
                       "amount": float(e.amount), "receipt_ref": e.receipt_url,
-                      "created_at": e.created_at.isoformat() if e.created_at else None}
+                      "created_at": clock.to_local(e.created_at).isoformat() if e.created_at else None}
                      for e in expenses],
         "cash_payments": [{"payment_id": p.payment_id, "booking_id": p.booking_id,
                            "amount": float(p.amount),
-                           "created_at": p.created_at.isoformat() if p.created_at else None}
+                           "created_at": clock.to_local(p.created_at).isoformat() if p.created_at else None}
                           for p in cash_in],
         "cash_payouts": [{"payment_id": p.payment_id, "booking_id": p.booking_id,
                           "amount": float(p.refund_amount or 0), "reason": p.refund_reason}

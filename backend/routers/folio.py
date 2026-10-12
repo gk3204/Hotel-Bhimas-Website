@@ -339,7 +339,7 @@ def _folio_detail(db: Session, folio: Folio):
         "company_total": float(folio.company_total or 0),
         "company_balance": company_balance,
         "guest_balance": round(float(folio.balance or 0) - company_balance, 2),
-        "opened_at": str(folio.opened_at) if folio.opened_at else None,
+        "opened_at": str(clock.to_local(folio.opened_at)) if folio.opened_at else None,
         "guest_name": booking.display_guest_name if booking else None,
         # v6m: blank, never an OTA placeholder number or the channel's no-reply address.
         "phone": _guest_display_phone(booking) if booking else None,
@@ -378,7 +378,7 @@ def _folio_detail(db: Session, folio: Folio):
             "unit_price": float(c.unit_price or 0),
             "amount": float(c.amount),
             "gst_percent": float(c.gst_percent) if c.gst_percent is not None else None,
-            "posted_at": str(c.posted_at) if c.posted_at else None,
+            "posted_at": str(clock.to_local(c.posted_at)) if c.posted_at else None,
             "void": bool(c.void),
             "void_reason": c.void_reason,
             "reversal_of_id": c.reversal_of_id,
@@ -1562,7 +1562,7 @@ def _einvoice_summary(e: EInvoice) -> dict:
         "ack_date": e.ack_date,
         "signed_qr": e.signed_qr,
         "error": e.error,
-        "created_at": e.created_at.isoformat() if e.created_at else None,
+        "created_at": clock.to_local(e.created_at).isoformat() if e.created_at else None,
     }
 
 

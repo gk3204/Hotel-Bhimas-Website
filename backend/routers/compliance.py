@@ -245,7 +245,7 @@ def id_access_audit(from_: str = Query(None, alias="from"), to: str = Query(None
         if lg.entity_type == "guest" and lg.entity_id and lg.entity_id.isdigit():
             g = db.query(Guest).filter(Guest.guest_id == int(lg.entity_id)).first()
             gname = g.name if g else None
-        rec = {"when": lg.created_at.isoformat() if lg.created_at else None,
+        rec = {"when": clock.to_local(lg.created_at).isoformat() if lg.created_at else None,
                "actor": actor or "system", "action": lg.action,
                "guest_id": lg.entity_id, "guest_name": gname or "—",
                "ip": lg.ip or "—", "client": lg.client or "—"}

@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import AuditLog, User
 from utils.auth_utils import require_admin
+from utils import clock          # v6m.14: times in the hotel's clock
 
 router = APIRouter(prefix="/audit-logs", tags=["Audit"])
 
@@ -84,7 +85,7 @@ def list_audit_logs(
     data = [
         {
             "id": lg.log_id,
-            "when": lg.created_at.isoformat() if lg.created_at else None,
+            "when": clock.to_local(lg.created_at).isoformat() if lg.created_at else None,
             "actor": names.get(lg.user_id, "system") if lg.user_id else "system",
             "action": lg.action,
             "entity_type": lg.entity_type,
