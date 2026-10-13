@@ -13,14 +13,15 @@ export default function BarList({ data = [], formatValue = (v) => v, max, empty 
         const pct = Math.min(100, Math.round((Math.abs(val) / peak) * 100));
         return (
           <div key={d.label} className="flex items-center gap-3" title={`${d.label}: ${formatValue(val)}`}>
-            <div className="w-28 shrink-0 text-sm text-slate-300 truncate">{d.label}</div>
-            <div className="flex-1 h-5 rounded-lg bg-slate-700/40 overflow-hidden">
+            {/* v7c: narrower label / value on a phone - at w-28 each the row ran ~90px off-screen */}
+            <div className="w-20 sm:w-28 shrink-0 text-sm text-slate-300 truncate">{d.label}</div>
+            <div className="flex-1 min-w-0 h-5 rounded-lg bg-slate-700/40 overflow-hidden">
               <div
                 className="h-full rounded-lg bg-gradient-to-r from-[#E5C07B] to-[#D4AF37]"
                 style={{ width: `${pct}%`, minWidth: val ? "6px" : "0" }}
               />
             </div>
-            <div className="w-28 shrink-0 text-right text-sm font-semibold text-[#FCD34D]">
+            <div className="w-24 sm:w-28 shrink-0 text-right text-sm font-semibold text-[#FCD34D] break-words">
               {formatValue(val)}
               {d.sub ? <span className="text-slate-500 font-normal text-xs ml-1">{d.sub}</span> : null}
             </div>

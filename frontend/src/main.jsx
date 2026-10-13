@@ -4,6 +4,9 @@ import App from "./App";
 import { BrowserRouter } from "react-router-dom";
 import { ConfirmProvider } from "./components/ConfirmDialog";
 import "./index.css";
+import { installTableScrollHints } from "./utils/tableScrollHints";
+
+installTableScrollHints();   // v7c: "swipe for more columns" on phones
 
 ReactDOM.createRoot(document.getElementById("root")).render(
   <React.StrictMode>

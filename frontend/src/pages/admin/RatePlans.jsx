@@ -129,7 +129,7 @@ const RatePlans = () => {
         {/* Room type picker */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-6 rounded-2xl shadow-xl mb-8 backdrop-blur">
           <label className="mb-2 text-sm font-semibold text-slate-300 block">Room Type</label>
-          <select value={selectedRt} onChange={(e) => setSelectedRt(e.target.value)} className={`${inputCls} md:w-72`}>
+          <select value={selectedRt} onChange={(e) => setSelectedRt(e.target.value)} className={`${inputCls} w-full max-w-full min-w-0 md:w-72`}>
             {roomTypes.map((rt) => <option key={rt.room_type_id} value={rt.room_type_id}>{rt.name} (rack ₹{rt.price_per_night})</option>)}
           </select>
         </div>

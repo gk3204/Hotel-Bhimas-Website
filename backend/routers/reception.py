@@ -1218,6 +1218,11 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         fee_applied = float(arrival["applied"])
         fee_changed = arrival["kind"] == "early" and data.arrival_fee_applied is not None \
             and round(fee_applied, 2) != round(fee_quoted, 2)
+        # v7c (owner, 12 Oct): "all amounts in early checkin extend and any others should be read only
+        # and not editable for normal users only admin should be able to change"
+        if fee_changed and user.get("role") != "admin":
+            raise HTTPException(status_code=403,
+                                detail=f"The early check-in fee (₹{fee_quoted:,.2f}) is set by the hotel's rates - only an admin can change it")
         if fee_changed and not (data.arrival_fee_reason or "").strip():
             raise HTTPException(status_code=400,
                                 detail="Charging something other than the rule's early check-in fee needs a reason")
@@ -3011,6 +3016,10 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         quoted = float(preview["amount"])
         comped = bool(preview.get("comped"))
         applied = quoted if data.applied_amount is None else round(float(data.applied_amount), 2)
+        # v7c (owner): reception cannot change the extension charge
+        if data.applied_amount is not None and applied != round(quoted, 2) and user.get("role") != "admin":
+            raise HTTPException(status_code=403,
+                                detail=f"The extension charge (₹{quoted:,.2f}) is set by the hotel's rates - only an admin can change it")
 
         if applied > quoted:
             raise HTTPException(
@@ -3285,6 +3294,10 @@ def extend_hours(data: ExtendHoursRequest, db: Session = Depends(get_db),
         needs_approval = (not ev["exempt"]) and arrival_rules.needs_approval(
             ev["rule"], quoted, data.applied_amount)
         is_admin = user.get("role") == "admin"
+        # v7c (owner): reception cannot change the late-checkout charge
+        if changed and not is_admin:
+            raise HTTPException(status_code=403,
+                                detail=f"The late-checkout charge (₹{quoted:,.2f}) is set by the hotel's rates - only an admin can change it")
         balance_before = float(folio.balance or 0)
         rooms_note = ("" if rooms_charged >= total_rooms
                       else f" · {rooms_charged} of {total_rooms} rooms")
@@ -4200,7 +4213,7 @@ def _build_desk_board(db: Session):
             "room_number": r.room_number,
             "room_status": r.status,
             "housekeeping_status": effective_hk_status(r, hk.status if hk else None),   # v6m.8
-            "updated_at": hk.updated_at.isoformat() if hk and hk.updated_at else None,
+            "updated_at": clock.to_local(hk.updated_at).isoformat() if hk and hk.updated_at else None,
             # cleaning-card controls on the desk housekeeping board (card-lock rooms only)
             "lock_type": r.lock_type,
             "building": r.building,

@@ -1,1 +1,41 @@
 @import "tailwindcss";
+
+/* v7c (owner, 12 Oct): "in web portal opened in mobile in most of the screens cols is not scrollable
+   and some cols is not visible". Every table already sat in a sideways-scrolling box, but on a phone
+   nothing said so - the scrollbar is hidden, wide padding and wrapped headings left room for three
+   columns, and the rest (often the action buttons) looked simply missing. On small screens: compact
+   cells, headings on one line, a visible gold scrollbar, and the first column (room / booking / name)
+   pinned so a row stays identifiable while it scrolls. utils/tableScrollHints.js adds the
+   "swipe for more columns" line. */
+@media (max-width: 768px) {
+  table th, table td {
+    padding: 8px 10px !important;
+    font-size: 13px;
+  }
+  table th { white-space: nowrap; }
+  .overflow-x-auto, .overflow-auto {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+    scrollbar-width: thin;
+    scrollbar-color: rgba(229, 192, 123, 0.7) rgba(15, 23, 42, 0.4);
+  }
+  .overflow-x-auto::-webkit-scrollbar, .overflow-auto::-webkit-scrollbar { height: 6px; }
+  .overflow-x-auto::-webkit-scrollbar-thumb, .overflow-auto::-webkit-scrollbar-thumb {
+    background: rgba(229, 192, 123, 0.7);
+    border-radius: 3px;
+  }
+  .overflow-x-auto table th:first-child, .overflow-x-auto table td:first-child,
+  .overflow-auto table th:first-child, .overflow-auto table td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background: #172033;
+    box-shadow: 2px 0 4px rgba(0, 0, 0, 0.35);
+  }
+}
+.table-swipe-hint {
+  font-size: 12px;
+  color: #E5C07B;
+  opacity: 0.85;
+  padding: 4px 10px;
+}

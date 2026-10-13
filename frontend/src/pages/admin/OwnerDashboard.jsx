@@ -87,7 +87,8 @@ export default function OwnerDashboard() {
               Live snapshot for {dash?.date || "today"} — desk + website activity
             </p>
           </div>
-          <div className="flex items-center gap-3">
+          {/* v7c: wraps on a phone (it pushed the page ~40px wider than the screen) */}
+          <div className="flex flex-wrap items-center gap-3">
             <input
               type="date"
               value={closeDate}
@@ -160,7 +161,8 @@ export default function OwnerDashboard() {
                   value={fmtInt(reviewTrends.unanswered_count)}
                   sub={reviewTrends.unanswered_count ? "need a reply" : "all caught up"}
                   highlight={reviewTrends.unanswered_count > 0} />
-                <div className="lg:col-span-5">
+                {/* v7c: full width on a phone - half a two-column grid was too narrow for its rows */}
+                <div className="col-span-2 md:col-span-2 lg:col-span-5">
                   <Card title="Weekly rating trend" icon={<FaStar />}>
                     <BarList
                       max={5}

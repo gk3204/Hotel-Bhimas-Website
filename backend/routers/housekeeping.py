@@ -85,9 +85,9 @@ def _task_dict(db: Session, t: HousekeepingTask, room: Room = None) -> dict:
         "booking_id": t.booking_id,
         "checklist": json.loads(t.checklist) if t.checklist else None,
         "photo_url": t.photo_url,
-        "created_at": t.created_at.isoformat() if t.created_at else None,
-        "started_at": t.started_at.isoformat() if t.started_at else None,
-        "done_at": t.done_at.isoformat() if t.done_at else None,
+        "created_at": clock.to_local(t.created_at).isoformat() if t.created_at else None,
+        "started_at": clock.to_local(t.started_at).isoformat() if t.started_at else None,
+        "done_at": clock.to_local(t.done_at).isoformat() if t.done_at else None,
     }
 
 
@@ -163,7 +163,7 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
             "room_number": r.room_number,
             "room_status": r.status,
             "housekeeping_status": effective_hk_status(r, hk.status if hk else None),   # v6m.8
-            "updated_at": hk.updated_at.isoformat() if hk and hk.updated_at else None,
+            "updated_at": clock.to_local(hk.updated_at).isoformat() if hk and hk.updated_at else None,
             "photo_url": hk.photo_url if hk else None,
             # card-lock rooms are cleaning-card driven (no manual start); key rooms keep manual buttons.
             "lock_type": r.lock_type,

@@ -220,7 +220,8 @@ const Rooms = () => {
         </div>
 
         {/* LIST */}
-        <div className="bg-slate-800/40 border border-slate-700 rounded-2xl overflow-hidden">
+        {/* v7c: the list scrolls sideways on a phone (it was cut off at the card edge) */}
+        <div className="bg-slate-800/40 border border-slate-700 rounded-2xl overflow-x-auto">
           <table className="w-full text-left">
             <thead className="bg-slate-900/60 text-slate-300 text-sm">
               <tr>
