@@ -56,7 +56,7 @@ def lock_room_type(db, room_type_id) -> None:
                {"ns": _CAPACITY_LOCK_NS, "k": int(room_type_id)})
 
 
-def booked_qty(db, room_type_id, check_in, check_out, lock=False):
+def booked_qty(db, room_type_id, check_in, check_out, lock=False, exclude_booking_id=None):
     """Rooms of this type consumed by bookings overlapping [check_in, check_out).
 
     `lock=True` adds a row lock on the overlapping bookings, which is worth having but is NOT what
@@ -69,10 +69,31 @@ def booked_qty(db, room_type_id, check_in, check_out, lock=False):
     )
     if lock:
         inner = inner.with_for_update()
-    return db.query(func.sum(BookingItem.quantity)).filter(
+    by_dates = db.query(func.sum(BookingItem.quantity)).filter(
         BookingItem.room_type_id == room_type_id,
         BookingItem.booking_id.in_(inner),
     ).scalar() or 0
+
+    # v7f (staff, 13 Oct): "5 rooms of a type and 3 are occupied ... availability is 3 until 12 AM but
+    # later changing to 5 even though it is still occupied". The count above goes by the BOOKED
+    # dates, so at midnight every in-house guest whose booked check-out is the new day dropped out -
+    # on production 9 of the 10 rooms in house - while still upstairs (a 24-hour stay that began at
+    # 19:20 leaves at 19:20). For a stay starting today, a room is taken until its guest actually
+    # checks out, whatever the dates say. Rooms only the date rule missed are added, so none twice.
+    from utils import clock as _clock
+    still_in = 0
+    if check_in <= _clock.business_today():
+        q = (db.query(func.sum(BookingItem.quantity))
+             .join(Booking, Booking.booking_id == BookingItem.booking_id)
+             .filter(BookingItem.room_type_id == room_type_id,
+                     Booking.status == "checked_in",
+                     BookingItem.checked_in_at.isnot(None),
+                     BookingItem.checked_out_at.is_(None),
+                     Booking.check_out <= check_in))      # not already counted by its dates
+        if exclude_booking_id:
+            q = q.filter(Booking.booking_id != exclude_booking_id)
+        still_in = q.scalar() or 0
+    return int(by_dates) + int(still_in)
 
 
 def out_of_service_count(db, room_type_id):

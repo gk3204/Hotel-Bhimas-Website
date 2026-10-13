@@ -2709,7 +2709,8 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             if _blocked(db, new_type.room_type_id, today, booking.check_out):
                 raise HTTPException(status_code=409,
                                     detail=f"{new_type.name} is blocked for the remaining dates")
-            booked = int(_booked_qty(db, new_type.room_type_id, today, booking.check_out, lock=True))
+            booked = int(_booked_qty(db, new_type.room_type_id, today, booking.check_out, lock=True,
+                                     exclude_booking_id=booking.booking_id))   # v7f
             inactive = int(_inactive_count(db, new_type.room_type_id))
             holds, _u = availability.ota_draft_holds(db, today, booking.check_out,
                                                       exclude_ota_booking_id=booking.ota_booking_id)
@@ -2994,7 +2995,8 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             if _blocked(db, rt_id, old_co, new_co):
                 raise HTTPException(status_code=409,
                                     detail=f"{name} is blocked for the extra nights")
-            booked = int(availability.booked_qty(db, rt_id, old_co, new_co, lock=True))
+            booked = int(availability.booked_qty(db, rt_id, old_co, new_co, lock=True,
+                                                 exclude_booking_id=booking.booking_id))   # v7f: not itself
             inactive = int(availability.out_of_service_count(db, rt_id))
             # b5: extending into a night an unconfirmed OTA guest is booked for would strand them.
             holds, _u = availability.ota_draft_holds(db, old_co, new_co,
