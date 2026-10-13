@@ -344,7 +344,10 @@ def build_context(db, action: str, *, booking=None, rooms=None, folio=None, gues
     ctx = {
         "action": action,
         "reasons": list(reasons or []),
-        "requested_by": (user or {}).get("username") if isinstance(user, dict) else getattr(user, "username", None),
+        # v6m.15: the JWT payload names the user in "sub" - reading only "username" left every
+        # approval saying it was requested by nobody.
+        "requested_by": (((user or {}).get("username") or (user or {}).get("sub"))
+                         if isinstance(user, dict) else getattr(user, "username", None)),
         "requested_at": datetime.utcnow().isoformat(),
     }
 

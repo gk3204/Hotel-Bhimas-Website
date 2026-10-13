@@ -172,7 +172,48 @@ def confirm_in_background(booking_id: int):
     threading.Thread(target=send_website_confirmation, args=(booking_id,), daemon=True).start()
 
 
-def reconcile_razorpay_locked(db, days: int = 2) -> dict | None:
+# v6m.15 (owner: "run missed payment for razorpay automatically every 12hrs and reinstate the
+# booking ... and send confirmation"): two automatic sweeps - "quick" every 15 minutes over the last
+# 2 days, "deep" every 12 hours over the last 14 - and each run is recorded, so the Payments page can
+# show that it ran and what it found (a sweep that finds nothing used to leave no trace at all).
+RUN_KEYS = {"quick": "razorpay_reconcile_last_quick", "deep": "razorpay_reconcile_last_deep"}
+
+
+def record_run(db, kind: str, days: int, result: dict | None, error: str | None = None) -> None:
+    """Save the outcome of one automatic sweep (best-effort)."""
+    import json
+    from utils import clock
+    from utils.settings import set_setting
+    try:
+        found = (result or {}).get("found") or []
+        summary = {"at": clock.now_local().isoformat(timespec="seconds"), "days": days,
+                   "checked": (result or {}).get("checked", 0), "found": len(found),
+                   "settled": [{"booking_id": f.get("booking_id"), "outcome": f.get("outcome")} for f in found][:20],
+                   "errors": (result or {}).get("errors", 0),
+                   "configured": (result or {}).get("configured", True), "error": error}
+        set_setting(db, RUN_KEYS.get(kind, RUN_KEYS["quick"]), json.dumps(summary), commit=True)
+    except Exception as e:                      # recording must never break the sweep
+        logger.warning(f"Razorpay reconcile: could not record the {kind} run: {e}")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
+def last_runs(db) -> dict:
+    import json
+    from utils.settings import get_setting
+    out = {}
+    for kind, key in RUN_KEYS.items():
+        try:
+            raw = get_setting(db, key, "") or ""
+            out[kind] = json.loads(raw) if raw else None
+        except Exception:
+            out[kind] = None
+    return out
+
+
+def reconcile_razorpay_locked(db, days: int = 2, kind: str = "quick") -> dict | None:
     """The scheduled sweep: one worker at a time (uvicorn runs several), never raises."""
     lock_conn = None
     try:
@@ -182,13 +223,16 @@ def reconcile_razorpay_locked(db, days: int = 2) -> dict | None:
         got = lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _RECONCILE_LOCK_KEY}).scalar()
         if not got:
             return None
-        return reconcile_razorpay(db, days=days, dry_run=False)
+        res = reconcile_razorpay(db, days=days, dry_run=False)
+        record_run(db, kind, days, res)
+        return res
     except Exception as e:
         logger.error(f"Razorpay reconcile sweep failed: {e}")
         try:
             db.rollback()
         except Exception:
             pass
+        record_run(db, kind, days, None, error=str(e)[:200])
         return None
     finally:
         if lock_conn is not None:

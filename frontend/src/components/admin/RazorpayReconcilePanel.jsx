@@ -5,7 +5,7 @@
 // Razorpay every 15 minutes for the last two days; this panel looks further back on demand. A dry
 // run lists what Razorpay says was paid; "Record these" settles them: the booking is reinstated
 // when its rooms are still free, otherwise the money is recorded and flagged for a refund.
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { FaSearchDollar } from "react-icons/fa";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
@@ -22,6 +22,25 @@ async function reconcile(days, dryRun) {
   return data;
 }
 
+async function lastRuns() {
+  const res = await fetch(`${BASE_URL}/payments/razorpay/reconcile/status`, { headers: headers() });
+  return res.ok ? res.json() : null;
+}
+
+// v6m.15: one line per automatic check - when it ran, how far back, what it found
+function RunLine({ label, run }) {
+  if (!run) return <div>{label}: not run yet</div>;
+  const when = (run.at || "").replace("T", " ").slice(0, 16);
+  if (run.configured === false) return <div>{label}: {when} — Razorpay keys not set</div>;
+  return (
+    <div>
+      {label}: {when} · last {run.days} days · checked {run.checked}
+      {run.found ? <span className="text-[#E5C07B]"> · settled {run.found}</span> : " · nothing missed"}
+      {run.error ? <span className="text-red-300"> · failed: {run.error}</span> : null}
+    </div>
+  );
+}
+
 const OUTCOME = {
   would_settle: "Paid on Razorpay — not recorded here yet",
   reinstated: "Recorded — booking reinstated",
@@ -36,6 +55,8 @@ export default function RazorpayReconcilePanel({ onDone }) {
   const [result, setResult] = useState(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [runs, setRuns] = useState(null);
+  useEffect(() => { lastRuns().then(setRuns).catch(() => {}); }, []);
 
   const run = async (dryRun) => {
     setBusy(true); setError("");
@@ -56,8 +77,15 @@ export default function RazorpayReconcilePanel({ onDone }) {
           <div className="font-semibold text-white">Missed website payments</div>
           <div className="text-xs text-slate-400">
             Asks Razorpay about website orders still marked unpaid. Runs by itself every 15 minutes for the
-            last 2 days; use this to look further back.
+            last 2 days and every 12 hours for the last 14 days - a paid booking is reinstated and its
+            confirmation sent. Use this to look further back.
           </div>
+          {runs && (
+            <div className="text-xs text-slate-500 mt-1">
+              <RunLine label="Every 15 min" run={runs.quick} />
+              <RunLine label="Every 12 h" run={runs.deep} />
+            </div>
+          )}
         </div>
         <label className="text-xs text-slate-400">Last
           <input type="number" min="1" max="120" value={days} onChange={(e) => setDays(e.target.value)}

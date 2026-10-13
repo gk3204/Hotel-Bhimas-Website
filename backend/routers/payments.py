@@ -394,6 +394,13 @@ def razorpay_reconcile(days: int = Query(14, ge=1, le=120), dry_run: bool = Quer
     return late_payments.reconcile_razorpay(db, days=days, dry_run=dry_run)
 
 
+@router.get("/razorpay/reconcile/status", dependencies=[Depends(require_admin)])
+def razorpay_reconcile_status(db: Session = Depends(get_db)):
+    """v6m.15: when the automatic missed-payment checks last ran, and what they found."""
+    from services import late_payments
+    return late_payments.last_runs(db)
+
+
 @router.post("/mark-failed/{booking_id}")
 def mark_failed(booking_id: int, db: Session = Depends(get_db)):
     booking = db.query(Booking).filter(

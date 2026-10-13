@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import RoomType, RatePlan, TravelAgent
+from models import RoomType, RatePlan, TravelAgent, Room
 from schemas import RoomTypeCreate, RoomTypeUpdate, RoomTypeUpdateDetails, \
     RatePlanCreate, RatePlanUpdate
 from utils import ordering
@@ -51,7 +51,9 @@ def create_room_type(
         price_per_night=data.price_per_night,
         gst_percent=data.gst_percent,
         max_occupancy=data.max_occupancy,
-        total_rooms=data.total_rooms,
+        # v6m.15: the count is the number of rooms of this type (a new type has none yet), kept in
+        # step by the rooms trigger (migration 054) - a typed number is ignored.
+        total_rooms=0,
         is_ac=data.is_ac,
         is_active=True,
         show_on_website=data.show_on_website,
@@ -100,6 +102,9 @@ def update_room_type_details(
         raise HTTPException(status_code=404, detail="Room type not found")
 
     update_data = data.dict(exclude_unset=True)
+    # v6m.15: total_rooms follows the rooms (migration 054) - never typed in
+    update_data.pop("total_rooms", None)
+    room_type.total_rooms = db.query(Room).filter(Room.room_type_id == room_type.room_type_id).count()
 
     for key, value in update_data.items():
         setattr(room_type, key, value)

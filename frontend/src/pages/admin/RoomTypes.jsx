@@ -129,14 +129,10 @@ const RoomTypes = () => {
               onChange={handleChange}
             />
 
-            <InputField
-              label="Total Rooms"
-              name="total_rooms"
-              type="number"
-              placeholder="e.g., 10"
-              value={formData.total_rooms}
-              onChange={handleChange}
-            />
+            {/* v6m.15: Total Rooms is counted from the rooms of this type - add rooms on the Rooms page */}
+            <div className="text-xs text-slate-400 self-end pb-2">
+              Total rooms is counted automatically from the rooms of this type (Rooms page).
+            </div>
           </div>
 
           <div className="mt-4 flex flex-col gap-3">
@@ -320,16 +316,14 @@ const RoomTypes = () => {
                   }
                 />
 
+                {/* v6m.15: counted from the rooms of this type, read-only */}
                 <InputField
-                  label="Total Rooms"
+                  label="Total Rooms (auto - from Rooms)"
                   type="number"
                   value={editingRoom.total_rooms}
-                  onChange={(e) =>
-                    setEditingRoom({
-                      ...editingRoom,
-                      total_rooms: e.target.value,
-                    })
-                  }
+                  disabled
+                  readOnly
+                  onChange={() => {}}
                 />
               </div>
 

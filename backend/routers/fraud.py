@@ -16,7 +16,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session, joinedload
 
 from database import SessionLocal
-from models import (Booking, BookingItem, CardIssuance, Folio, FraudAlert,
+from models import (Booking, BookingItem, CardIssuance, Folio, FolioCharge, FraudAlert,
                     OwnerOtp, Payment, Room, RoomType)
 from schemas import AlertReview, FraudConfigUpdate, OtpRequest, OtpVerify
 from utils import settings as app_settings
@@ -269,6 +269,20 @@ def update_config(data: FraudConfigUpdate, db: Session = Depends(get_db),
 # owner-approval OTP
 # ---------------------------------------------------------------------------
 
+def _int_or_none(v):
+    try:
+        return int(v) if v is not None and str(v).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _float_or_none(v):
+    try:
+        return float(v) if v is not None and str(v).strip() != "" else None
+    except (TypeError, ValueError):
+        return None
+
+
 @router.post("/otp/request")
 def otp_request(data: OtpRequest, db: Session = Depends(get_db),
                 user=Depends(require_reception_or_admin)):
@@ -293,7 +307,17 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
     # "guest / no booking" until each screen is migrated in a later batch.
     ctx_in = data.context or {}
     booking = rooms = folio = None
+    # v6m.15 (owner: "discount alerts ... I'm seeing Rs.0"): the desk's discount / void requests
+    # put folio_id, charge_id and amount INSIDE `context`. Only the typed fields were read, so the
+    # amount was dropped (₹0) and, with no folio, no booking / guest / room could be named.
+    folio_id = data.folio_id or _int_or_none(ctx_in.get("folio_id"))
+    if not folio_id and ctx_in.get("charge_id"):
+        folio_id = (db.query(FolioCharge.folio_id)
+                      .filter(FolioCharge.id == _int_or_none(ctx_in.get("charge_id"))).scalar())
+    amount = data.amount if data.amount is not None else _float_or_none(ctx_in.get("amount"))
     booking_id = data.booking_id or ctx_in.get("booking_id")
+    if not booking_id and folio_id:
+        booking_id = db.query(Folio.booking_id).filter(Folio.id == folio_id).scalar()
     if not booking_id and ctx_in.get("payment_id"):
         booking_id = (db.query(Payment.booking_id)
                         .filter(Payment.payment_id == ctx_in["payment_id"]).scalar())
@@ -320,8 +344,8 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
         # Pass the ORM rows straight through — build_context resolves the type names itself
         # (`Room` has no room_type relationship, only BookingItem does).
         rooms = db.query(Room).filter(Room.room_id.in_(room_ids)).all()
-    if data.folio_id:
-        folio = db.query(Folio).filter(Folio.id == data.folio_id).first()
+    if folio_id:
+        folio = db.query(Folio).filter(Folio.id == folio_id).first()
     elif booking is not None:
         # Context for an alert, not money: the stay's main bill is the right thing to name.
         folio = folio_resolver.primary_folio(db, booking)
@@ -330,7 +354,7 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
     # {"booking": ...} in `context` would collide with build_context's own keyword
     # parameter and 500 the request.
     context = build_context(db, data.action, booking=booking, rooms=rooms, folio=folio,
-                            amount=data.amount, user=user,
+                            amount=amount, user=user,
                             reasons=(data.context or {}).get("reasons"),
                             **safe_extras(data.context))
 

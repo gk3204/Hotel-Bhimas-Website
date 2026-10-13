@@ -174,7 +174,9 @@ def compute_day_report(db, day=None) -> dict:
     def _room_service():
         rs = room_service_by_date(db, day, day)["totals"]
         items = room_service_by_item(db, day, day)
-        top = [{"name": r.get("name"), "qty": r.get("qty"), "amount": r.get("amount")}
+        # v6m.15 (owner): the item report's rows are {item, qty, gross} - reading "name"/"amount"
+        # printed every room-service line of the daily report blank.
+        top = [{"name": r.get("item"), "qty": r.get("qty"), "amount": r.get("gross")}
                for r in (items.get("rows", [])[:5])]
         return {"orders": int(rs.get("orders", 0)), "revenue": round(float(rs.get("gross", 0)), 2),
                 "top_items": top}

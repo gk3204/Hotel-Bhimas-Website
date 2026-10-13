@@ -47,6 +47,32 @@ def active_cleaning_card(db, room_id: int):
     ).order_by(CardIssuance.id.desc()).first()
 
 
+# v6m.15 (owner): "encode cleaning card was done at desk and later it was marked as inspected using
+# web app, now return card was not able to do and was showing as fraud". Inspecting the room made it
+# vacant; the next sweep raised cleaning_card_overdue and then RETIRED the card as "expired"
+# (retire_stale_cleaning_cards), so Return found no "active" card and refused, and the desk hid the
+# button because the cleaning cycle had moved on. A card the sweep retired was never handed back -
+# it is still a live key in someone's pocket until its validity ends - so it must stay returnable.
+UNRETURNED_CARD_HOURS = 24
+
+
+def unreturned_cleaning_card(db, room_id: int):
+    """The room's latest cleaning card that was never handed back: still active, or retired by the
+    sweep (status 'expired', never erased) within the last UNRETURNED_CARD_HOURS."""
+    from datetime import timedelta
+    from utils import clock
+    card = active_cleaning_card(db, room_id)
+    if card is not None:
+        return card
+    return db.query(CardIssuance).filter(
+        CardIssuance.room_id == room_id,
+        CardIssuance.card_type == "cleaning",
+        CardIssuance.status == "expired",
+        CardIssuance.erased_at.is_(None),
+        CardIssuance.issued_at >= clock.now_utc() - timedelta(hours=UNRETURNED_CARD_HOURS),
+    ).order_by(CardIssuance.id.desc()).first()
+
+
 def active_viewing_card(db, room_id: int):
     """v6x: the room's outstanding (un-returned) room-viewing card, if any."""
     return db.query(CardIssuance).filter(
@@ -81,9 +107,11 @@ def cleaning_card_state(db, room) -> str:
         CardIssuance.issued_at >= since,
         CardIssuance.status != "cancelled",   # v6m.4: a card never written does not use up the cycle
     ).all()
-    if not cards:
-        return "none"
-    return "active" if any(c.status == "active" for c in cards) else "used"
+    state = ("active" if any(c.status == "active" for c in cards) else "used") if cards else "none"
+    # v6m.15: inspected (or let) before the card came back - still offer Return for it
+    if state != "active" and room.status != "cleaning" and unreturned_cleaning_card(db, room.room_id):
+        return "active"
+    return state
 
 
 def retire_stale_cleaning_cards(db) -> int:

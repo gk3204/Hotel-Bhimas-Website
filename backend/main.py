@@ -14,7 +14,7 @@ from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-da
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
-APP_BUILD = "v6m.14"
+APP_BUILD = "v6m.15"
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
@@ -267,18 +267,25 @@ def _start_razorpay_reconcile_scheduler():
         from database import SessionLocal
         from services import late_payments
 
-        def _tick():
+        def _tick(days=2, kind="quick"):
             _db = SessionLocal()
             try:
-                res = late_payments.reconcile_razorpay_locked(_db, days=2)
+                res = late_payments.reconcile_razorpay_locked(_db, days=days, kind=kind)
                 if res and res.get("found"):
-                    logger.warning(f"Razorpay reconcile settled {len(res['found'])} missed payment(s)")
+                    logger.warning(f"Razorpay reconcile ({kind}) settled {len(res['found'])} missed payment(s)")
             finally:
                 _db.close()
 
         sched = BackgroundScheduler(daemon=True, timezone="UTC")
         sched.add_job(_tick, "interval", minutes=15, id="razorpay_reconcile",
                       max_instances=1, coalesce=True)
+        # v6m.15 (owner): every 12 hours, a deeper look - the last 14 days - so a payment the guest
+        # made after the quick sweep's 2-day window still reinstates the booking and confirms it.
+        # First run 10 minutes after start, so a deploy does not wait half a day for it.
+        from datetime import datetime as _dt, timedelta as _td
+        sched.add_job(_tick, "interval", hours=12, kwargs={"days": 14, "kind": "deep"},
+                      id="razorpay_reconcile_deep", max_instances=1, coalesce=True,
+                      next_run_time=_dt.utcnow() + _td(minutes=10))
         sched.start()
         logger.info("✅ Razorpay reconcile scheduler started (every 15 min)")
         return sched

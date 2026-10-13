@@ -37,6 +37,7 @@ _board_viewer = require_roles("admin", "housekeeper")
 from services import folio_resolver
 from utils.audit import write_audit, _resolve_user_id
 from utils.housekeeping import (set_hk_status, cleaning_card_state, active_cleaning_card,
+                                unreturned_cleaning_card,
                                 open_checkout_clean_task, effective_hk_status,
                                 active_viewing_card, resolve_card_alerts)
 from utils.settings import (HK_AUTO_INSPECT_KEY, get_fraud_config, get_housekeeping_config,
@@ -456,9 +457,11 @@ def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
     if room.lock_type == "key":
         return {"room_id": room_id, "cleaning_card": "none", "noop": True}
 
-    card = active_cleaning_card(db, room_id)
+    # v6m.15: also a card the sweep retired after the room was inspected - it was never handed back
+    card = unreturned_cleaning_card(db, room_id)
     if not card:
         raise HTTPException(status_code=409, detail="No outstanding cleaning card for this room")
+    room_was_cleaning = room.status == "cleaning"
 
     card.status = "erased"
     card.erased_at = clock.now_utc()          # F-03: an instant, stored UTC
@@ -467,6 +470,14 @@ def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
 
     # Auto-finish cleaning -> awaiting inspection. Deliberately leave Room.status == "cleaning"
     # (even if auto-inspect is on) so the housekeeper still records cleaned-by/inspected-by.
+    # v6m.15: a room already inspected (or let) keeps its state - returning the card only wipes it.
+    if not room_was_cleaning:
+        db.commit()
+        write_audit(db, user, "housekeeping.cleaning_card_return", "card", card.id,
+                    after={"room_id": room_id, "room_number": room.room_number,
+                           "after_inspection": True}, client="desktop", commit=True)
+        return {"room_id": room_id, "cleaning_card": "used", "task_done": False,
+                "after_inspection": True}
     task = open_checkout_clean_task(db, room_id)
     if task and task.status in ("pending", "in_progress"):
         task.status = "done"

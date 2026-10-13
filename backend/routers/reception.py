@@ -4128,6 +4128,16 @@ def _build_desk_board(db: Session):
                 CardIssuance.card_type == "cleaning",
                 CardIssuance.issued_at >= _oldest).all():
             _cleaning_by_room.setdefault(c.room_id, []).append(c)
+    # v6m.15: cleaning cards the sweep retired without their being handed back (one query)
+    _unreturned_by_room: dict = {}
+    if _card_rooms:
+        from utils.housekeeping import UNRETURNED_CARD_HOURS
+        for c in db.query(CardIssuance).filter(
+                CardIssuance.room_id.in_([r.room_id for r in _card_rooms]),
+                CardIssuance.card_type == "cleaning",
+                CardIssuance.status.in_(("active", "expired")), CardIssuance.erased_at.is_(None),
+                CardIssuance.issued_at >= clock.now_utc() - timedelta(hours=UNRETURNED_CARD_HOURS)).all():
+            _unreturned_by_room[c.room_id] = c
 
     def _cleaning_state(room):
         if getattr(room, "lock_type", "card") == "key":
@@ -4136,9 +4146,11 @@ def _build_desk_board(db: Session):
         cards = [c for c in _cleaning_by_room.get(room.room_id, [])
                  if c.issued_at is not None and c.issued_at >= since
                  and c.status != "cancelled"]   # v6x: as cleaning_card_state - a cancel frees the cycle
-        if not cards:
-            return "none"
-        return "active" if any(c.status == "active" for c in cards) else "used"
+        state = ("active" if any(c.status == "active" for c in cards) else "used") if cards else "none"
+        # v6m.15: inspected (or let) before the card came back - keep offering Return
+        if state != "active" and room.status != "cleaning" and _unreturned_by_room.get(room.room_id):
+            return "active"
+        return state
 
     # v6x: room-viewing cards out right now (one query)
     _viewing_by_room = {}

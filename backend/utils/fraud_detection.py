@@ -117,7 +117,7 @@ def _detect_card_anomalies(db, new_alerts, keys):
                         booking_id=c.booking_id, room_id=c.room_id, card_id=c.id,
                         detail={"card_uid": c.card_uid, "issue_type": c.issue_type,
                                 "station_id": c.station_id,
-                                "issued_at": str(c.issued_at) if c.issued_at else None,
+                                "issued_at": str(clock.to_local(c.issued_at)) if c.issued_at else None,   # v6m.15: hotel clock
                                 "note": "active card no longer matches a paid, in-house booking"})
 
 
@@ -144,7 +144,7 @@ def _detect_cards_overdue(db, new_alerts, keys):
                     dedupe_key=f"{kind}:card:{c.id}", room_id=c.room_id, card_id=c.id,
                     booking_id=c.booking_id,
                     detail={"room_number": r.room_number if r else None, "card_type": c.card_type,
-                            "issued_at": str(c.issued_at) if c.issued_at else None,
+                            "issued_at": str(clock.to_local(c.issued_at)) if c.issued_at else None,   # v6m.15: hotel clock
                             "valid_to": str(c.valid_to), "minutes_overdue": minutes_over,
                             "note": f"The {what} card for room {r.room_number if r else '?'} was not "
                                     f"returned {minutes_over} min after it expired - find the card and "
@@ -174,8 +174,8 @@ def _detect_cleaning_too_long(db, new_alerts, keys):
         _make_alert(new_alerts, keys, type="cleaning_too_long", severity="high",
                     dedupe_key=f"cleaning_too_long:room:{r.room_id}", room_id=r.room_id,
                     detail={"room_number": r.room_number, "hours_in_cleaning": hours,
-                            "threshold_hours": max_hours,
-                            "since": str(r.status_changed_at),
+                            "threshold_minutes": max_minutes,   # v6m.15: was max_hours - a NameError since v6i
+                            "since": str(clock.to_local(r.status_changed_at)),
                             "cleaning_card_outstanding": outstanding,
                             "note": "room held in cleaning far beyond threshold with no in-house booking"})
 
@@ -206,7 +206,7 @@ def _detect_cleaning_too_fast(db, new_alerts, keys):
                     detail={"room_number": r.room_number if r else None,
                             "minutes_taken": minutes, "threshold_minutes": min_minutes,
                             "cleaned_by": t.cleaned_by_name,
-                            "since": str(t.started_at),
+                            "since": str(clock.to_local(t.started_at)),
                             "note": "room marked clean far faster than the minimum — likely not cleaned"})
 
 
@@ -227,8 +227,8 @@ def _detect_inspection_overdue(db, new_alerts, keys):
         _make_alert(new_alerts, keys, type="inspection_overdue", severity="high",
                     dedupe_key=f"inspection_overdue:task:{t.id}", room_id=t.room_id,
                     detail={"room_number": r.room_number if r else None,
-                            "hours_since_cleaned": hours, "threshold_hours": max_hours,
-                            "since": str(t.done_at),
+                            "hours_since_cleaned": hours, "threshold_minutes": max_minutes,   # v6m.15: was max_hours (NameError)
+                            "since": str(clock.to_local(t.done_at)),
                             "note": "room cleaned but not inspected beyond threshold"})
 
 
@@ -249,7 +249,7 @@ def _detect_issuance_fencing(db, new_alerts, keys):
             _make_alert(new_alerts, keys, type="off_hours_issuance", severity="med",
                         dedupe_key=f"off_hours_issuance:card:{c.id}",
                         booking_id=c.booking_id, room_id=c.room_id, card_id=c.id,
-                        detail={"issued_at": str(c.issued_at), "issued_hour_ist": hour,
+                        detail={"issued_at": str(clock.to_local(c.issued_at)), "issued_hour_ist": hour,
                                 "allowed_hours": f"{start:02d}-{end:02d}",
                                 "station_id": c.station_id})
         if stations and (c.station_id or "") not in stations:
@@ -257,7 +257,7 @@ def _detect_issuance_fencing(db, new_alerts, keys):
                         dedupe_key=f"off_station_issuance:card:{c.id}",
                         booking_id=c.booking_id, room_id=c.room_id, card_id=c.id,
                         detail={"station_id": c.station_id, "allowed_stations": stations,
-                                "issued_at": str(c.issued_at)})
+                                "issued_at": str(clock.to_local(c.issued_at))})
 
 
 def _detect_same_id_two_rooms(db, new_alerts, keys):
