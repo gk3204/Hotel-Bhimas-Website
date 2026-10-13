@@ -989,11 +989,14 @@ def cashier_summary_for_shift(db, shift):
     prepaid = (db.query(PrepaidReceipt)
                .filter(PrepaidReceipt.issued_at >= shift.opened_at, PrepaidReceipt.issued_at < end)
                .order_by(PrepaidReceipt.issued_at).all())
-    out = _cashier_summary_core(db, receipts=receipts, refunds=refunds, checkouts_day=None, prepaid=prepaid)
+    # v7d (owner): the shift report lists the bills checked out during the shift too - unsettled,
+    # and settled with no receipt (nil amount) - with who checked them out.
+    out = _cashier_summary_core(db, receipts=receipts, refunds=refunds, checkouts_day=None, prepaid=prepaid,
+                                checkouts_window=(shift.opened_at, end))
     return {"shift_id": shift.id, **out}
 
 
-def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=None):
+def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=None, checkouts_window=None):
     """Shared body of the two cashier summaries. `receipts` = paid Payment rows to list as
     check-out bills / advances; `refunds` = Payment rows whose completed refund is a paid-out.
     `checkouts_day` adds the unsettled / nil-amount checkout sections for that calendar day."""
@@ -1116,9 +1119,17 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     # checked out today: unsettled (folio balance != 0) vs nil-amount (settled, no receipt today)
     unsettled, nil_checkouts = [], []
     receipted_bookings = {p.booking_id for p in receipts if float(p.amount or 0)}
-    checkouts = (db.query(Booking).filter(Booking.status == "checked_out",
-                                          clock.business_date_sql(Booking.checked_out_at) == checkouts_day).all()
-                 if checkouts_day else [])
+    if checkouts_day:
+        checkouts = (db.query(Booking).filter(Booking.status == "checked_out",
+                                              clock.business_date_sql(Booking.checked_out_at) == checkouts_day)
+                     .order_by(Booking.checked_out_at).all())
+    elif checkouts_window:          # v7d: a shift - checked out between its open and close (UTC)
+        _ws, _we = checkouts_window
+        checkouts = (db.query(Booking).filter(Booking.status == "checked_out",
+                                              Booking.checked_out_at >= _ws, Booking.checked_out_at < _we)
+                     .order_by(Booking.checked_out_at).all())
+    else:
+        checkouts = []
     for b in checkouts:
         # v6e: ONE ROW PER BILL. A stay that bills per room leaves three bills behind, and this is
         # the report the owner uses to chase what was not settled — collapsing them to the first
@@ -1128,9 +1139,14 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             room = _booking_room_label(db, b.booking_id, rcache)
             bal = round(float(f.balance or 0), 2) if f else 0.0
             inv = _get_invoice(db, f.id) if f else None
+            _out = _loc(b.checked_out_at)
             rowc = {"bill_no": (inv.invoice_no if inv else f"F{f.id}" if f else "—"),
                     "room": room, "guest": (b.display_guest_name or None),
-                    "booking_id": b.booking_id, "balance": bal}
+                    "booking_id": b.booking_id, "balance": bal,
+                    # v7d (owner): when, and which reception user checked them out
+                    "date": _out.strftime("%d/%m/%y") if _out else "",
+                    "time": _out.strftime("%H:%M") if _out else "",
+                    "user": _user_name(db, getattr(b, "checked_out_by", None))}
             if bal != 0:
                 unsettled.append(rowc)
             elif b.booking_id not in receipted_bookings:
@@ -1168,13 +1184,13 @@ def _cashier_table(data):
     if data["unsettled"]:
         rows.append({"section": "Unsettled Checkout Bills"})
         for x in data["unsettled"]:
-            rows.append([x["bill_no"], "", "", x["room"], x["guest"] or "", "", "", x["balance"],
-                         "", "UNSETTLED", ""])
+            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "", "", "",
+                         x["balance"], "", "UNSETTLED", x.get("user") or ""])
     if data["nil_checkouts"]:
         rows.append({"section": "Checkout Bills With Nil Amount"})
         for x in data["nil_checkouts"]:
-            rows.append([x["bill_no"], "", "", x["room"], x["guest"] or "", "", "", x["balance"],
-                         "", "NIL", ""])
+            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "", "", "",
+                         x["balance"], "", "NIL", x.get("user") or ""])
     g = data["grand"]
     totals = ["GRAND TOTAL", "", "", "", "", g["receipt"], g["payment"], "", "", f"net {g['net']}", ""]
     return cols, rows, totals
@@ -1227,8 +1243,12 @@ def checkout_summary_data(db, day):
         rooms = [db.query(Room).filter(Room.room_id == it.room_id).first()
                  for it in _its if it is not None and it.room_id]
         inv = _get_invoice(db, f.id)
+        _co = clock.to_local(b.checked_out_at)
         rows.append({
             "bill_no": (inv.invoice_no if inv else f"F{f.id}"),
+            # v7d (owner): when they left and which reception user checked them out
+            "checked_out_at": _co.strftime("%d/%m %H:%M") if _co else "",
+            "checked_out_by": _user_name(db, getattr(b, "checked_out_by", None)) or "",
             "rooms": ", ".join(r.room_number for r in rooms if r) or "—",
             "room_rent": room_rent, "sgst": sgst, "cgst": cgst, "food": food, "laundry": laundry,
             "misc": misc, "discount": discount, "total": round(float(f.total or 0), 2),
@@ -1557,12 +1577,13 @@ def _eod_report_pdf(db, key, day):
     elif key == "checkout_summary":
         d = checkout_summary_data(db, day)
         cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
-                "Advance", "Refund", "Bill Amt"]
+                "Advance", "Refund", "Bill Amt", "Out", "By"]
         rows = [[r["bill_no"], r["rooms"], r["room_rent"], r["sgst"], r["cgst"], r["food"], r["laundry"],
-                 r["misc"], r["discount"], r["advance"], r["refund"], r["bill_amount"]] for r in d["rows"]]
+                 r["misc"], r["discount"], r["advance"], r["refund"], r["bill_amount"],
+                 r.get("checked_out_at", ""), r.get("checked_out_by", "")] for r in d["rows"]]
         t = d["totals"]; totals = ["TOTAL", "", t["room_rent"], t["sgst"], t["cgst"], t["food"],
                                    t["laundry"], t["misc"], t["discount"], t["advance"], t["refund"],
-                                   t["bill_amount"]]
+                                   t["bill_amount"], "", ""]
     elif key == "room_service_by_room":
         cols, rows, totals = _rs_by_room_table(room_service_by_room_data(db, day, day))
     elif key == "room_detail":
@@ -1927,13 +1948,14 @@ def checkout_summary_report(day: str | None = Query(None), format: str = Query("
     d = _parse_date(day, "day") if day else date.today()
     data = checkout_summary_data(db, d)
     cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
-            "Advance", "Refund", "Bill Amount"]
+            "Advance", "Refund", "Bill Amount", "Checked out", "By"]
     rows = [[r["bill_no"], r["rooms"], r["room_rent"], r["sgst"], r["cgst"], r["food"],
-             r["laundry"], r["misc"], r["discount"], r["advance"], r["refund"], r["bill_amount"]]
+             r["laundry"], r["misc"], r["discount"], r["advance"], r["refund"], r["bill_amount"],
+             r.get("checked_out_at", ""), r.get("checked_out_by", "")]
             for r in data["rows"]]
     t = data["totals"]
     totals = ["TOTAL", "", t["room_rent"], t["sgst"], t["cgst"], t["food"], t["laundry"],
-              t["misc"], t["discount"], t["advance"], t["refund"], t["bill_amount"]]
+              t["misc"], t["discount"], t["advance"], t["refund"], t["bill_amount"], "", ""]
     meta = {"Day": f"{d:%d-%m-%Y}", **_meta()}
     return _export_or_json(format, data, title="Check-Out Summary", columns=cols, rows=rows,
                            totals_row=totals, meta=meta, filename="checkout_summary")

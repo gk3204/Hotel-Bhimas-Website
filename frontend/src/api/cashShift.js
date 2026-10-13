@@ -41,6 +41,19 @@ export async function updateCashConfig(data) {
   return handle(res);
 }
 
+// v7d: one shift's report - detail JSON (with the receipts table) and its PDF
+export async function getShiftDetail(id) {
+  const res = await fetch(`${BASE_URL}/cash-shift/${id}`, { headers: authHeaders() });
+  return handle(res);
+}
+
+export async function openShiftPdf(id) {
+  const res = await fetch(`${BASE_URL}/cash-shift/${id}/report/pdf`, { headers: authHeaders() });
+  if (!res.ok) throw new Error(`Could not load the shift report (HTTP ${res.status})`);
+  const url = URL.createObjectURL(await res.blob());
+  window.open(url, "_blank");
+}
+
 // Recent shifts (for the owner review table)
 export async function getShifts(limit = 50) {
   const res = await fetch(`${BASE_URL}/cash-shift/?limit=${limit}`, { headers: authHeaders() });

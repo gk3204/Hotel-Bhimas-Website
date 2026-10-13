@@ -116,6 +116,7 @@ class Booking(Base):
     admin_cancelled_at = Column(DateTime)  # When admin cancelled
     checked_in_at = Column(DateTime, nullable=True)   # set by POST /reception/checkin (status -> "checked_in")
     checked_out_at = Column(DateTime, nullable=True)  # set by POST /reception/checkout (status -> "checked_out")
+    checked_out_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)  # v7d: who checked them out (055)
     # --- Rates & travel-agent pricing (prompt 10, additive) ---
     agent_id = Column(Integer, ForeignKey("travel_agents.id"), nullable=True, index=True)  # set when booked "as agent X"
     commission_percent = Column(Numeric(5, 2), nullable=True)   # snapshot of the agent's commission % at booking time
@@ -519,6 +520,23 @@ class FolioCharge(Base):
     # --- Corporate split billing (prompt 18 slice 7, additive) ---
     # THIS is the split folio: one folio, each line routed to whoever pays it.
     bill_to = Column(String(10), nullable=False, default="guest", index=True)  # guest | company
+
+
+class EmailOutbox(Base):
+    """v7d: an e-mail Mailjet refused for a reason that can pass (daily limit, outage), kept for the
+    retry sweep (services/email_outbox.py). See migration 055."""
+    __tablename__ = "email_outbox"
+    id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String(40), nullable=False)
+    to_email = Column(String(500), nullable=True)
+    subject = Column(String(300), nullable=True)
+    payload = Column(Text, nullable=False)
+    status = Column(String(12), nullable=False, default="pending")
+    attempts = Column(Integer, nullable=False, default=0)
+    last_error = Column(String(500), nullable=True)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    next_try_at = Column(DateTime, nullable=False, server_default=func.now())
+    sent_at = Column(DateTime, nullable=True)
 
 
 class PrepaidReceipt(Base):

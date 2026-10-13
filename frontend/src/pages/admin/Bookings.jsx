@@ -144,14 +144,16 @@ const Bookings = () => {
     try {
       setAdminCancelLoading(true);
       
-      if (!selectedBooking || !selectedBooking.charges) {
+      // v7d (owner): cancel WITHOUT a refund - nothing goes to the gateway
+      const noRefund = adminCancelRefundType === "none";
+      if (!noRefund && (!selectedBooking || !selectedBooking.charges)) {
         showToast("Booking details not loaded. Please refresh and try again.", "error");
         setAdminCancelLoading(false);
         return;
       }
-      
+
       // Calculate refund amount based on refund type
-      let refundAmount = parseFloat(selectedBooking.charges.payable_amount);
+      let refundAmount = noRefund ? 0 : parseFloat(selectedBooking.charges.payable_amount);
       if (adminCancelRefundType === "convenience") {
         // Return room total excluding convenience fee + its GST
         const convenienceFeeTotal = 
@@ -168,7 +170,7 @@ const Bookings = () => {
         adminCancelNotes
       );
 
-      showToast(`✅ Booking cancelled. Refund ID: ${response.refund_id}`);
+      showToast(noRefund ? "✅ Booking cancelled - no refund" : `✅ Booking cancelled. Refund ID: ${response.refund_id}`);
       setAdminCancelBookingId(null);
       setAdminCancelReason("");
       setAdminCancelRefundType("full");
@@ -1007,7 +1009,7 @@ const Bookings = () => {
             <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
               <div className="text-red-400 text-3xl mb-4">⚠️</div>
               <h2 className="text-2xl font-bold mb-6 text-[#E5C07B]">
-                Cancel Booking & Process Refund
+                Cancel Booking
               </h2>
 
               <div className="space-y-5">
@@ -1071,6 +1073,21 @@ const Bookings = () => {
                                parseFloat(selectedBooking.charges?.convenience_gst || 0))).toFixed(2)}
                           </span>
                         )}
+                      </span>
+                    </label>
+                    {/* v7d (owner): cancel without refunding anything */}
+                    <label className="flex items-center cursor-pointer">
+                      <input
+                        type="radio"
+                        name="refund"
+                        value="none"
+                        checked={adminCancelRefundType === "none"}
+                        onChange={(e) => setAdminCancelRefundType(e.target.value)}
+                        className="mr-3"
+                      />
+                      <span className="text-sm">
+                        No refund (cancel only)
+                        <span className="ml-2 text-slate-400">₹0.00</span>
                       </span>
                     </label>
                   </div>

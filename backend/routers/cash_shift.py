@@ -433,7 +433,12 @@ def shift_detail(shift_id: int, db: Session = Depends(get_db)):
     cash_out = (db.query(Payment).filter(Payment.refund_mode == "cash",
                                          Payment.refund_status == "completed",
                                          Payment.refund_shift_id == shift_id).all())
+    # v7d (owner): the shift report on screen - every receipt / paid-out / prepaid receipt and the
+    # bills checked out in the shift (unsettled and nil amount) with who checked them out.
+    from routers.reports import _cashier_table, cashier_summary_for_shift
+    _cols, _rows, _totals = _cashier_table(cashier_summary_for_shift(db, shift))
     return {
+        "receipts": {"columns": _cols, "rows": _rows, "totals": _totals},
         "shift": _serialize(db, shift),
         "denominations": json.loads(shift.denominations) if shift.denominations else None,
         "close_note": shift.close_note,

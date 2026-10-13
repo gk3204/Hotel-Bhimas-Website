@@ -22,7 +22,7 @@ from utils import clock          # F-03: one clock - see utils/clock.py
 # Request model for admin cancellation
 class AdminCancelRequest(BaseModel):
     reason: str  # "Double booking error", "Guest request", "Technical issue", "Other"
-    refund_amount: float  # Amount to refund
+    refund_amount: float  # Amount to refund. v7d: 0 = cancel WITHOUT a refund
     admin_notes: str | None = None  # Optional admin notes
 
 router = APIRouter(
@@ -612,7 +612,8 @@ def bookings_by_status(status: str, db: Session = Depends(get_db)):
 def admin_cancel_booking(
     booking_id: int,
     request: AdminCancelRequest,
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    user=Depends(require_admin),
 ):
     """
     Admin endpoint to cancel a booking and process refund
@@ -637,38 +638,46 @@ def admin_cancel_booking(
                 detail=f"Cannot cancel booking with status: {booking.status}"
             )
         
-        # 3️⃣ Fetch payment record
-        payment = db.query(Payment).filter(
-            Payment.booking_id == booking_id,
-            Payment.status == "paid"
-        ).first()
-        
-        if not payment:
-            raise HTTPException(status_code=404, detail="Payment record not found")
-        
-        # 4️⃣ Process refund via Razorpay
-        success, refund_id, refund_msg = process_gateway_refund(
-            db, 
-            payment.payment_id, 
-            request.refund_amount, 
-            request.reason
-        )
-        
-        if not success:
-            raise HTTPException(status_code=400, detail=f"Refund failed: {refund_msg}")
+        # v7d (owner): "for booking cancel in web portal for admin have an option of cancel with no
+        # refund". refund_amount 0 cancels only - no payment needed, nothing sent to the gateway.
+        if request.refund_amount is not None and float(request.refund_amount) < 0:
+            raise HTTPException(status_code=400, detail="Refund amount cannot be negative")
+        no_refund = float(request.refund_amount or 0) <= 0
+        refund_id = None
+        if not no_refund:
+            # 3️⃣ Fetch payment record
+            payment = db.query(Payment).filter(
+                Payment.booking_id == booking_id,
+                Payment.status == "paid"
+            ).first()
+            if not payment:
+                raise HTTPException(status_code=404, detail="Payment record not found")
+
+            # 4️⃣ Process refund via Razorpay
+            success, refund_id, refund_msg = process_gateway_refund(
+                db, payment.payment_id, request.refund_amount, request.reason)
+            if not success:
+                raise HTTPException(status_code=400, detail=f"Refund failed: {refund_msg}")
         
         # 5️⃣ Update booking status
         booking.status = "admin_cancelled"
         booking.admin_cancelled = True
         booking.admin_cancelled_reason = request.reason
         booking.admin_notes = request.admin_notes
-        booking.admin_cancelled_by = "admin"  # In production, get from JWT token
+        booking.admin_cancelled_by = ((user or {}).get("sub") or "admin")[:50]   # v7d: who, from the login
         # F-03: instants are UTC. routers/payments.py and services/ota_service.py already wrote
         # this same column with utcnow(), so it held two clocks 5.5 h apart.
         booking.admin_cancelled_at = clock.now_utc()
         booking.cancelled_at = clock.now_utc()
         db.commit()
-        
+        try:
+            from utils.audit import write_audit
+            write_audit(db, user, "booking.admin_cancel", "booking", booking_id,
+                        after={"reason": request.reason, "refund_amount": float(request.refund_amount or 0),
+                               "no_refund": no_refund, "refund_id": refund_id}, client="web", commit=True)
+        except Exception as e:
+            logger.warning(f"admin cancel audit failed for {booking_id}: {e}")
+
         # 6️⃣ Send notification email to guest
         try:
             send_admin_cancellation_email(
@@ -686,14 +695,15 @@ def admin_cancel_booking(
             logger.error(f"Failed to send cancellation email: {str(e)}")
         
         logger.info(f"✅ Booking {booking_id} cancelled by admin. Refund ID: {refund_id}, Amount: ₹{request.refund_amount}")
-        
+
         return {
             "booking_id": booking_id,
             "status": "admin_cancelled",
             "refund_id": refund_id,
-            "refund_amount": request.refund_amount,
-            "refund_status": "completed",
-            "message": "Booking cancelled and refund processed successfully"
+            "refund_amount": 0.0 if no_refund else request.refund_amount,
+            "refund_status": "none" if no_refund else "completed",
+            "message": ("Booking cancelled - no refund" if no_refund
+                        else "Booking cancelled and refund processed successfully")
         }
         
     except HTTPException:

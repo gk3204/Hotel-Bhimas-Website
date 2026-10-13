@@ -14,7 +14,7 @@ from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-da
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
-APP_BUILD = "v7c"
+APP_BUILD = "v7d"
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
@@ -294,6 +294,35 @@ def _start_razorpay_reconcile_scheduler():
         return None
 
 
+def _start_email_outbox_scheduler():
+    """v7d: every 30 minutes, re-send the e-mails Mailjet refused (daily limit, outage). Advisory-
+    locked, so one worker runs it. Off with EMAIL_OUTBOX_ENABLED=false."""
+    if os.getenv("EMAIL_OUTBOX_ENABLED", "true").strip().lower() in ("false", "0", "no"):
+        return None
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from database import SessionLocal
+        from services import email_outbox
+
+        def _tick():
+            _db = SessionLocal()
+            try:
+                res = email_outbox.retry_due_locked(_db)
+                if res and res.get("sent"):
+                    logger.warning(f"email outbox re-sent {res['sent']} e-mail(s)")
+            finally:
+                _db.close()
+
+        sched = BackgroundScheduler(daemon=True, timezone="UTC")
+        sched.add_job(_tick, "interval", minutes=30, id="email_outbox", max_instances=1, coalesce=True)
+        sched.start()
+        logger.info("✅ e-mail outbox sweep started (every 30 min)")
+        return sched
+    except Exception as e:
+        logger.error(f"❌ e-mail outbox sweep failed to start: {e}")
+        return None
+
+
 def _start_review_scheduler():
     """In-process APScheduler for the Google-review pipeline (prompt 20). Every
     `review_poll_interval_minutes` it runs poll → generate → post. It still ticks when GBP is not
@@ -349,12 +378,13 @@ async def lifespan(app: FastAPI):
     review_scheduler = _start_review_scheduler()
     overstay_scheduler = _start_overstay_scheduler()
     razorpay_scheduler = _start_razorpay_reconcile_scheduler()
+    email_outbox_scheduler = _start_email_outbox_scheduler()
 
     yield  # app runs here
 
     # Optional shutdown logic
     for sched in (scheduler, night_audit_scheduler, ota_scheduler, review_scheduler,
-                  overstay_scheduler, razorpay_scheduler):
+                  overstay_scheduler, razorpay_scheduler, email_outbox_scheduler):
         if sched is not None:
             try:
                 sched.shutdown(wait=False)
@@ -508,6 +538,8 @@ app.include_router(opsettings.router)
 app.include_router(booking_lifecycle.router)
 app.include_router(linen.router)
 app.include_router(documents.router)
+from routers import email_outbox as _email_outbox_router   # v7d
+app.include_router(_email_outbox_router.router)
 
 
 # -------------------------

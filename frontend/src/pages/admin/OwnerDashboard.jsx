@@ -20,6 +20,17 @@ export default function OwnerDashboard() {
   const [closing, setClosing] = useState(false);
   // v6m.10: the day to close / re-send; blank = yesterday (what the 03:00 night audit closes).
   const [closeDate, setCloseDate] = useState("");
+  // v7d: e-mails Mailjet refused (usually its daily limit) waiting for the automatic re-send
+  const [mailQueue, setMailQueue] = useState(null);
+  const _api = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+  const _auth = () => ({ Authorization: `Bearer ${localStorage.getItem("adminToken")}` });
+  const loadMailQueue = () =>
+    fetch(`${_api}/admin/email-outbox?status=pending&limit=5`, { headers: _auth() })
+      .then((r) => (r.ok ? r.json() : null)).then(setMailQueue).catch(() => {});
+  useEffect(() => { loadMailQueue(); }, []); // eslint-disable-line
+  const retryMail = () =>
+    fetch(`${_api}/admin/email-outbox/retry`, { method: "POST", headers: _auth() })
+      .then(() => loadMailQueue()).catch(() => {});
 
   const showToast = (msg) => {
     setToast(msg);
@@ -136,6 +147,18 @@ export default function OwnerDashboard() {
                     {dash.overdue.length > 5 ? "…" : ""}
                   </span>
                 )}
+              </div>
+            )}
+
+            {mailQueue && mailQueue.pending > 0 && (
+              <div className="mb-6 p-4 rounded-xl border border-amber-500/40 bg-amber-500/10 text-amber-200 text-sm flex flex-wrap items-center gap-3">
+                <span className="flex-1 min-w-[220px]">
+                  <b>{mailQueue.pending} e-mail(s) waiting to be re-sent</b> — Mailjet refused them (usually its
+                  200-a-day limit). They are retried automatically every 30 minutes.
+                  {mailQueue.rows?.[0] && <> Latest: “{mailQueue.rows[0].subject}” to {mailQueue.rows[0].to}.</>}
+                </span>
+                <button onClick={retryMail}
+                  className="bg-amber-500/80 hover:bg-amber-500 text-slate-900 font-semibold px-3 py-1.5 rounded-lg">Retry now</button>
               </div>
             )}
 

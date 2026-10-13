@@ -2,7 +2,7 @@ import React, { useEffect, useState } from "react";
 import { PageShell } from "../../components/admin/BackofficeUI";
 import ConfigPanel from "../../components/admin/ConfigPanel";
 import { groupByKey } from "../../components/admin/settingsGroups";
-import { getCashConfig, getShifts } from "../../api/cashShift";
+import { getCashConfig, getShifts, getShiftDetail, openShiftPdf } from "../../api/cashShift";
 import { FaSyncAlt } from "react-icons/fa";
 
 const fmt = (n) =>
@@ -21,6 +21,12 @@ const CashShiftSettings = () => {
 
   const [form, setForm] = useState({ cycle: "shift", variance_threshold: 100, variance_alert_enabled: true });
   const [shifts, setShifts] = useState([]);
+  // v7d: the shift report on screen
+  const [detail, setDetail] = useState(null);
+  const showDetail = async (id) => {
+    try { setDetail({ id, ...(await getShiftDetail(id)) }); } catch (e) { showToast(e.message, "error"); }
+  };
+  const pdf = async (id) => { try { await openShiftPdf(id); } catch (e) { showToast(e.message, "error"); } };
 
   const showToast = (message, type = "success") => {
     setToast({ message, type });
@@ -88,6 +94,7 @@ const CashShiftSettings = () => {
                     <th className="px-5 py-4 font-semibold text-sm text-right">Expected</th>
                     <th className="px-5 py-4 font-semibold text-sm text-right">Counted</th>
                     <th className="px-5 py-4 font-semibold text-sm text-right">Variance</th>
+                    <th className="px-5 py-4 font-semibold text-sm">Report</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-700">
@@ -106,6 +113,12 @@ const CashShiftSettings = () => {
                         {s.variance === null || s.variance === undefined ? "—" : fmt(s.variance)}
                         {flagged(s) && <span className="ml-2 text-xs">⚠</span>}
                       </td>
+                      <td className="px-5 py-4 whitespace-nowrap">
+                        <button onClick={() => showDetail(s.id)}
+                          className="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-white text-xs font-semibold mr-2">Details</button>
+                        <button onClick={() => pdf(s.id)}
+                          className="bg-[#E5C07B]/80 hover:bg-[#E5C07B] px-3 py-1.5 rounded-lg text-slate-900 text-xs font-semibold">PDF</button>
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -113,6 +126,48 @@ const CashShiftSettings = () => {
             </div>
           )}
         </div>
+
+        {/* v7d: one shift's receipts, paid-outs, prepaid receipts and checked-out bills (incl. nil amount) */}
+        {detail && (
+          <div className="fixed inset-0 bg-black/70 z-50 flex items-start justify-center p-4 overflow-y-auto"
+               onClick={() => setDetail(null)}>
+            <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-5xl mt-10 p-5"
+                 onClick={(e) => e.stopPropagation()}>
+              <div className="flex items-center justify-between mb-3">
+                <h3 className="text-lg font-bold text-[#E5C07B]">
+                  Shift #{detail.id} · {detail.shift?.staff_name || "—"} · {(detail.shift?.opened_at || "").slice(0, 16).replace("T", " ")}
+                  {detail.shift?.closed_at ? ` → ${(detail.shift.closed_at || "").slice(0, 16).replace("T", " ")}` : " (open)"}
+                </h3>
+                <div className="flex gap-2">
+                  <button onClick={() => pdf(detail.id)}
+                    className="bg-[#E5C07B]/80 hover:bg-[#E5C07B] px-3 py-1.5 rounded-lg text-slate-900 text-xs font-semibold">PDF</button>
+                  <button onClick={() => setDetail(null)}
+                    className="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-white text-xs font-semibold">Close</button>
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-sm">
+                  <thead className="bg-slate-800">
+                    <tr>{(detail.receipts?.columns || []).map((c) => <th key={c} className="px-3 py-2 whitespace-nowrap">{c}</th>)}</tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800">
+                    {(detail.receipts?.rows || []).map((r, i) => {
+                      const n = (detail.receipts?.columns || []).length;
+                      if (r && !Array.isArray(r) && r.section !== undefined)
+                        return <tr key={i}><td colSpan={n} className="px-3 py-2 font-semibold text-[#E5C07B] whitespace-pre">{r.section}</td></tr>;
+                      if (r && !Array.isArray(r) && r.subtotal)
+                        return <tr key={i} className="bg-slate-800/60 font-semibold">{r.subtotal.map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap">{c}</td>)}</tr>;
+                      return <tr key={i}>{(r || []).map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap text-slate-300">{c}</td>)}</tr>;
+                    })}
+                    {detail.receipts?.totals && (
+                      <tr className="bg-slate-800 font-bold">{detail.receipts.totals.map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap">{c}</td>)}</tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* TOAST */}
         {toast && (

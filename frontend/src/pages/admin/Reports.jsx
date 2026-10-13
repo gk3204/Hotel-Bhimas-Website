@@ -82,9 +82,9 @@ const REPORTS = {
           fmt(m.receipt), fmt(m.payment), "", "", m.memo ? "MEMO - not in grand total" : "", ""] });
       });
       if ((d.unsettled || []).length) rows.push({ kind: "section", label: "Unsettled Checkout Bills" });
-      (d.unsettled || []).forEach((x) => rows.push([x.bill_no, "", "", x.room, x.guest || "", "", "", fmt(x.balance), "", "UNSETTLED", ""]));
+      (d.unsettled || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", "", "", fmt(x.balance), "", "UNSETTLED", x.user || ""]));
       if ((d.nil_checkouts || []).length) rows.push({ kind: "section", label: "Checkout Bills With Nil Amount" });
-      (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, "", "", x.room, x.guest || "", "", "", fmt(x.balance), "", "NIL", ""]));
+      (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", "", "", fmt(x.balance), "", "NIL", x.user || ""]));
       return {
         columns: ["Bill/Vou", "Date", "Time", "Room", "Guest", "Receipt", "Payment", "Balance",
           "CR No", "Remarks", "User"],
@@ -102,13 +102,13 @@ const REPORTS = {
     fetch: (p) => api.getCheckoutSummary(p),
     project: (d) => ({
       columns: ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc",
-        "Discount", "Advance", "Refund", "Bill Amt"],
+        "Discount", "Advance", "Refund", "Bill Amt", "Checked out", "By"],
       rows: d.rows.map((r) => [r.bill_no, r.rooms, fmt(r.room_rent), fmt(r.sgst), fmt(r.cgst),
         fmt(r.food), fmt(r.laundry), fmt(r.misc), fmt(r.discount), fmt(r.advance), fmt(r.refund),
-        fmt(r.bill_amount)]),
+        fmt(r.bill_amount), r.checked_out_at || "", r.checked_out_by || ""]),
       totals: ["TOTAL", "", fmt(d.totals.room_rent), fmt(d.totals.sgst), fmt(d.totals.cgst),
         fmt(d.totals.food), fmt(d.totals.laundry), fmt(d.totals.misc), fmt(d.totals.discount),
-        fmt(d.totals.advance), fmt(d.totals.refund), fmt(d.totals.bill_amount)],
+        fmt(d.totals.advance), fmt(d.totals.refund), fmt(d.totals.bill_amount), "", ""],
     }),
   },
   "sales/daily": {

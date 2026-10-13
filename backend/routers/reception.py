@@ -2151,6 +2151,7 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         for item in leaving:
             item.checked_out_at = _depart_ts
         sync_booking_from_items(booking)
+        booking.checked_out_by = _resolve_user_id(db, user)   # v7d: shown on the reports
         # v6e: a room's own bill closes when that room leaves - that is the whole point of billing
         # per room, and it is what lets its invoice be raised while the rest of the party is still
         # in the building. A GROUP bill closes only when the last room has gone.

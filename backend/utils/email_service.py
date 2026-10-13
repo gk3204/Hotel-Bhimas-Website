@@ -239,7 +239,7 @@ Email: hotelbhimas@gmail.com
         if _safe_mode():
             logger.warning("SAFE_MODE: not sending email %s", data)
             return False
-        result = mailjet.send.create(data=data)
+        result = _send_mj(data, "booking_confirmation")   # v7d: a refusal is queued for a retry
 
         if result.status_code == 200:
             logger.info(f"✅ Emails sent for booking {booking_data['booking_id']}")
@@ -320,7 +320,7 @@ def send_enquiry_email(name: str, email: str, phone: str, message: str):
         if _safe_mode():
             logger.warning("SAFE_MODE: not sending enquiry email")
             return False
-        result = enquiry_mailjet.send.create(data=data)
+        result = _send_mj(data, "enquiry", client=enquiry_mailjet)   # v7d
 
         if result.status_code == 200:
             logger.info(f"✅ Enquiry email sent from {email}")
@@ -526,12 +526,27 @@ Hotel Bhimas
 </body>
 </html>"""
 
+        # v7d: cancelled WITHOUT a refund - say so, and drop the refund block
+        if float(refund_amount or 0) <= 0:
+            import re as _re
+            text_body = _re.sub(r"Refund Details:.*?original payment method\.\n",
+                                "Refund: no refund applies to this cancellation.\n", text_body, flags=_re.S)
+            text_body = text_body.replace(" Please find the refund details below.", "")
+            text_body = text_body.replace("Booking Cancellation & Refund", "Booking Cancellation")
+            email_body = _re.sub(r"<!-- REFUND SECTION -->.*?</div>",
+                                 '<p style="color:#444444; font-size:14px; margin:0 0 20px 0;">'
+                                 '<strong>Refund:</strong> no refund applies to this cancellation.</p>',
+                                 email_body, count=1, flags=_re.S)
+            email_body = email_body.replace("Your refund is being processed as per the details below.", "")
+            email_body = email_body.replace("Booking Cancellation & Refund", "Booking Cancellation")
+        _subject = (f"Booking Cancellation - Booking ID: {booking_ref}" if float(refund_amount or 0) <= 0
+                    else f"Booking Cancellation & Refund - Booking ID: {booking_ref}")
         data = {
             "Messages": [
                 {
                     "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas"},
                     "To": [{"Email": guest_email, "Name": guest_name}],
-                    "Subject": f"Booking Cancellation & Refund - Booking ID: {booking_ref}",
+                    "Subject": _subject,
                     "TextPart": text_body,
                     "HTMLPart": email_body,
                     "ReplyTo": {"Email": "hotelbhimas@gmail.com", "Name": "Hotel Bhimas"},
@@ -555,7 +570,7 @@ Hotel Bhimas
         if _safe_mode():
             logger.warning("SAFE_MODE: not sending email %s", data)
             return False
-        result = mailjet.send.create(data=data)
+        result = _send_mj(data, "admin_cancellation")   # v7d: a refusal is queued for a retry
 
         if result.status_code == 200:
             logger.info(f"✅ Admin cancellation email sent for booking {booking_ref} (Refund ID: {refund_id})")
@@ -712,7 +727,7 @@ GSTIN: 37AAACK9397F1Z3
         if _safe_mode():
             logger.warning("SAFE_MODE: not sending email %s", data)
             return False
-        result = mailjet.send.create(data=data)
+        result = _send_mj(data, "invoice")   # v7d: a refusal is queued for a retry
 
         if result.status_code == 200:
             logger.info(f"✅ Invoice email sent: {invoice_no}")
@@ -833,7 +848,7 @@ GSTIN: 37AAACK9397F1Z3
         if _safe_mode():
             logger.warning("SAFE_MODE: not sending email %s", data)
             return False
-        result = mailjet.send.create(data=data)
+        result = _send_mj(data, "company_invoice")   # v7d: a refusal is queued for a retry
         if result.status_code == 200:
             logger.info(f"✅ Company invoice email sent: {invoice_no}")
         else:
@@ -890,7 +905,7 @@ def send_notification_email(to_email, subject, body, to_name=None, hotel_name="H
         if _safe_mode():
             logger.warning("SAFE_MODE: not sending email %s", data)
             return False
-        result = mailjet.send.create(data=data)
+        result = _send_mj(data, "notification")   # v7d: a refusal is queued for a retry
         if result.status_code == 200:
             logger.info(f"✅ Notification email sent to {to_email}")
             return True
@@ -951,7 +966,7 @@ def send_prearrival_link_email(guest_email, guest_name, link, hotel_name="Hotel 
         if _safe_mode():
             logger.warning("SAFE_MODE: not sending email %s", data)
             return False
-        result = mailjet.send.create(data=data)
+        result = _send_mj(data, "prearrival_link")   # v7d: a refusal is queued for a retry
         if result.status_code == 200:
             logger.info(f"✅ Pre-arrival link email sent to {guest_email}")
         else:
@@ -992,7 +1007,7 @@ def send_owner_report_email(to_email, subject, html_body, pdf_path, filename="re
         if _safe_mode():
             logger.warning("SAFE_MODE: not sending email %s", data)
             return False
-        result = mailjet.send.create(data=data)
+        result = _send_mj(data, "owner_report")   # v7d: a refusal is queued for a retry
         if result.status_code == 200:
             return True
         logger.error(f"owner report email failed: {result.status_code}")
@@ -1040,7 +1055,7 @@ def send_report_email(to_emails, subject, html_body, attachments):
             logger.warning("SAFE_MODE: not sending report email %r to %s with %s", subject, to_emails,
                            [a["Filename"] for a in atts])
             return False
-        result = mailjet.send.create(data=data)
+        result = _send_mj(data, "report")   # v7d: a refusal is queued for a retry
         if result.status_code == 200:
             return True
         logger.error(f"report email failed: {result.status_code}")
@@ -1048,3 +1063,27 @@ def send_report_email(to_emails, subject, html_body, attachments):
     except Exception as e:
         logger.error(f"report email error: {e}")
         return False
+
+
+
+def _send_mj(data, kind, client=None):
+    """v7d (owner: "automatic resend email for those where mailjet per day limit is over"): every
+    e-mail is sent through here. When Mailjet refuses it for a reason that can pass - the daily limit,
+    a rate limit, an outage, a dropped connection - the request is queued in email_outbox and the
+    sweep re-sends it (services/email_outbox.py). The caller still sees the refusal, as before."""
+    import json as _json
+    from services import email_outbox as _ob
+    client = client or mailjet
+    try:
+        result = client.send.create(data=data)
+    except Exception as e:
+        _ob.enqueue(data, kind, f"send error: {e}")
+        raise
+    if result.status_code != 200:
+        try:
+            body = _json.dumps(result.json())
+        except Exception:
+            body = ""
+        if _ob.retryable(result.status_code, body):
+            _ob.enqueue(data, kind, f"HTTP {result.status_code}: {body[:300]}")
+    return result
