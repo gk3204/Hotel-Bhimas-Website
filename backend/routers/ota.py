@@ -406,8 +406,10 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
     # Call the desk-booking handler directly (plain function — Depends bypassed by explicit args).
     # v6m: at the voucher's rates (or the admin's), not today's rate card.
     from routers.reception import create_desk_booking_at_rates
+    # v7b (owner): reception may confirm an OTA booking into alternate-type rooms when its own
+    # type is full - the channel has already sold it. Check-in then asks for the approval.
     result = create_desk_booking_at_rates(booking_req, db=db, user=user,
-                                          rates=_confirm_rates(d, data, user))
+                                          rates=_confirm_rates(d, data, user), allow_alternate=True)
 
     d.status = "confirmed"
     d.linked_booking_id = result["booking_id"]

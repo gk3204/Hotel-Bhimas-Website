@@ -163,7 +163,10 @@ def check_room_availability(
     holds, _unmapped = ota_draft_holds(db, check_in_date, check_out_date)
     ota_held = int(holds.get(room_type_id, 0))
 
-    available_rooms = room_type.total_rooms - booked_rooms - out_of_service - ota_held
+    # v7b: rooms of this type lent to another type booked into its alternates
+    from utils.availability import lent_out
+    lent = int(lent_out(db, check_in_date, check_out_date, holds=holds).get(room_type_id, 0))
+    available_rooms = room_type.total_rooms - booked_rooms - out_of_service - ota_held - lent
 
     return {
         "room_type_id": room_type_id,

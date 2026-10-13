@@ -102,13 +102,15 @@ def desk_availability(
 
     # b5: rooms held by unconfirmed OTA confirmation drafts for these dates.
     holds, unmapped = availability.ota_draft_holds(db, ci, co)
+    _plan = availability.alternate_plan(db, ci, co, holds=holds)   # v7b
     rows = []
     for rt in db.query(RoomType).filter(RoomType.is_active == True).order_by(RoomType.room_type_id).all():  # noqa: E712
         blk = _blocked(db, rt.room_type_id, ci, co)
         booked = int(_booked_qty(db, rt.room_type_id, ci, co))
         inactive = int(_inactive_count(db, rt.room_type_id))
         held = int(holds.get(rt.room_type_id, 0))
-        available = 0 if blk else max(0, rt.total_rooms - booked - inactive - held)
+        lent = int(_plan["lent"].get(rt.room_type_id, 0))          # v7b
+        available = 0 if blk else max(0, rt.total_rooms - booked - inactive - held - lent)
         rows.append({
             "room_type_id": rt.room_type_id,
             "room_type_name": rt.name,
@@ -121,6 +123,10 @@ def desk_availability(
             "inactive": inactive,
             "out_of_service": inactive,
             "ota_held": held,
+            # v7b: rooms lent to another type's overflow, and extra rooms an OTA confirm could
+            # still find through this type's alternates
+            "alt_lent": lent,
+            "alt_free": int(_plan["alt_free"].get(rt.room_type_id, 0)),
             "available": available,
             "blocked": bool(blk),
             "block_reason": blk.reason if blk else None,
@@ -137,15 +143,20 @@ def desk_availability(
 # server code can set it (create_desk_booking_at_rates); the desk's own booking form cannot.
 import contextvars as _cv
 _RATE_OVERRIDES: _cv.ContextVar = _cv.ContextVar("desk_rate_overrides", default=None)
+# v7b (owner, 12 Oct): an OTA booking may be confirmed into ALTERNATE-type rooms when its own type is
+# full - only by reception on the desk (never auto-confirmed, never the website / a walk-in).
+_ALLOW_ALTERNATE: _cv.ContextVar = _cv.ContextVar("desk_allow_alternate", default=False)
 
 
-def create_desk_booking_at_rates(data, db, user, rates):
+def create_desk_booking_at_rates(data, db, user, rates, allow_alternate=False):
     """create_desk_booking, with `rates[i]` (or None = rate card) pricing `data.rooms[i]`."""
     token = _RATE_OVERRIDES.set(list(rates or []))
+    token2 = _ALLOW_ALTERNATE.set(bool(allow_alternate))
     try:
         return create_desk_booking(data, db=db, user=user)
     finally:
         _RATE_OVERRIDES.reset(token)
+        _ALLOW_ALTERNATE.reset(token2)
 
 
 @router.post("/bookings")
@@ -187,6 +198,7 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
 
         # Validate + availability (row-locked to prevent concurrent overbooking)
         rt_map = {}
+        _alt_notes = []   # v7b
         for item in data.rooms:
             rt = db.query(RoomType).filter(
                 RoomType.room_type_id == item.room_type_id,
@@ -213,13 +225,26 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
                 db, data.check_in, data.check_out,
                 exclude_ota_booking_id=(data.ota_booking_id or None))
             held = int(holds.get(item.room_type_id, 0))
-            available = rt.total_rooms - int(booked) - int(inactive) - held
+            # v7b: rooms of this type already taken by another type booked into its alternates
+            _plan = availability.alternate_plan(db, data.check_in, data.check_out, holds=holds)
+            lent = int(_plan["lent"].get(item.room_type_id, 0))
+            available = rt.total_rooms - int(booked) - int(inactive) - held - lent
             if item.quantity > available:
-                why = (f" ({held} held by unconfirmed OTA booking(s) for these dates — confirm or "
-                       f"dismiss them on OTA Bookings)" if held else "")
-                raise HTTPException(status_code=409,
-                                    detail=f"Not enough {rt.name}s available. Available: {max(0, available)}, "
-                                           f"Requested: {item.quantity}{why}")
+                alt = int(_plan["alt_free"].get(item.room_type_id, 0))
+                if _ALLOW_ALTERNATE.get() and item.quantity <= max(0, available) + alt:
+                    # an OTA guest the channel already sold - booked into its alternate rooms; the
+                    # check-in will ask for the alternate-room approval (_assert_booked_type_sold_out)
+                    _alt_notes.append(f"{item.quantity - max(0, available)} x {rt.name} needs an ALTERNATE room "
+                                      f"(only alternates were free when confirmed) - check-in needs approval")
+                else:
+                    why = (f" ({held} held by unconfirmed OTA booking(s) for these dates — confirm or "
+                           f"dismiss them on OTA Bookings)" if held else "")
+                    if alt > 0:
+                        why += (f" ({alt} more through alternate room types - only an OTA booking can be "
+                                f"confirmed into those, from OTA Bookings)")
+                    raise HTTPException(status_code=409,
+                                        detail=f"Not enough {rt.name}s available. Available: {max(0, available)}, "
+                                               f"Requested: {item.quantity}{why}")
             rt_map[item.room_type_id] = rt
 
         # Occupancy (per booking): total adults must fit the combined max-occupancy (= max adults)
@@ -337,6 +362,8 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
                 time(hour=12) if ota_service.is_ota_source(booking_source, db)
                 else (data.check_in_time or time(hour=12))),
         )
+        if _alt_notes:   # v7b: say so on the booking, for the desk at check-in
+            booking.admin_notes = ("; ".join(_alt_notes) + ("; " + booking.admin_notes if booking.admin_notes else ""))[:500]
         db.add(booking)
         db.flush()
         # OTA tracking snapshot (prompt 17): stamp OTA booking id + commission + net payout when the
@@ -1068,7 +1095,8 @@ def _assert_early_capacity(db, booking: Booking, date_from: date, date_to: date)
         # b5: an unconfirmed OTA draft arriving tonight holds its room too.
         holds, _u = availability.ota_draft_holds(db, date_from, date_to,
                                                   exclude_ota_booking_id=booking.ota_booking_id)
-        free = (rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
+        free = ((rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
+                - int(availability.lent_out(db, date_from, date_to, holds=holds).get(rt_id, 0)))   # v7b
         if free < qty:
             raise HTTPException(
                 status_code=409,
@@ -2677,7 +2705,9 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             inactive = int(_inactive_count(db, new_type.room_type_id))
             holds, _u = availability.ota_draft_holds(db, today, booking.check_out,
                                                       exclude_ota_booking_id=booking.ota_booking_id)
-            if new_type.total_rooms - booked - inactive - int(holds.get(new_type.room_type_id, 0)) <= 0:
+            if (new_type.total_rooms - booked - inactive - int(holds.get(new_type.room_type_id, 0))
+                    - int(availability.lent_out(db, today, booking.check_out, holds=holds)
+                          .get(new_type.room_type_id, 0))) <= 0:   # v7b
                 raise HTTPException(status_code=409,
                                     detail=f"No {new_type.name} capacity left for the remaining dates "
                                            f"— a future reservation needs it")
@@ -2961,7 +2991,8 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             # b5: extending into a night an unconfirmed OTA guest is booked for would strand them.
             holds, _u = availability.ota_draft_holds(db, old_co, new_co,
                                                       exclude_ota_booking_id=booking.ota_booking_id)
-            free = (rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
+            free = ((rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
+                    - int(availability.lent_out(db, old_co, new_co, holds=holds).get(rt_id, 0)))   # v7b
             if free < qty:
                 raise HTTPException(
                     status_code=409,
@@ -3858,9 +3889,12 @@ def _build_desk_board(db: Session):
             logger.warning(f"arrival preview failed for booking {b.booking_id}: {e}")
             preview = None
         exp = expected_arrival(b, db)
+        # v7b: an OTA booking confirmed into ALTERNATE rooms says so on Arrivals
+        _alt = next((p.strip() for p in (b.admin_notes or "").split(";") if "ALTERNATE room" in p), None)
         return {
             "booking_id": b.booking_id,
             "guest_id": b.guest_id,
+            "alternate_note": _alt,
             "guest_name": b.display_guest_name or None,
             "phone": guest_display_phone(b),   # v6m: blank for an OTA placeholder
             # Website bookings carry a real email; surfaced so the desk pre-fills it at check-in.

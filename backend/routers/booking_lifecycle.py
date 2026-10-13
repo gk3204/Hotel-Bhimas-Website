@@ -154,7 +154,8 @@ def redate(booking_id: int, data: RedateRequest, db: Session = Depends(get_db),
         # b5: unconfirmed OTA drafts hold their rooms (not this booking's own draft).
         holds, _u = availability.ota_draft_holds(db, new_ci, new_co,
                                                   exclude_ota_booking_id=b.ota_booking_id)
-        free = (rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
+        free = ((rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
+                - int(availability.lent_out(db, new_ci, new_co, holds=holds).get(rt_id, 0)))   # v7b
         if free < qty:
             raise HTTPException(
                 status_code=409,
@@ -318,7 +319,8 @@ def edit_booking_rooms(booking_id: int, data: BookingRoomsEdit, db: Session = De
         if counts_self:
             booked -= held.get(rt_id, 0)
         free = (int(rts[rt_id].total_rooms or 0) - booked
-                - int(availability.out_of_service_count(db, rt_id)) - int(holds.get(rt_id, 0)))
+                - int(availability.out_of_service_count(db, rt_id)) - int(holds.get(rt_id, 0))
+                - int(availability.lent_out(db, b.check_in, b.check_out, holds=holds).get(rt_id, 0)))   # v7b
         if free < qty:
             raise HTTPException(status_code=409,
                                 detail=f"Only {max(free, 0)} {rts[rt_id].name} free for "

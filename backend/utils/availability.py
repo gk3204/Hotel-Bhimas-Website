@@ -137,3 +137,106 @@ def ota_draft_holds(db, check_in, check_out, exclude_ota_booking_id=None):
             else:
                 unmapped += int(n)
     return holds, unmapped
+
+
+# ---- v7b: alternate room types (owner, 12 Oct, item 4) ----
+# "check room availability for ota based on alternate type if the primary type room was unavailable
+# ... say there is a room with double non-ac and its alternate type is double ac then this can be taken
+# into account although during check-in it might need approval".
+#
+# A room of type X whose `alt_room_type_id` is Y can host a type-Y stay (check-in already allows it,
+# behind the ac_downgrade / alt-type owner approval - reception._assert_booked_type_sold_out). What was
+# missing is the ARITHMETIC:
+#   * a type-Y booking beyond Y's own rooms OVERFLOWS onto its lenders, and the lender's room is then
+#     taken for those dates - so the lender type must count it as sold (`lent`), or the website/desk
+#     sells that room a second time;
+#   * how many more type-Y rooms could still be found through alternates (`alt_free`) - which only the
+#     OTA confirm at the desk may use (owner decision: held for the desk, never auto-confirmed).
+# Same date semantics as booked_qty (any overlap), so the numbers agree with every other guard.
+
+def _type_blocked(db, room_type_id, check_in, check_out) -> bool:
+    from models import RoomTypeAvailability
+    return db.query(RoomTypeAvailability.id).filter(
+        RoomTypeAvailability.room_type_id == room_type_id,
+        RoomTypeAvailability.date >= check_in,
+        RoomTypeAvailability.date < check_out,
+        RoomTypeAvailability.is_available == False,  # noqa: E712
+    ).first() is not None
+
+
+def alternate_plan(db, check_in, check_out, holds=None, exclude_ota_booking_id=None) -> dict:
+    """{"own_free": {type: n}, "lent": {type: n}, "alt_free": {type: n}, "lenders": {Y: [(X, rooms)]}}.
+
+    own_free  rooms of the type left after its own bookings, out-of-service rooms and OTA holds
+              (negative when the type is booked into its alternates)
+    lent      rooms of the type taken by OTHER types' overflow - subtract from its availability
+    alt_free  extra rooms a type could still get through its alternates
+    Types with no alternate links appear in none of the dicts (lent/alt_free = 0)."""
+    from models import RoomType
+    rows = (db.query(Room.room_type_id, Room.alt_room_type_id, func.count(Room.room_id))
+            .filter(Room.alt_room_type_id.isnot(None),
+                    Room.alt_room_type_id != Room.room_type_id,
+                    Room.is_active == True,  # noqa: E712
+                    ~Room.status.in_(OUT_OF_SERVICE_STATUSES))
+            .group_by(Room.room_type_id, Room.alt_room_type_id).all())
+    if not rows:
+        return {"own_free": {}, "lent": {}, "alt_free": {}, "lenders": {}}
+    if holds is None:
+        holds, _u = ota_draft_holds(db, check_in, check_out, exclude_ota_booking_id=exclude_ota_booking_id)
+    lenders = {}
+    for x, y, n in rows:
+        lenders.setdefault(y, []).append((x, int(n)))
+    involved = {x for x, _y, _n in rows} | {y for _x, y, _n in rows}
+    own_free = {}
+    for rt in db.query(RoomType).filter(RoomType.room_type_id.in_(involved)).all():
+        t = rt.room_type_id
+        own_free[t] = (int(rt.total_rooms or 0) - int(booked_qty(db, t, check_in, check_out))
+                       - int(out_of_service_count(db, t)) - int(holds.get(t, 0)))
+    blocked = {t for t in involved if _type_blocked(db, t, check_in, check_out)}
+    lent, pair = {}, {}
+    for y in sorted(lenders):
+        need = max(0, -own_free.get(y, 0))
+        for x, n in sorted(lenders[y]):
+            if need <= 0:
+                break
+            if x in blocked:
+                continue
+            spare = own_free.get(x, 0) - lent.get(x, 0)
+            give = min(need, n - pair.get((x, y), 0), max(0, spare))
+            if give > 0:
+                lent[x] = lent.get(x, 0) + give
+                pair[(x, y)] = pair.get((x, y), 0) + give
+                need -= give
+    alt_free = {}
+    for y, lst in lenders.items():
+        alt_free[y] = sum(min(n - pair.get((x, y), 0), max(0, own_free.get(x, 0) - lent.get(x, 0)))
+                          for x, n in lst if x not in blocked)
+    return {"own_free": own_free, "lent": lent, "alt_free": alt_free, "lenders": lenders}
+
+
+def lent_out(db, check_in, check_out, holds=None, exclude_ota_booking_id=None) -> dict:
+    """{type: rooms of that type taken by other types booked into their alternates}."""
+    return alternate_plan(db, check_in, check_out, holds=holds,
+                          exclude_ota_booking_id=exclude_ota_booking_id)["lent"]
+
+
+def alternate_shortfall(db, room_type_id, check_in, check_out, quantity, exclude_ota_booking_id=None) -> dict:
+    """v7b: can `quantity` rooms of this type be found once its alternates are counted?
+    {"own": rooms of the type itself still free, "alt": extra rooms through alternates,
+     "fits_own": bool, "fits_with_alt": bool, "lender_names": [type names that would host it]}"""
+    from models import RoomType
+    holds, _u = ota_draft_holds(db, check_in, check_out, exclude_ota_booking_id=exclude_ota_booking_id)
+    plan = alternate_plan(db, check_in, check_out, holds=holds)
+    rt = db.query(RoomType).filter(RoomType.room_type_id == room_type_id).first()
+    own = (int(rt.total_rooms or 0) if rt else 0) - int(booked_qty(db, room_type_id, check_in, check_out)) \
+        - int(out_of_service_count(db, room_type_id)) - int(holds.get(room_type_id, 0)) \
+        - int(plan["lent"].get(room_type_id, 0))
+    alt = int(plan["alt_free"].get(room_type_id, 0))
+    names = []
+    for x, _n in plan["lenders"].get(room_type_id, []):
+        t = db.query(RoomType).filter(RoomType.room_type_id == x).first()
+        if t is not None:
+            names.append(t.name)
+    return {"own": max(0, own), "alt": alt, "fits_own": quantity <= max(0, own),
+            "fits_with_alt": quantity <= max(0, own) + alt, "lender_names": names,
+            "type_name": rt.name if rt else f"type {room_type_id}"}

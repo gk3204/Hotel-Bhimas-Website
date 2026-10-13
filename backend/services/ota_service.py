@@ -1521,6 +1521,24 @@ def auto_confirm_draft(db, d, user=None):
             return made.booking_id
         if "capacity" in detail.lower() or "no " in detail.lower()[:4]:
             detail += "  (room already sold in the PMS?)"
+        # v7b (owner): the type is full but its ALTERNATE rooms are free - hold it for the desk
+        # (never auto-confirmed into an alternate) and say exactly that.
+        try:
+            from utils.availability import alternate_shortfall
+            sf = alternate_shortfall(db, room_type_id, d.check_in, d.check_out, rooms_wanted,
+                                     exclude_ota_booking_id=d.ota_booking_id)
+            if not sf["fits_own"] and sf["fits_with_alt"]:
+                _hold_draft(db, d, (f"Only an ALTERNATE room is free: {sf['type_name']} is full for these "
+                                    f"dates, but {', '.join(sf['lender_names']) or 'an alternate type'} "
+                                    f"can host it. Confirm it on the desk - check-in will ask for "
+                                    f"the alternate-room approval."))
+                try:
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                return None
+        except Exception as _e:
+            logger.debug(f"alternate check skipped for draft {d.id}: {_e}")
         _hold_draft(db, d, f"Could not create the booking: {detail}")
         try:
             db.commit()

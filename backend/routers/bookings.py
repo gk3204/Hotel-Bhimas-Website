@@ -124,7 +124,10 @@ def create_booking(
             out_of_service = int(availability.out_of_service_count(db, room_item.room_type_id))
             holds, _unmapped = availability.ota_draft_holds(db, data.check_in, data.check_out)
             ota_held = int(holds.get(room_item.room_type_id, 0))
-            available_rooms = room_type.total_rooms - booked_rooms - out_of_service - ota_held
+            # v7b: and rooms lent to another type booked into its alternates
+            lent = int(availability.lent_out(db, data.check_in, data.check_out, holds=holds)
+                       .get(room_item.room_type_id, 0))
+            available_rooms = room_type.total_rooms - booked_rooms - out_of_service - ota_held - lent
             requested_rooms = room_item.quantity
 
             if requested_rooms > available_rooms:
