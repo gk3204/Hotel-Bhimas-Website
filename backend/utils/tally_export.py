@@ -51,6 +51,22 @@ def _payments_by_day_method(db, dfrom, dto):
     return out
 
 
+def _refunds_by_day_mode(db, dfrom, dto):
+    """v7e: {(date_iso, mode): amount} for refunds PAID OUT in range, by the day they were paid out.
+    The export had no refunds at all, so every refund stayed in the accountant's Debtors."""
+    ron = func.coalesce(Payment.refunded_at, Payment.created_at)
+    rows = (db.query(clock.business_date_sql(ron), Payment.refund_mode, Payment.gateway,
+                     func.coalesce(func.sum(Payment.refund_amount), 0))
+            .filter(Payment.refund_status == "completed",
+                    clock.business_date_sql(ron) >= dfrom, clock.business_date_sql(ron) <= dto)
+            .group_by(clock.business_date_sql(ron), Payment.refund_mode, Payment.gateway).all())
+    out = {}
+    for d, mode, gateway, amt in rows:
+        key = (str(d), (mode or ("bank" if gateway in ("razorpay", "phonepe") else "other")).lower())
+        out[key] = round(out.get(key, 0.0) + float(amt or 0), 2)
+    return out
+
+
 def _receipt_ledger(method: str, cfg: dict) -> str:
     """Map a payment method to the cash vs bank ledger."""
     return cfg["tally_cash_ledger"] if method == "cash" else cfg["tally_bank_ledger"]
@@ -125,6 +141,21 @@ def build_journal(db, dfrom, dto, cfg: dict):
             "lines": [
                 {"ledger": _receipt_ledger(method, cfg), "drcr": "Dr", "amount": amt},
                 {"ledger": cfg["tally_debtors_ledger"], "drcr": "Cr", "amount": amt},
+            ],
+        })
+
+    # v7e: refunds paid out - Dr Debtors, Cr Cash/Bank (the reverse of a Receipt)
+    for (d, mode), amt in sorted(_refunds_by_day_mode(db, dfrom, dto).items()):
+        if amt == 0:
+            continue
+        vouchers.append({
+            "vtype": "Payment",
+            "date_iso": d,
+            "number": f"P-{_tdate(d)}-{mode}",
+            "narration": f"Refunds paid out {d} via {mode}",
+            "lines": [
+                {"ledger": cfg["tally_debtors_ledger"], "drcr": "Dr", "amount": amt},
+                {"ledger": _receipt_ledger(mode, cfg), "drcr": "Cr", "amount": amt},
             ],
         })
 

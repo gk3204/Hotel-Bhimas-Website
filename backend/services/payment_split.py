@@ -92,6 +92,7 @@ def post(db, booking, payment, amount: float, description: str, posted_by=None,
             amount=-part,
             posted_by=posted_by,
             booking_item_id=folio.booking_item_id,
+            payment_id=(payment.payment_id if payment is not None else None),   # v7e
         ))
         if per_room and payment is not None:
             db.add(PaymentAllocation(payment_id=payment.payment_id, folio_id=folio.id,

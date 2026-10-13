@@ -85,6 +85,10 @@ const REPORTS = {
       (d.unsettled || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", "", "", fmt(x.balance), "", "UNSETTLED", x.user || ""]));
       if ((d.nil_checkouts || []).length) rows.push({ kind: "section", label: "Checkout Bills With Nil Amount" });
       (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", "", "", fmt(x.balance), "", "NIL", x.user || ""]));
+      // v7e: rooms in house (end of the day / now)
+      if ((d.in_house || []).length) rows.push({ kind: "section", label: `Rooms In House (${d.in_house.length})` });
+      (d.in_house || []).forEach((x) => rows.push([`#${x.booking_id}`, (x.checked_in || "").split(" ")[0], (x.checked_in || "").split(" ")[1] || "",
+        x.room, x.guest || "", "", "", fmt(x.balance), "", `IN HOUSE - out ${x.check_out || ""}`, ""]));
       return {
         columns: ["Bill/Vou", "Date", "Time", "Room", "Guest", "Receipt", "Payment", "Balance",
           "CR No", "Remarks", "User"],
@@ -394,6 +398,48 @@ const persistViews = (v) => {
   try { localStorage.setItem(VIEWS_KEY, JSON.stringify(v)); } catch { /* ignore quota */ }
 };
 
+// v7e (owner): "an option to zip receipts, invoices, reg slip of 1 for any date and download"
+function DocumentsZip() {
+  const [day, setDay] = useState(new Date(Date.now() - 864e5).toISOString().slice(0, 10));
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const base = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
+  const download = async () => {
+    setBusy(true); setMsg("");
+    try {
+      const res = await fetch(`${base}/reports/documents-zip?day=${day}`,
+        { headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` } });
+      if (!res.ok) {
+        const j = await res.json().catch(() => ({}));
+        throw new Error(j.detail || `HTTP ${res.status}`);
+      }
+      const url = URL.createObjectURL(await res.blob());
+      const a = document.createElement("a");
+      a.href = url; a.download = `documents_${day}.zip`; a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { setMsg(e.message || "Download failed"); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="mb-6 p-4 rounded-2xl border border-[#E5C07B]/30 bg-slate-800/40 flex flex-wrap items-center gap-3">
+      <div className="flex-1 min-w-[220px]">
+        <div className="font-semibold text-white">Documents of a day (ZIP)</div>
+        <div className="text-xs text-slate-400">
+          Receipts (by payment type), refunds, prepaid receipts, food bills, invoices and registration
+          slips - in folders, named RCPT-1, INV-…, REG-… - plus an index and the day's expenses.
+        </div>
+      </div>
+      <input type="date" value={day} onChange={(e) => setDay(e.target.value)}
+        className="px-3 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white text-sm" />
+      <button onClick={download} disabled={busy}
+        className="bg-[#E5C07B]/90 hover:bg-[#E5C07B] text-slate-900 font-semibold px-4 py-2 rounded-lg text-sm disabled:opacity-50">
+        {busy ? "Preparing…" : "Download ZIP"}
+      </button>
+      {msg && <div className="w-full text-sm text-red-300">{msg}</div>}
+    </div>
+  );
+}
+
 export default function Reports() {
   const [tab, setTab] = useState("occupancy");
   const [range, setRange] = useState({ from: daysAgo(29), to: today() });
@@ -499,6 +545,9 @@ export default function Reports() {
       subtitle="Operational & financial reports — filter by date and export to CSV / PDF."
       toast={toast}
     >
+
+        {/* v7e: every document of one day as a ZIP, in folders */}
+        <DocumentsZip />
 
         {/* Tabs */}
         <div className="flex flex-wrap gap-2 mb-6">

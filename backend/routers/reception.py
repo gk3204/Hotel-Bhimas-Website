@@ -2148,8 +2148,10 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         # follow from them. The folio settles only when the LAST room has gone — a family still
         # upstairs must be able to order dinner.
         _depart_ts = clock.now_utc()
+        _out_by = _resolve_user_id(db, user)
         for item in leaving:
             item.checked_out_at = _depart_ts
+            item.checked_out_by = _out_by          # v7e: per room (a room can leave on its own)
         sync_booking_from_items(booking)
         booking.checked_out_by = _resolve_user_id(db, user)   # v7d: shown on the reports
         # v6e: a room's own bill closes when that room leaves - that is the whole point of billing
@@ -4492,13 +4494,9 @@ def _reg_rules(db) -> str:
         return ""
 
 
-@router.get("/checkin/{booking_id}/slip")
-def registration_slip(booking_id: int, room_ids: str = Query(None),
-                      db: Session = Depends(get_db),
-                      user=Depends(require_reception_or_admin)):
-    """The paper the guest signs. `room_ids` (comma-separated) prints the slip for just those
-    rooms — v6f, because on a split arrival the first car should not have to wait for the third
-    before it can sign anything. Omitted, every room that has actually arrived is on it."""
+def registration_slip_data(db, booking_id: int, room_ids: str | None = None) -> dict:
+    """v7e: everything the registration slip prints - shared by the slip endpoint and the day's
+    documents ZIP. `room_ids` (comma-separated) narrows it to those rooms."""
     booking = db.query(Booking).options(
         joinedload(Booking.guest),
         joinedload(Booking.booking_items).joinedload(BookingItem.room_type),
@@ -4594,6 +4592,17 @@ def registration_slip(booking_id: int, room_ids: str = Query(None),
         "adults": int(booking.adults or 1),
         "children": int(booking.children or 0),
     }
+    return slip_data
+
+
+@router.get("/checkin/{booking_id}/slip")
+def registration_slip(booking_id: int, room_ids: str = Query(None),
+                      db: Session = Depends(get_db),
+                      user=Depends(require_reception_or_admin)):
+    """The paper the guest signs. `room_ids` (comma-separated) prints the slip for just those
+    rooms — v6f, because on a split arrival the first car should not have to wait for the third
+    before it can sign anything. Omitted, every room that has actually arrived is on it."""
+    slip_data = registration_slip_data(db, booking_id, room_ids)   # v7e: shared with the documents ZIP
     try:
         pdf_path = generate_registration_slip_pdf(slip_data)
     except Exception as e:

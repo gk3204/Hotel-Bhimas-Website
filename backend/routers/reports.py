@@ -291,9 +291,11 @@ def collections_summary(db, dfrom, dto):
             clock.business_date_sql(Payment.created_at) >= dfrom, clock.business_date_sql(Payment.created_at) <= dto).scalar() or 0)
     cash, card, upi, bank = _m("cash"), _m("card"), _m("upi"), _m("bank")
     total = round(cash + card + upi + bank, 2)
+    # v7e: a refund belongs to the day it was PAID OUT, not the day of the payment it refunds
+    _ron = func.coalesce(Payment.refunded_at, Payment.created_at)
     refunds = float(db.query(func.coalesce(func.sum(Payment.refund_amount), 0)).filter(
         Payment.refund_status == "completed",
-        clock.business_date_sql(Payment.created_at) >= dfrom, clock.business_date_sql(Payment.created_at) <= dto).scalar() or 0)
+        clock.business_date_sql(_ron) >= dfrom, clock.business_date_sql(_ron) <= dto).scalar() or 0)
     return {"cash": round(cash, 2), "card": round(card, 2), "upi": round(upi, 2),
             "bank": round(bank, 2), "total_collected": total, "refunds": round(refunds, 2)}
 
@@ -963,7 +965,18 @@ def cashier_summary_data(db, day):
     prepaid = (db.query(PrepaidReceipt)
                .filter(clock.business_date_sql(PrepaidReceipt.issued_at) == day)
                .order_by(PrepaidReceipt.issued_at).all())
-    out = _cashier_summary_core(db, receipts=pays, refunds=pays, checkouts_day=day, prepaid=prepaid)
+    from models import Expense
+    expenses = (db.query(Expense).filter(clock.business_date_sql(Expense.created_at) == day)
+                .order_by(Expense.created_at).all())
+    _s, _e = clock.business_day_bounds(day)
+    # v7e: paid-outs are the refunds PAID OUT this day - a refund today of yesterday's payment was
+    # missing from today and filed under yesterday
+    _ron = func.coalesce(Payment.refunded_at, Payment.created_at)
+    refunds_today = (db.query(Payment).filter(Payment.refund_status == "completed",
+                                              clock.business_date_sql(_ron) == day)
+                     .order_by(_ron).all())
+    out = _cashier_summary_core(db, receipts=pays, refunds=refunds_today, checkouts_day=day, prepaid=prepaid,
+                                expenses=expenses, in_house_at=min(_e, clock.now_utc()))
     return {"day": str(day), **out}
 
 
@@ -991,12 +1004,78 @@ def cashier_summary_for_shift(db, shift):
                .order_by(PrepaidReceipt.issued_at).all())
     # v7d (owner): the shift report lists the bills checked out during the shift too - unsettled,
     # and settled with no receipt (nil amount) - with who checked them out.
+    from models import Expense
+    expenses = db.query(Expense).filter(Expense.shift_id == shift.id).order_by(Expense.created_at).all()
     out = _cashier_summary_core(db, receipts=receipts, refunds=refunds, checkouts_day=None, prepaid=prepaid,
-                                checkouts_window=(shift.opened_at, end))
+                                checkouts_window=(shift.opened_at, end), expenses=expenses, in_house_at=end)
     return {"shift_id": shift.id, **out}
 
 
-def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=None, checkouts_window=None):
+def _checked_out_bills(db, day=None, window=None):
+    """v7e: every BILL that closed on `day` (business date) or inside `window` (UTC [start, end)):
+    [(booking, folio, closed_at_utc, by_user_id)], oldest first. A per-room bill closes when ITS room
+    leaves; a group bill when the booking does."""
+    from models import Folio
+    if day is None and window is None:
+        return []
+    out = []
+    q1 = (db.query(Folio, BookingItem, Booking)
+          .join(BookingItem, BookingItem.booking_item_id == Folio.booking_item_id)
+          .join(Booking, Booking.booking_id == Folio.booking_id)
+          .filter(BookingItem.checked_out_at.isnot(None)))
+    q2 = (db.query(Folio, Booking).join(Booking, Booking.booking_id == Folio.booking_id)
+          .filter(Folio.booking_item_id.is_(None), Booking.status == "checked_out"))
+    if day is not None:
+        q1 = q1.filter(clock.business_date_sql(BookingItem.checked_out_at) == day)
+        q2 = q2.filter(clock.business_date_sql(Booking.checked_out_at) == day)
+    else:
+        ws, we = window
+        q1 = q1.filter(BookingItem.checked_out_at >= ws, BookingItem.checked_out_at < we)
+        q2 = q2.filter(Booking.checked_out_at >= ws, Booking.checked_out_at < we)
+    for f, it, b in q1.all():
+        out.append((b, f, it.checked_out_at, getattr(it, "checked_out_by", None) or getattr(b, "checked_out_by", None)))
+    for f, b in q2.all():
+        out.append((b, f, b.checked_out_at, getattr(b, "checked_out_by", None)))
+    out.sort(key=lambda r: (r[2] or datetime.min, r[1].id))
+    return out
+
+
+def _bill_room_label(db, folio):
+    """The room a per-room bill belongs to (None for a group bill)."""
+    if folio is None or not getattr(folio, "booking_item_id", None):
+        return None
+    it = db.query(BookingItem).filter(BookingItem.booking_item_id == folio.booking_item_id).first()
+    if it is None or not it.room_id:
+        return None
+    r = db.query(Room).filter(Room.room_id == it.room_id).first()
+    return r.room_number if r else None
+
+
+def _in_house_rows(db, at_utc):
+    """v7e: the rooms occupied at `at_utc` (end of the day / of the shift, or now) - one row per room."""
+    at_local = clock.to_local(at_utc)
+    rows = []
+    q = (db.query(BookingItem, Booking, Room)
+         .join(Booking, Booking.booking_id == BookingItem.booking_id)
+         .join(Room, Room.room_id == BookingItem.room_id)
+         .filter(BookingItem.room_id.isnot(None), BookingItem.checked_in_at.isnot(None),
+                 BookingItem.checked_in_at <= at_local,          # checked_in_at is the hotel's wall clock
+                 (BookingItem.checked_out_at.is_(None)) | (BookingItem.checked_out_at > at_utc),
+                 Booking.status.in_(("checked_in", "checked_out"))))
+    for it, b, r in q.all():
+        from models import Folio as _Folio
+        f = (db.query(_Folio).filter(_Folio.booking_item_id == it.booking_item_id).first()
+             or folio_resolver.primary_folio(db, b.booking_id))
+        rows.append({"room": r.room_number, "booking_id": b.booking_id, "guest": b.display_guest_name or None,
+                     "checked_in": it.checked_in_at.strftime("%d/%m/%y %H:%M") if it.checked_in_at else "",
+                     "check_out": str(it.check_out or b.check_out or ""),
+                     "balance": round(float(f.balance or 0), 2) if f else 0.0})
+    rows.sort(key=lambda x: ordering.room_number_sort_key(x["room"]))
+    return rows
+
+
+def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=None, checkouts_window=None,
+                          expenses=None, in_house_at=None):
     """Shared body of the two cashier summaries. `receipts` = paid Payment rows to list as
     check-out bills / advances; `refunds` = Payment rows whose completed refund is a paid-out.
     `checkouts_day` adds the unsettled / nil-amount checkout sections for that calendar day."""
@@ -1081,6 +1160,22 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
                                   "remarks": (p.refund_reason or "REFUND PAIDOUT")})
             mm["payment"] += rf
 
+    # v7e: petty-cash expenses are cash paid OUT of the drawer - paid-outs, like the legacy summary.
+    # They were missing from this report entirely (production: ~Rs 8,000 a day).
+    for e in (expenses or []):
+        amt = float(e.amount or 0)
+        if not amt:
+            continue
+        at = _loc(e.created_at)
+        mc = _mode("cash")
+        mc["paidout"].append({"date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
+                              "room": "—", "guest": None, "booking_id": None, "balance": 0.0,
+                              "bill_no": f"EXP-{e.id}", "cr_no": getattr(e, "receipt_url", None) or "",
+                              "receipt": 0.0, "payment": round(amt, 2),
+                              "remarks": f"EXPENSE - {(e.category or '').upper()}: {e.description or ''}"[:120],
+                              "user": _user_name(db, e.created_by)})
+        mc["payment"] += amt
+
     # v6m.13 (owner, item 4): money paid BEFORE arrival, receipted at check-in. A memo - the hotel
     # did not take it at the desk, so it is listed but never added to the totals or the drawer.
     if prepaid:
@@ -1119,41 +1214,31 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     # checked out today: unsettled (folio balance != 0) vs nil-amount (settled, no receipt today)
     unsettled, nil_checkouts = [], []
     receipted_bookings = {p.booking_id for p in receipts if float(p.amount or 0)}
-    if checkouts_day:
-        checkouts = (db.query(Booking).filter(Booking.status == "checked_out",
-                                              clock.business_date_sql(Booking.checked_out_at) == checkouts_day)
-                     .order_by(Booking.checked_out_at).all())
-    elif checkouts_window:          # v7d: a shift - checked out between its open and close (UTC)
-        _ws, _we = checkouts_window
-        checkouts = (db.query(Booking).filter(Booking.status == "checked_out",
-                                              Booking.checked_out_at >= _ws, Booking.checked_out_at < _we)
-                     .order_by(Booking.checked_out_at).all())
-    else:
-        checkouts = []
-    for b in checkouts:
-        # v6e: ONE ROW PER BILL. A stay that bills per room leaves three bills behind, and this is
-        # the report the owner uses to chase what was not settled — collapsing them to the first
-        # would hide exactly the unpaid one they are looking for.
-        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
-        for f in (folio_resolver.folios_for_booking(db, b.booking_id) or [None]):
-            room = _booking_room_label(db, b.booking_id, rcache)
-            bal = round(float(f.balance or 0), 2) if f else 0.0
-            inv = _get_invoice(db, f.id) if f else None
-            _out = _loc(b.checked_out_at)
-            rowc = {"bill_no": (inv.invoice_no if inv else f"F{f.id}" if f else "—"),
-                    "room": room, "guest": (b.display_guest_name or None),
-                    "booking_id": b.booking_id, "balance": bal,
-                    # v7d (owner): when, and which reception user checked them out
-                    "date": _out.strftime("%d/%m/%y") if _out else "",
-                    "time": _out.strftime("%H:%M") if _out else "",
-                    "user": _user_name(db, getattr(b, "checked_out_by", None))}
-            if bal != 0:
-                unsettled.append(rowc)
-            elif b.booking_id not in receipted_bookings:
-                nil_checkouts.append(rowc)
+    # v7e: BILL by bill, at the moment that bill closed. A room on a per-room stay that leaves on its
+    # own has its own bill, closed when THAT room left - it used to wait for the last room, and so
+    # was missing from the day (and shift) it was actually settled in.
+    for b, f, out_at, by in _checked_out_bills(db, day=checkouts_day, window=checkouts_window):
+        room = (_bill_room_label(db, f) or _booking_room_label(db, b.booking_id, rcache))
+        bal = round(float(f.balance or 0), 2) if f else 0.0
+        inv = _get_invoice(db, f.id) if f else None
+        _out = _loc(out_at)
+        rowc = {"bill_no": (inv.invoice_no if inv else f"F{f.id}" if f else "—"),
+                "room": room, "guest": (b.display_guest_name or None),
+                "booking_id": b.booking_id, "balance": bal,
+                # v7d (owner): when, and which reception user checked them out
+                "date": _out.strftime("%d/%m/%y") if _out else "",
+                "time": _out.strftime("%H:%M") if _out else "",
+                "user": _user_name(db, by)}
+        if bal != 0:
+            unsettled.append(rowc)
+        elif b.booking_id not in receipted_bookings:
+            nil_checkouts.append(rowc)
+
+    # v7e (owner): "Cashier summary should also have rooms that are in house"
+    in_house = _in_house_rows(db, in_house_at) if in_house_at is not None else []
 
     return {"modes": mode_rows, "grand": grand,
-            "unsettled": unsettled, "nil_checkouts": nil_checkouts}
+            "unsettled": unsettled, "nil_checkouts": nil_checkouts, "in_house": in_house}
 
 
 def _cashier_table(data):
@@ -1191,6 +1276,12 @@ def _cashier_table(data):
         for x in data["nil_checkouts"]:
             rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "", "", "",
                          x["balance"], "", "NIL", x.get("user") or ""])
+    if data.get("in_house"):
+        rows.append({"section": f"Rooms In House ({len(data['in_house'])})"})
+        for x in data["in_house"]:
+            _d, _t = (x.get("checked_in") or " ").split(" ", 1) if x.get("checked_in") else ("", "")
+            rows.append([f"#{x['booking_id']}", _d, _t, x["room"], x.get("guest") or "", "", "",
+                         x["balance"], "", f"IN HOUSE - out {x.get('check_out') or ''}", ""])
     g = data["grand"]
     totals = ["GRAND TOTAL", "", "", "", "", g["receipt"], g["payment"], "", "", f"net {g['net']}", ""]
     return cols, rows, totals
@@ -1202,17 +1293,19 @@ def checkout_summary_data(db, day):
     from models import Folio
     from routers.folio import _get_invoice
     rows = []
-    bookings = (db.query(Booking).filter(Booking.status == "checked_out",
-                                         clock.business_date_sql(Booking.checked_out_at) == day)
-                .order_by(Booking.checked_out_at).all())
+    # v7e: bill by bill, on the day THAT bill closed (a per-room bill closes with its own room)
+    _closed = _checked_out_bills(db, day=day)
     # v6e: ONE ROW PER BILL. A per-room stay issues a bill per room, each with its own invoice
     # number, and this report is read as the day's list of bills. `advance` and `refund` belong to
     # the BOOKING, so they are shown against its first bill only — a card payment split across
     # bills is recorded in payment_allocations, and inventing a second split here would
     # double-count the money.
-    _bills = [(b, n, fo) for b in bookings
-              for n, fo in enumerate(folio_resolver.folios_for_booking(db, b.booking_id))]
-    for b, _n, f in _bills:
+    _seen = set()
+    _bills = []
+    for b, fo, out_at, by in _closed:
+        _bills.append((b, 0 if b.booking_id not in _seen else 1, fo, out_at, by))
+        _seen.add(b.booking_id)
+    for b, _n, f, _out_at, _by in _bills:
         charges = [c for c in db.query(FolioCharge).filter(FolioCharge.folio_id == f.id,
                                                            FolioCharge.void == False).all()]  # noqa: E712
 
@@ -1243,12 +1336,12 @@ def checkout_summary_data(db, day):
         rooms = [db.query(Room).filter(Room.room_id == it.room_id).first()
                  for it in _its if it is not None and it.room_id]
         inv = _get_invoice(db, f.id)
-        _co = clock.to_local(b.checked_out_at)
+        _co = clock.to_local(_out_at)
         rows.append({
             "bill_no": (inv.invoice_no if inv else f"F{f.id}"),
             # v7d (owner): when they left and which reception user checked them out
             "checked_out_at": _co.strftime("%d/%m %H:%M") if _co else "",
-            "checked_out_by": _user_name(db, getattr(b, "checked_out_by", None)) or "",
+            "checked_out_by": _user_name(db, _by) or "",
             "rooms": ", ".join(r.room_number for r in rooms if r) or "—",
             "room_rent": room_rent, "sgst": sgst, "cgst": cgst, "food": food, "laundry": laundry,
             "misc": misc, "discount": discount, "total": round(float(f.total or 0), 2),
@@ -1455,7 +1548,7 @@ EOD_REPORT_CHOICES = {
     "daily_sales": "Daily Sales",
     "lost_cards": "Lost Key Cards",
     # v6m.13 (owner, item 5): every receipt, prepaid receipt and refund voucher of the day as PDFs
-    "receipts_zip": "All receipts & refund vouchers (ZIP)",
+    "receipts_zip": "All documents of the day - receipts, refunds, prepaid, food bills, invoices, registration slips (ZIP)",
 }
 
 # Mailjet refuses a message over 15 MB, and base64 grows an attachment by a third. A day's ZIP is
@@ -1494,63 +1587,11 @@ def receipts_of_day(db, day):
 
 
 def build_receipts_zip(db, day, part_bytes=None):
-    """The day's receipts as ZIP file(s): one PDF per document plus index.csv in every part.
-    Returns [(path, filename)] - empty when the day had no receipts."""
-    import tempfile
-    import zipfile
-    import os
-    from utils.pdf_generator import generate_payment_receipt_pdf
-    limit = part_bytes or RECEIPTS_ZIP_PART_BYTES
-    docs = receipts_of_day(db, day)
-    if not docs:
-        return []
-    files, index = [], []
-    for doc_no, typ, at, payload in docs:
-        try:
-            path = generate_payment_receipt_pdf(payload)
-        except Exception as e:     # one bad document must not lose the rest of the day
-            logger.error(f"receipts ZIP: {doc_no} failed: {e}")
-            continue
-        amount = payload.get("refund_amount") if typ == "Refund voucher" else payload.get("amount")
-        by = payload.get("refunded_by_name") if typ == "Refund voucher" else payload.get("collected_by_name")
-        mode = ((payload.get("refund_mode") or payload.get("gateway") or "") if typ == "Refund voucher"
-                else (payload.get("method") or ""))
-        ref = payload.get("refund_reference") if typ == "Refund voucher" else payload.get("reference")
-        name = f"{doc_no}.pdf"
-        files.append((path, name))
-        index.append([doc_no, typ, at.strftime("%d-%m-%Y %H:%M") if at else "", payload.get("booking_id") or "",
-                      payload.get("guest_name") or "", payload.get("source") or "", mode,
-                      f"{float(amount or 0):.2f}", ref or "", by or "", name])
-    if not files:
-        return []
-    head = ["Doc no", "Type", "Date time", "Booking", "Guest", "Source", "Mode", "Amount", "Reference",
-            "By", "File"]
-    # pack greedily into parts under the size limit
-    parts, cur, size = [], [], 0
-    for (path, name), row in zip(files, index):
-        n = os.path.getsize(path) if os.path.exists(path) else 0
-        if cur and size + n > limit:
-            parts.append(cur)
-            cur, size = [], 0
-        cur.append((path, name, row))
-        size += n
-    if cur:
-        parts.append(cur)
-    out = []
-    for i, part in enumerate(parts, 1):
-        suffix = f"_part{i}of{len(parts)}" if len(parts) > 1 else ""
-        zpath = os.path.join(tempfile.gettempdir(), f"receipts_{day}{suffix}.zip")
-        buf = io.StringIO()
-        w = csv.writer(buf)
-        w.writerow(head)
-        for _, _, row in part:
-            w.writerow(row)
-        with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
-            z.writestr("index.csv", buf.getvalue())
-            for path, name, _ in part:
-                z.write(path, name)
-        out.append((zpath, f"receipts_{day}{suffix}.zip"))
-    return out
+    """v7e: the day's documents ZIP - every receipt (by payment type), refund voucher, prepaid receipt,
+    food bill, tax invoice and registration slip, in folders, named by document number
+    (services/day_documents.py). Kept under this name: the EOD e-mail and its tests call it."""
+    from services.day_documents import build_documents_zip
+    return build_documents_zip(db, day, part_bytes=part_bytes)
 
 
 def _eod_report_pdf(db, key, day):
@@ -1940,6 +1981,19 @@ def lost_cards_report(from_: str | None = Query(None, alias="from"), to: str | N
                            totals_row=totals, meta=_meta(dfrom, dto), filename="lost_cards")
 
 
+@router.get("/documents-zip", dependencies=[Depends(require_admin)])
+def documents_zip(day: str | None = Query(None), db: Session = Depends(get_db)):
+    """v7e (owner): "an option to zip receipts, invoices, reg slip of 1 for any date and download"."""
+    from fastapi.responses import FileResponse
+    from services.day_documents import build_documents_zip
+    d = _parse_date(day, "day") if day else clock.business_today()
+    parts = build_documents_zip(db, d, part_bytes=10 ** 12)     # one file for a download
+    if not parts:
+        raise HTTPException(status_code=404, detail=f"No documents for {d:%d-%m-%Y}")
+    path, name = parts[0]
+    return FileResponse(path, media_type="application/zip", filename=name)
+
+
 @router.get("/checkout-summary", dependencies=[Depends(require_admin)])
 def checkout_summary_report(day: str | None = Query(None), format: str = Query("json"),
                             db: Session = Depends(get_db)):
@@ -2229,9 +2283,10 @@ def weekly_trends(db: Session = Depends(get_db)):
         FolioCharge.reversal_of_id.is_(None),
         clock.business_date_sql(FolioCharge.posted_at) >= wstart,
         clock.business_date_sql(FolioCharge.posted_at) <= today).scalar() or 0)
+    _ron = func.coalesce(Payment.refunded_at, Payment.created_at)   # v7e: the refund's own day
     refund_total = float(db.query(func.coalesce(func.sum(Payment.refund_amount), 0)).filter(
         Payment.refund_status == "completed",
-        clock.business_date_sql(Payment.created_at) >= wstart, clock.business_date_sql(Payment.created_at) <= today).scalar() or 0)
+        clock.business_date_sql(_ron) >= wstart, clock.business_date_sql(_ron) <= today).scalar() or 0)
 
     # Open maintenance tickets by age bucket.
     buckets = {"0-2d": 0, "3-7d": 0, "8-30d": 0, "30d+": 0}

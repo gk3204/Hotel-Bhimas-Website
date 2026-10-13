@@ -19,7 +19,8 @@ def _brand_header(elements, styles):
         "<b>HOTEL BHIMAS</b><br/>Luxury &amp; Comfort Stay<br/>"
         "42, G Car Street, Tirupati - 517501<br/>GSTIN: 37AAACK9397F1Z3",
         styles["Normal"])
-    logo_path = "assets/logo-gold.png"
+    logo_path = ("assets/logo-gold-print.png" if os.path.exists("assets/logo-gold-print.png")   # v7e: 600px copy - the 4096px original made every PDF ~270 KB and slow
+                 else "assets/logo-gold.png")
     if os.path.exists(logo_path):
         elements.append(Table([[Image(logo_path, width=1.4 * inch, height=0.95 * inch), hotel_info]],
                               colWidths=[120, 350]))

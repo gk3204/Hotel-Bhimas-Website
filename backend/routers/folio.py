@@ -654,6 +654,7 @@ def ensure_folios(db: Session, booking: Booking, user) -> list:
                 amount=-amt,
                 posted_by=uid,
                 booking_item_id=key,
+                payment_id=p.payment_id,   # v7e
             ))
             if per_room:
                 db.add(PaymentAllocation(payment_id=p.payment_id, folio_id=folio.id, amount=amt))
@@ -1420,11 +1421,37 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
     # labelled rather than folded back into the taxable totals.
     issued_at = invoice.created_at
     settlement_lines, post_invoice_lines = [], []
+    # v7e (owner): "for the payments made indicate the time of payment receipt/refund and also RCPT
+    # number like RCPT-1". The line's payment says which voucher it is and when the money moved.
+    _pre = None
+    try:
+        from models import PrepaidReceipt
+        _pre = db.query(PrepaidReceipt).filter(PrepaidReceipt.booking_id == folio.booking_id).first()
+    except Exception:
+        _pre = None
+    _pays = {p.payment_id: p for p in db.query(Payment).filter(
+        Payment.payment_id.in_([c.payment_id for c in charges if getattr(c, "payment_id", None)] or [0])).all()}
     for c in charges:
         if c.type != "payment":
             continue
         row = _line(c)
         row["kind"] = "refund" if float(c.amount) > 0 else "payment"
+        _p = _pays.get(getattr(c, "payment_id", None))
+        if _p is not None and row["kind"] == "payment":
+            row["receipt_no"], row["at"] = f"RCPT-{_p.payment_id}", clock.to_local(_p.created_at)
+            row["mode"] = (_p.method or _p.gateway or "").upper()
+        elif _p is not None:
+            row["receipt_no"] = f"RFND-{_p.payment_id}"
+            row["at"] = clock.to_local(getattr(_p, "refunded_at", None) or c.posted_at)
+            row["mode"] = (_p.refund_mode or _p.gateway or "").upper()
+        elif (c.description or "").startswith("Prepaid to") and _pre is not None:
+            row["receipt_no"], row["at"] = f"PRE-{_pre.id}", clock.to_local(_pre.issued_at)
+            row["mode"] = "PREPAID"
+        else:
+            import re as _re
+            _m = _re.findall(r"RFND-\d+", c.description or "")
+            row["receipt_no"] = ", ".join(_m) if _m else None
+            row["at"] = clock.to_local(c.posted_at)
         after = bool(issued_at and c.posted_at and c.posted_at > issued_at)
         (post_invoice_lines if after else settlement_lines).append(row)
 

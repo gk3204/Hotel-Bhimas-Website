@@ -658,6 +658,12 @@ def admin_cancel_booking(
                 db, payment.payment_id, request.refund_amount, request.reason)
             if not success:
                 raise HTTPException(status_code=400, detail=f"Refund failed: {refund_msg}")
+            # v7e: who paid the refund out (the voucher and the cashier summary name them)
+            try:
+                from utils.audit import _resolve_user_id
+                payment.refunded_by = _resolve_user_id(db, user)
+            except Exception:
+                pass
         
         # 5️⃣ Update booking status
         booking.status = "admin_cancelled"

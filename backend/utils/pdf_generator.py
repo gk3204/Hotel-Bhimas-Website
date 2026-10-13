@@ -75,7 +75,8 @@ def generate_booking_pdf(booking_data, payment_data):
     # HEADER (Logo + Hotel Details)
     # =====================================================
 
-    logo_path = "assets/logo-gold.png"
+    logo_path = ("assets/logo-gold-print.png" if os.path.exists("assets/logo-gold-print.png")   # v7e: 600px copy - the 4096px original made every PDF ~270 KB and slow
+                 else "assets/logo-gold.png")
 
     header_data = []
 
@@ -419,7 +420,8 @@ def generate_folio_invoice_pdf(invoice_data):
     elements = []
 
     # Header (same brand block as the booking confirmation)
-    logo_path = "assets/logo-gold.png"
+    logo_path = ("assets/logo-gold-print.png" if os.path.exists("assets/logo-gold-print.png")   # v7e: 600px copy - the 4096px original made every PDF ~270 KB and slow
+                 else "assets/logo-gold.png")
     hotel_info = Paragraph(
         "<b>HOTEL BHIMAS</b><br/>"
         "Luxury & Comfort Stay<br/>"
@@ -609,22 +611,25 @@ def generate_folio_invoice_pdf(invoice_data):
             return
         elements.append(Paragraph(f"<b>{title}</b>", styles["Heading2"]))
         elements.append(Spacer(1, 0.1 * inch))
-        data = [["Date", "Particulars", "Type", "Amount"]]
+        # v7e (owner): when the money moved, and which receipt / refund voucher it is
+        data = [["Date & time", "Receipt", "Particulars", "Type", "Amount"]]
         for r in rows:
-            posted = r.get("posted_at")
+            at = r.get("at") or r.get("posted_at")
+            kind = "Refund" if r.get("kind") == "refund" else "Payment"
             data.append([
-                posted.strftime("%d-%m-%Y") if hasattr(posted, "strftime") else "",
+                at.strftime("%d-%m-%Y %H:%M") if hasattr(at, "strftime") else "",
+                Paragraph(r.get("receipt_no") or "—", styles["Normal"]),
                 Paragraph(r.get("description") or "", styles["Normal"]),
-                "Refund" if r.get("kind") == "refund" else "Payment",
+                kind + (f" ({r['mode']})" if r.get("mode") else ""),
                 f"Rs. {abs(r['amount']):,.2f}",
             ])
-        table = Table(data, colWidths=[70, 240, 70, 100])
+        table = Table(data, colWidths=[78, 66, 176, 80, 80])
         table.setStyle(TableStyle([
             ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
             ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
             ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
             ('FONTSIZE', (0, 0), (-1, -1), 9),
-            ('ALIGN', (3, 0), (3, -1), 'RIGHT'),
+            ('ALIGN', (4, 0), (4, -1), 'RIGHT'),
             ('BOTTOMPADDING', (0, 0), (-1, 0), 8),
             ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#cccccc")),
             ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.white, colors.HexColor("#f5f5f5")]),
@@ -714,7 +719,8 @@ def generate_registration_slip_pdf(slip_data):
     elements = []
 
     # Header (same brand block as the invoice)
-    logo_path = "assets/logo-gold.png"
+    logo_path = ("assets/logo-gold-print.png" if os.path.exists("assets/logo-gold-print.png")   # v7e: 600px copy - the 4096px original made every PDF ~270 KB and slow
+                 else "assets/logo-gold.png")
     hotel_info = Paragraph(
         "<b>HOTEL BHIMAS</b><br/>"
         "Luxury & Comfort Stay<br/>"
@@ -920,7 +926,8 @@ def generate_payment_receipt_pdf(receipt_data):
     elements = []
 
     # Header (same brand block as the invoice / registration slip)
-    logo_path = "assets/logo-gold.png"
+    logo_path = ("assets/logo-gold-print.png" if os.path.exists("assets/logo-gold-print.png")   # v7e: 600px copy - the 4096px original made every PDF ~270 KB and slow
+                 else "assets/logo-gold.png")
     hotel_info = Paragraph(
         "<b>HOTEL BHIMAS</b><br/>"
         "Luxury & Comfort Stay<br/>"
@@ -1073,7 +1080,8 @@ def generate_shift_report_pdf(shift_data):
     elements = []
 
     # Header (same brand block as the invoice / receipt).
-    logo_path = "assets/logo-gold.png"
+    logo_path = ("assets/logo-gold-print.png" if os.path.exists("assets/logo-gold-print.png")   # v7e: 600px copy - the 4096px original made every PDF ~270 KB and slow
+                 else "assets/logo-gold.png")
     hotel_info = Paragraph(
         "<b>HOTEL BHIMAS</b><br/>"
         "Luxury & Comfort Stay<br/>"
@@ -1338,7 +1346,8 @@ def generate_company_invoice_pdf(payload):
     gold = colors.HexColor("#B8860B")
 
     # --- brand header (same block as the folio invoice / report) ---
-    logo_path = "assets/logo-gold.png"
+    logo_path = ("assets/logo-gold-print.png" if os.path.exists("assets/logo-gold-print.png")   # v7e: 600px copy - the 4096px original made every PDF ~270 KB and slow
+                 else "assets/logo-gold.png")
     hotel_info = Paragraph(
         "<b>HOTEL BHIMAS</b><br/>"
         "Luxury &amp; Comfort Stay<br/>"
@@ -1596,7 +1605,8 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
     elements = []
 
     # Header (same brand block as the invoice / shift report).
-    logo_path = "assets/logo-gold.png"
+    logo_path = ("assets/logo-gold-print.png" if os.path.exists("assets/logo-gold-print.png")   # v7e: 600px copy - the 4096px original made every PDF ~270 KB and slow
+                 else "assets/logo-gold.png")
     hotel_info = Paragraph(
         "<b>HOTEL BHIMAS</b><br/>"
         "Luxury &amp; Comfort Stay<br/>"

@@ -229,6 +229,7 @@ class BookingItem(Base):
     # helper move the booking.
     checked_in_at = Column(DateTime, nullable=True, index=True)
     checked_out_at = Column(DateTime, nullable=True, index=True)
+    checked_out_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)   # v7e: who checked THIS room out (056)
     check_out = Column(Date, nullable=True, index=True)      # this room's own departure date
     original_check_out = Column(Date, nullable=True)         # before an extension / overstay charge
     stay_started_at = Column(DateTime, nullable=True)        # this room's 24h clock anchor
@@ -491,6 +492,7 @@ class FolioCharge(Base):
     qty = Column(Numeric(10, 2), default=1)
     unit_price = Column(Numeric(10, 2), default=0)
     amount = Column(Numeric(10, 2), nullable=False, default=0) # signed, GST-inclusive: charges +, payments/discounts -
+    payment_id = Column(Integer, ForeignKey("payments.payment_id"), nullable=True, index=True)  # v7e: the payment a payment/refund line is (056)
     gst_percent = Column(Float, nullable=True)
     posted_by = Column(Integer, ForeignKey("users.user_id"), nullable=True, index=True)
     posted_at = Column(TIMESTAMP, server_default=func.now(), index=True)

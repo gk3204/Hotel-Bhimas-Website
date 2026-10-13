@@ -112,6 +112,9 @@ def process_razorpay_refund(db: Session, payment_id: int, refund_amount: float, 
         payment.refund_amount = Decimal(str(refund_amount))
         payment.refund_status = "completed"
         payment.refund_reason = reason
+        # v7e: every completed refund carries its moment - the admin-cancel path never set it, so its
+        # voucher was dated (and reported) on the day the guest PAID, not the day of the refund
+        payment.refunded_at = payment.refunded_at or clock.now_utc()
         db.commit()
         
         logger.info(f"✅ Refund processed: Payment {payment_id}, Refund ID: {payment.refund_id}, Amount: ₹{refund_amount}")
@@ -147,6 +150,7 @@ def process_phonepe_refund(db: Session, payment_id: int, refund_amount: float, r
         payment.refund_amount = Decimal(str(refund_amount))
         payment.refund_status = "completed" if result.get("state") == "COMPLETED" else "pending"
         payment.refund_reason = reason
+        payment.refunded_at = payment.refunded_at or clock.now_utc()   # v7e
         db.commit()
         logger.info(f"✅ PhonePe refund {payment.refund_status}: payment {payment_id}, "
                     f"ref {refund_ref}, ₹{refund_amount}")
@@ -918,7 +922,7 @@ def _mark_payment_paid(db: Session, payment: Payment, gateway_payment_id, method
             folio_id=folio.id, type="payment",
             description=f"Desk {payment.collect_method or 'payment'} — {payment.method}{ref}",
             qty=1, unit_price=-amt, amount=-amt, gst_percent=0,
-            posted_by=payment.collected_by))
+            posted_by=payment.collected_by, payment_id=payment.payment_id))   # v7e
         _folio_recompute(db, folio)
 
 
@@ -1586,6 +1590,7 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
                     gst_percent=0,
                     posted_by=_resolve_user_id(db, user),
                     booking_item_id=_f.booking_item_id,
+                    payment_id=payment.payment_id,   # v7e
                 ))
                 _folio_recompute(db, _f)
         db.commit()
@@ -1715,11 +1720,15 @@ def return_excess(data: ExcessReturnRequest, db: Session = Depends(get_db),
             alloc_out.append({"payment_id": p.payment_id, "amount": take, "refund_id": p.refund_id})
 
         _returned = []
+        # v7e: name the refund voucher(s) on the line; link it when one payment was refunded
+        _rf_ids = [a["payment_id"] for a in alloc_out]
+        _rf_label = ", ".join(f"RFND-{i}" for i in _rf_ids)
         for _f, _part in _postings:
             db.add(FolioCharge(
                 folio_id=_f.id,
                 type="payment",
-                description=f"Deposit return — {data.mode}",
+                payment_id=(_rf_ids[0] if len(_rf_ids) == 1 else None),
+                description=f"Deposit return — {data.mode}" + (f" ({_rf_label})" if _rf_label else ""),
                 qty=1,
                 unit_price=_part,
                 amount=_part,
