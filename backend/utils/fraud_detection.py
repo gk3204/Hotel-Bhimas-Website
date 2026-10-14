@@ -109,7 +109,8 @@ def _detect_card_anomalies(db, new_alerts, keys):
                 BookingItem.booking_id == booking.booking_id,
                 BookingItem.room_id == c.room_id).first():
             reason = "card_without_booking"  # room not part of this stay
-        elif total_paid_including_prepaid(db, booking.booking_id) <= 0:
+        elif total_paid_including_prepaid(db, booking.booking_id) <= 0 and not getattr(booking, "agent_id", None):
+            # v7g (owner): agent bookings pay at check-out - no payment at check-in is normal
             reason = "card_without_payment"
         if reason:
             _make_alert(new_alerts, keys, type=reason, severity="high",
@@ -252,6 +253,10 @@ def _detect_issuance_fencing(db, new_alerts, keys):
                         detail={"issued_at": str(clock.to_local(c.issued_at)), "issued_hour_ist": hour,
                                 "allowed_hours": f"{start:02d}-{end:02d}",
                                 "station_id": c.station_id})
+        # v7g: a housekeeping card with NO station recorded is not evidence of anything (the desk
+        # never sent one for these) - only a station that is actually wrong is.
+        if not c.station_id and (c.card_type or "") in ("cleaning", "viewing"):
+            continue
         if stations and (c.station_id or "") not in stations:
             _make_alert(new_alerts, keys, type="off_station_issuance", severity="med",
                         dedupe_key=f"off_station_issuance:card:{c.id}",

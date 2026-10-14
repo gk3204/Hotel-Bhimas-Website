@@ -614,6 +614,88 @@ def card_audit_data(db, dfrom, dto):
     return {"from": str(dfrom), "to": str(dto), "count": len(rows), "by_type": by_type, "rows": rows}
 
 
+def _lost_card_fee_decision(db, card, fee, amount):
+    """v7g (owner: "for lost key card how is reception user able to charge as free / make void"):
+    say WHO decided the fee and on what authority. A reception waiver needs the owner's approval
+    code; an admin may waive; a charged fee can be voided (owner code for reception)."""
+    import json as _json
+    from models import AuditLog, OwnerOtp
+    if amount:
+        return "", ""
+    if fee is not None and fee.void:
+        who, why = "", (fee.void_reason or "")
+        for lg in (db.query(AuditLog).filter(AuditLog.action == "folio.charge_void")
+                   .order_by(AuditLog.created_at.desc()).limit(500).all()):
+            try:
+                bf = _json.loads(lg.before) if isinstance(lg.before, str) else (lg.before or {})
+            except Exception:
+                bf = {}
+            if str(bf.get("charge_id")) == str(fee.id):
+                who = _user_name(db, lg.user_id) or ""
+                break
+        return (f"voided by {who}" if who else "voided"), why
+    skipped = ""
+    for lg in (db.query(AuditLog).filter(AuditLog.entity_id == str(card.id),
+                                         AuditLog.action.like("card%"))
+               .order_by(AuditLog.created_at.desc()).all()):
+        try:
+            af = _json.loads(lg.after) if isinstance(lg.after, str) else (lg.after or {})
+        except Exception:
+            af = {}
+        if af.get("fee_skipped") or af.get("fee_note"):
+            skipped = af.get("fee_skipped") or af.get("fee_note") or ""
+            break
+    issuer = db.query(User).filter(User.user_id == card.issued_by).first() if card.issued_by else None
+    if skipped.startswith("waived"):
+        otp = None
+        if card.issued_at and card.issued_by:
+            otp = (db.query(OwnerOtp).filter(OwnerOtp.action == "lost_card_waive", OwnerOtp.used == True,  # noqa: E712
+                                             OwnerOtp.used_by == card.issued_by,
+                                             OwnerOtp.used_at >= card.issued_at - timedelta(minutes=10),
+                                             OwnerOtp.used_at <= card.issued_at + timedelta(minutes=10))
+                   .order_by(OwnerOtp.used_at.desc()).first())
+        role = (issuer.role if issuer else "") or ""
+        auth = (f"owner approval code #{otp.id}" if otp else
+                "admin login" if role == "admin" else "before the owner-approval rule (4 Oct)")
+        return f"waived by {_user_name(db, card.issued_by) or '?'}", f"{skipped[len('waived:'):].strip() or '-'} - {auth}"
+    return "system", skipped or "not charged"
+
+
+def maintenance_detail_table(d):
+    """(columns, rows, totals) of the maintenance detail - the EOD e-mail and the owner's HK report."""
+    cols = ["Ticket", "Location", "Issue", "Status", "Fixed", "Inspected", "Raised by", "Parts ₹"]
+    rows = [[r["ticket_id"], r["location"], r["issue"], r["status"], "Yes" if r["fixed"] else "No",
+             "Yes" if r["inspected"] else "No", r.get("raised_by") or "", r["parts_cost"]] for r in d["rows"]]
+    t = d["totals"]
+    totals = [f"{t['tickets']} ticket(s)", f"{t['fixed']} fixed", "", "", "", "", "", t["parts_cost"]]
+    return cols, rows, totals
+
+
+def build_hk_owner_report(db, day) -> tuple:
+    """v7g: the owner's daily housekeeping report for one business day -> (pdf_path, caption)."""
+    from utils.report_pdf import generate_hk_owner_report_pdf
+    rd = room_detail_data(db, day, day)
+    rd_cols, rd_rows = room_detail_table(rd)
+    flags = [bool(r.get("has_fraud")) for r in rd["rows"]]
+    mt = maintenance_detail_table(maintenance_detail_data(db, day, day))
+    lc = lost_cards_table(lost_cards_data(db, day, day))
+    pdf = generate_hk_owner_report_pdf(day, (rd_cols, rd_rows, flags), mt, lc)
+    caption = (f"Hotel Bhimas - housekeeping report {day:%d %b}: {len(rd_rows)} room(s) checked out, "
+               f"{sum(flags)} with a fraud alert, {len(mt[1])} maintenance ticket(s), "
+               f"{len(lc[1])} lost key card(s). PDF attached.")
+    return pdf, caption
+
+
+def lost_cards_table(d):
+    """v7g: (columns, rows, totals) - with who decided the fee and why."""
+    cols = ["Reissued", "Room", "Guest", "Lost card", "Cut by", "Fee", "Status", "Fee decided by", "Reason / approval"]
+    rows = [[(r["reissued_at"] or "")[:16].replace("T", " "), r["room"] or "—", r["guest"] or "—",
+             r["lost_card_id"] or "—", r["issued_by"] or "—", r["fee"], r["fee_status"],
+             r.get("fee_decided_by") or "", r.get("fee_reason") or ""] for r in d["rows"]]
+    totals = ["TOTAL", "", "", "", "", d["charged_total"], f"{d['uncharged']} not charged", "", ""]
+    return cols, rows, totals
+
+
 def lost_cards_data(db, dfrom, dto):
     """Key cards reported lost in the range, and what was charged for them (v6f).
 
@@ -638,7 +720,10 @@ def lost_cards_data(db, dfrom, dto):
         # A voided fee counts as not charged — that is the whole reason the link exists.
         amount = round(float(fee.amount or 0), 2) if (fee and not fee.void) else 0.0
         charged = round(charged + amount, 2)
+        decided_by, why = _lost_card_fee_decision(db, c, fee, amount)
         rows.append({
+            "fee_decided_by": decided_by,     # v7g (owner): who waived / voided it
+            "fee_reason": why,                # ...and why, with the owner's approval code
             "reissued_at": clock.to_local(c.issued_at).isoformat() if c.issued_at else None,
             "room": room.room_number if room else None,
             "guest": (booking.display_guest_name if booking else None),
@@ -1442,49 +1527,100 @@ def _rs_by_room_table(data):
 
 
 def room_detail_data(db, dfrom, dto):
-    """Per checked-out stay in the range, per room: check-in/out times, cleaning started/ended,
-    inspected time, cleaned-by / inspected-by (from the room's HousekeepingTask), and any frauds."""
+    """Per ROOM that checked out in the range (by that room's own check-out): its check-in/out, the
+    cleaning card cut / returned, cleaning started/ended, inspected, cleaned-by / inspected-by, and
+    the fraud alerts raised during THAT stay and its cleaning.
+
+    v7g (owner): "how is cleaning start not present" - a room marked clean or inspected without anyone
+    pressing Start had no start time; cutting the cleaning card IS the start (it auto-starts cleaning),
+    so its time stands in. New columns: cleaning card cut and returned. Frauds are those of this stay
+    and room (booking, or the room between check-in and the end of its cleaning) - they used to be
+    every alert ever raised on the room, which made each row look fraudulent."""
     from models import HousekeepingTask
     rows = []
-    bookings = (db.query(Booking)
-                .filter(Booking.checked_out_at.isnot(None),
-                        clock.business_date_sql(Booking.checked_out_at) >= dfrom,
-                        clock.business_date_sql(Booking.checked_out_at) <= dto)
-                .order_by(Booking.checked_out_at).all())
-    for b in bookings:
-        guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
-        items = [it for it in db.query(BookingItem).filter(BookingItem.booking_id == b.booking_id).all()
-                 if it.room_id]
-        for it in items:
-            r = db.query(Room).filter(Room.room_id == it.room_id).first()
+    out_at = func.coalesce(BookingItem.checked_out_at, Booking.checked_out_at)
+    q = (db.query(BookingItem, Booking)
+         .join(Booking, Booking.booking_id == BookingItem.booking_id)
+         .filter(BookingItem.room_id.isnot(None), out_at.isnot(None),
+                 clock.business_date_sql(out_at) >= dfrom, clock.business_date_sql(out_at) <= dto,
+                 (BookingItem.checked_out_at.isnot(None)) | (Booking.status == "checked_out"))
+         .order_by(out_at))
+    for it, b in q.all():
+        r = db.query(Room).filter(Room.room_id == it.room_id).first()
+        co = it.checked_out_at or b.checked_out_at                       # UTC
+        ci_local = it.checked_in_at or b.checked_in_at                   # hotel wall clock
+        task = (db.query(HousekeepingTask)
+                .filter(HousekeepingTask.room_id == it.room_id,
+                        HousekeepingTask.type == "checkout_clean",
+                        HousekeepingTask.booking_id == b.booking_id)
+                .order_by(HousekeepingTask.created_at.desc()).first())
+        if task is None:  # fall back to the room's first cleaning after this checkout
             task = (db.query(HousekeepingTask)
                     .filter(HousekeepingTask.room_id == it.room_id,
                             HousekeepingTask.type == "checkout_clean",
-                            HousekeepingTask.booking_id == b.booking_id)
-                    .order_by(HousekeepingTask.created_at.desc()).first())
-            if task is None:  # fall back to the room's most recent cleaning after this checkout
-                task = (db.query(HousekeepingTask)
-                        .filter(HousekeepingTask.room_id == it.room_id,
-                                HousekeepingTask.type == "checkout_clean",
-                                HousekeepingTask.created_at >= b.checked_out_at)
-                        .order_by(HousekeepingTask.created_at.asc()).first())
-            frauds = (db.query(FraudAlert)
-                      .filter(or_(FraudAlert.booking_id == b.booking_id,
-                                  FraudAlert.room_id == it.room_id)).all())
-            fr = "; ".join(f"{a.type}({a.severity})" for a in frauds)
-            rows.append({
-                "booking_id": b.booking_id, "room": r.room_number if r else "—",
-                "guest": b.display_guest_name or None,
-                "check_in": b.checked_in_at.isoformat() if b.checked_in_at else None,
-                "check_out": clock.to_local(b.checked_out_at).isoformat() if b.checked_out_at else None,
-                "cleaning_started": clock.to_local(task.started_at).isoformat() if task and task.started_at else None,
-                "cleaning_ended": clock.to_local(task.done_at).isoformat() if task and task.done_at else None,
-                "inspected_at": clock.to_local(task.inspected_at).isoformat() if task and task.inspected_at else None,
-                "cleaned_by": task.cleaned_by_name if task else None,
-                "inspected_by": task.inspected_by_name if task else None,
-                "frauds": fr,
-            })
-    return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": {"stays": len(rows)}}
+                            HousekeepingTask.created_at >= co - timedelta(minutes=5))
+                    .order_by(HousekeepingTask.created_at.asc()).first())
+        end_utc = (task.inspected_at or task.done_at) if task else None
+        win_end = (end_utc or co) + timedelta(hours=12)
+        card = (db.query(CardIssuance)
+                .filter(CardIssuance.room_id == it.room_id, CardIssuance.card_type == "cleaning",
+                        CardIssuance.status != "cancelled",
+                        CardIssuance.issued_at >= co - timedelta(minutes=5),
+                        CardIssuance.issued_at <= win_end)
+                .order_by(CardIssuance.issued_at.asc()).first())
+        card_cut = clock.to_local(card.issued_at) if card else None
+        if card is None:
+            card_back = None
+        elif card.erased_at:
+            card_back = clock.to_local(card.erased_at).isoformat()
+        elif card.status == "active":
+            card_back = "still out"
+        else:
+            card_back = f"not returned ({card.status})"
+        started = clock.to_local(task.started_at) if task and task.started_at else None
+        start_from_card = started is None and card_cut is not None
+        ci_utc = clock.to_utc(ci_local) if ci_local else co - timedelta(days=30)
+        frauds = (db.query(FraudAlert)
+                  .filter(or_(FraudAlert.booking_id == b.booking_id,
+                              (FraudAlert.room_id == it.room_id)
+                              & (FraudAlert.detected_at >= ci_utc) & (FraudAlert.detected_at <= win_end)))
+                  .order_by(FraudAlert.detected_at).all())
+        fr = "; ".join(f"{a.type}({a.severity})" for a in frauds)
+        rows.append({
+            "booking_id": b.booking_id, "room": r.room_number if r else "—",
+            "guest": b.display_guest_name or None,
+            "check_in": ci_local.isoformat() if ci_local else None,
+            "check_out": clock.to_local(co).isoformat() if co else None,
+            "card_cut": card_cut.isoformat() if card_cut else None,
+            "card_returned": card_back,
+            "cleaning_started": (started or card_cut).isoformat() if (started or card_cut) else None,
+            "cleaning_started_from_card": start_from_card,
+            "cleaning_ended": clock.to_local(task.done_at).isoformat() if task and task.done_at else None,
+            "inspected_at": clock.to_local(task.inspected_at).isoformat() if task and task.inspected_at else None,
+            "cleaned_by": task.cleaned_by_name if task else None,
+            "inspected_by": task.inspected_by_name if task else None,
+            "frauds": fr,
+            "has_fraud": bool(frauds),
+        })
+    return {"from": str(dfrom), "to": str(dto), "rows": rows,
+            "totals": {"stays": len(rows), "with_fraud": len([x for x in rows if x["has_fraud"]])}}
+
+
+ROOM_DETAIL_COLS = ["Room", "Guest", "Check-in", "Check-out", "Card cut", "Card returned", "Cleaning start",
+                    "Cleaning end", "Inspected", "Cleaned by", "Inspected by", "Frauds"]
+
+
+def room_detail_table(data):
+    """(columns, rows) for the screen, the PDF/CSV, the EOD e-mail and the owner's daily HK report."""
+    def _t(v):
+        return (v or "").replace("T", " ")[:16] if v and v[:2] == "20" else (v or "")
+    rows = []
+    for r in data["rows"]:
+        start = _t(r["cleaning_started"]) + (" (card)" if r.get("cleaning_started_from_card") else "")
+        rows.append([r["room"], r["guest"] or "", _t(r["check_in"]), _t(r["check_out"]), _t(r.get("card_cut")),
+                     _t(r.get("card_returned")), start, _t(r["cleaning_ended"]), _t(r["inspected_at"]),
+                     r["cleaned_by"] or "", r["inspected_by"] or "", r["frauds"] or ""])
+    return ROOM_DETAIL_COLS, rows
 
 
 def maintenance_detail_data(db, dfrom, dto):
@@ -1610,11 +1746,7 @@ def _eod_report_pdf(db, key, day):
         cols, rows, totals = _cashier_table(cashier_summary_data(db, day))
     elif key == "lost_cards":
         d = lost_cards_data(db, day, day)
-        cols = ["Reissued", "Room", "Guest", "Lost card", "By", "Fee", "Status"]
-        rows = [[(r["reissued_at"] or "")[:16].replace("T", " "), r["room"] or "—",
-                 r["guest"] or "—", r["lost_card_id"] or "—", r["issued_by"] or "—",
-                 r["fee"], r["fee_status"]] for r in d["rows"]]
-        totals = ["TOTAL", "", "", "", "", d["charged_total"], f"{d['uncharged']} not charged"]
+        cols, rows, totals = lost_cards_table(d)   # v7g
     elif key == "checkout_summary":
         d = checkout_summary_data(db, day)
         cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
@@ -1629,13 +1761,7 @@ def _eod_report_pdf(db, key, day):
         cols, rows, totals = _rs_by_room_table(room_service_by_room_data(db, day, day))
     elif key == "room_detail":
         d = room_detail_data(db, day, day)
-        cols = ["Room", "Guest", "Check-in", "Check-out", "Cleaned", "Inspected", "Cleaned by",
-                "Inspected by", "Frauds"]
-        rows = [[r["room"], r["guest"], (r["check_in"] or "")[:16].replace("T", " "),
-                 (r["check_out"] or "")[:16].replace("T", " "),
-                 (r["cleaning_ended"] or "")[:16].replace("T", " "),
-                 (r["inspected_at"] or "")[:16].replace("T", " "), r["cleaned_by"] or "",
-                 r["inspected_by"] or "", r["frauds"]] for r in d["rows"]]
+        cols, rows = room_detail_table(d)   # v7g
         totals = None
     elif key == "maintenance_detail":
         d = maintenance_detail_data(db, day, day)
@@ -1970,13 +2096,15 @@ def lost_cards_report(from_: str | None = Query(None, alias="from"), to: str | N
     """Key cards reported lost, and what was charged for each."""
     dfrom, dto = _range(from_, to)
     data = lost_cards_data(db, dfrom, dto)
-    cols = ["Reissued", "Room", "Guest", "Booking", "Lost card", "New card", "By", "Fee", "Status"]
+    cols = ["Reissued", "Room", "Guest", "Booking", "Lost card", "New card", "Cut by", "Fee", "Status",
+            "Fee decided by", "Reason / approval"]   # v7g
     rows = [[(r["reissued_at"] or "")[:16].replace("T", " "), r["room"] or "—",
              r["guest"] or "—", r["booking_id"] or "—", r["lost_card_id"] or "—",
-             r["new_card_id"], r["issued_by"] or "—", r["fee"], r["fee_status"]]
+             r["new_card_id"], r["issued_by"] or "—", r["fee"], r["fee_status"],
+             r.get("fee_decided_by") or "", r.get("fee_reason") or ""]
             for r in data["rows"]]
     totals = ["TOTAL", "", "", "", "", "", "", data["charged_total"],
-              f"{data['uncharged']} not charged"]
+              f"{data['uncharged']} not charged", "", ""]
     return _export_or_json(format, data, title="Lost Key Cards", columns=cols, rows=rows,
                            totals_row=totals, meta=_meta(dfrom, dto), filename="lost_cards")
 
@@ -2033,14 +2161,7 @@ def room_detail_report(from_: str | None = Query(None, alias="from"), to: str | 
     and any frauds. Range is by check-out date."""
     dfrom, dto = _range(from_, to)
     data = room_detail_data(db, dfrom, dto)
-    cols = ["Room", "Guest", "Check-in", "Check-out", "Cleaning start", "Cleaning end",
-            "Inspected", "Cleaned by", "Inspected by", "Frauds"]
-
-    def _t(s):
-        return (s or "").replace("T", " ")[:16]
-    rows = [[r["room"], r["guest"], _t(r["check_in"]), _t(r["check_out"]), _t(r["cleaning_started"]),
-             _t(r["cleaning_ended"]), _t(r["inspected_at"]), r["cleaned_by"] or "", r["inspected_by"] or "",
-             r["frauds"]] for r in data["rows"]]
+    cols, rows = room_detail_table(data)   # v7g
     return _export_or_json(format, data, title="Room Detail (housekeeping + frauds)", columns=cols,
                            rows=rows, meta=_meta(dfrom, dto), filename="room_detail")
 

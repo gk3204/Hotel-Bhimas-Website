@@ -117,6 +117,7 @@ class Booking(Base):
     checked_in_at = Column(DateTime, nullable=True)   # set by POST /reception/checkin (status -> "checked_in")
     checked_out_at = Column(DateTime, nullable=True)  # set by POST /reception/checkout (status -> "checked_out")
     checked_out_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)  # v7d: who checked them out (055)
+    alternate_approved = Column(Boolean, nullable=False, default=False)  # v7g: owner approved an alternate room type at booking (057)
     # --- Rates & travel-agent pricing (prompt 10, additive) ---
     agent_id = Column(Integer, ForeignKey("travel_agents.id"), nullable=True, index=True)  # set when booked "as agent X"
     commission_percent = Column(Numeric(5, 2), nullable=True)   # snapshot of the agent's commission % at booking time

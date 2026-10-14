@@ -418,7 +418,7 @@ def encode_cleaning_card(room_id: int, data: CleaningCardRequest, db: Session = 
         valid_from=valid_from,
         valid_to=valid_to,
         issued_by=_resolve_user_id(db, user),
-        station_id=data.station_id,
+        station_id=_card_station(db, data, user),   # v7g
         status="active",
         issue_type="cleaning",
         client_ref=data.client_ref,
@@ -444,6 +444,25 @@ def encode_cleaning_card(room_id: int, data: CleaningCardRequest, db: Session = 
                        "station_id": data.station_id, "client_ref": data.client_ref},
                 client="desktop", commit=True)
     return _cleaning_card_payload(room, card)
+
+
+def _card_station(db, data, user):
+    """v7g (owner: "getting many off-station issuance fraud for clean card / view card cutting from
+    same station"): the desk never sent its station for these two cards, so every one was recorded
+    with NONE and raised off_station_issuance (production: 132 cleaning + 8 viewing cards in 10 days,
+    all from FRONTDESK-1). Use what the desk sends; an older desk falls back to the station of the
+    open cash shift - the user's own first, else the single front desk's."""
+    if getattr(data, "station_id", None):
+        return data.station_id
+    try:
+        from models import CashShift
+        uid = _resolve_user_id(db, user)
+        q = db.query(CashShift).filter(CashShift.status == "open")
+        sh = (q.filter(CashShift.staff_id == uid).order_by(CashShift.opened_at.desc()).first() if uid else None) \
+            or q.order_by(CashShift.opened_at.desc()).first()
+        return sh.station_id if sh is not None else None
+    except Exception:
+        return None
 
 
 @router.post("/rooms/{room_id}/cleaning-card/return")
@@ -575,7 +594,7 @@ def encode_viewing_card(room_id: int, data: CleaningCardRequest, db: Session = D
     valid_to = valid_from + timedelta(minutes=minutes)
     card = CardIssuance(room_id=room.room_id, card_uid=data.card_uid, card_type="viewing",
                         room_code=_room_code(room), valid_from=valid_from, valid_to=valid_to,
-                        issued_by=_resolve_user_id(db, user), station_id=data.station_id,
+                        issued_by=_resolve_user_id(db, user), station_id=_card_station(db, data, user),   # v7g
                         status="active", issue_type="viewing", client_ref=data.client_ref)
     db.add(card)
     db.commit()

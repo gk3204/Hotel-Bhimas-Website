@@ -233,6 +233,32 @@ def send_daily_digest_if_due(db) -> int:
                            filename=f"HotelBhimas_daily_{day}.pdf")
 
 
+def send_daily_hk_report_if_due(db) -> int:
+    """v7g (owner): with the daily report, a second PDF - Room Detail (HK + frauds, fraud rows in red),
+    maintenance detail and lost key cards for the previous day (00:00-24:00). Same owners, same
+    channels, once a day."""
+    cfg = app_settings.get_whatsapp_config(db)
+    if not cfg["owner_alerts_enabled"]:
+        return 0
+    now_ist = _now_ist()
+    if now_ist.hour < cfg["daily_digest_hour"]:
+        return 0
+    day = now_ist.date() - timedelta(days=1)
+    cref = f"hk_report:{day}"
+    if wa.already_sent(db, cref):
+        return 0
+    try:
+        from routers.reports import build_hk_owner_report
+        pdf, caption = build_hk_owner_report(db, day)
+    except Exception as e:
+        logger.error(f"daily HK report failed: {e}")
+        return 0
+    return _deliver_report(db, cref=cref, report=None, pdf=pdf, caption=caption,
+                           doc_template="daily_report_doc", doc_params={"day": str(day)},
+                           subject=f"Hotel Bhimas — housekeeping, frauds, maintenance & lost cards {day}",
+                           filename=f"HotelBhimas_housekeeping_{day}.pdf")
+
+
 def send_weekly_digest_if_due(db) -> int:
     """Once a week (configured weekday, at/after the digest hour) send a 7-day report ending
     yesterday. Idempotent per ISO week."""
@@ -369,6 +395,7 @@ _JOBS = [
     ("overstay_alerts", send_overstay_alerts),
     ("review_requests", send_review_requests),
     ("daily_digest", send_daily_digest_if_due),
+    ("daily_hk_report", send_daily_hk_report_if_due),   # v7g
     ("weekly_digest", send_weekly_digest_if_due),
     ("operational_summary", send_operational_summary_if_due),
     ("fraud_alerts", notify_new_fraud_alerts),

@@ -192,11 +192,13 @@ const REPORTS = {
     project: (d) => {
       const t = (s) => (s || "").replace("T", " ").slice(0, 16);
       return {
-        columns: ["Room", "Guest", "Check-in", "Check-out", "Cleaning start", "Cleaning end",
-          "Inspected", "Cleaned by", "Inspected by", "Frauds"],
+        // v7g: cleaning card cut / returned; a start taken from the card cut is marked "(card)"
+        columns: ["Room", "Guest", "Check-in", "Check-out", "Card cut", "Card returned", "Cleaning start",
+          "Cleaning end", "Inspected", "Cleaned by", "Inspected by", "Frauds"],
         rows: d.rows.map((r) => [r.room, r.guest, t(r.check_in), t(r.check_out),
-          t(r.cleaning_started), t(r.cleaning_ended), t(r.inspected_at), r.cleaned_by || "",
-          r.inspected_by || "", r.frauds || ""]),
+          t(r.card_cut), (r.card_returned || "").startsWith("20") ? t(r.card_returned) : (r.card_returned || ""),
+          t(r.cleaning_started) + (r.cleaning_started_from_card ? " (card)" : ""), t(r.cleaning_ended),
+          t(r.inspected_at), r.cleaned_by || "", r.inspected_by || "", r.frauds || ""]),
       };
     },
   },
@@ -356,9 +358,11 @@ const REPORTS = {
           "Settings → Front desk; at ₹0 nothing is billed.",
     fetch: (p) => api.getLostCards(p),
     project: (d) => ({
-      columns: ["Reissued", "Room", "Guest", "Booking", "Lost card", "New card", "By", "Fee", "Status"],
+      columns: ["Reissued", "Room", "Guest", "Booking", "Lost card", "New card", "Cut by", "Fee", "Status",
+        "Fee decided by", "Reason / approval"],
       rows: d.rows.map((r) => [(r.reissued_at || "").replace("T", " ").slice(0, 16), r.room,
-        r.guest, r.booking_id, r.lost_card_id, r.new_card_id, r.issued_by, r.fee, r.fee_status]),
+        r.guest, r.booking_id, r.lost_card_id, r.new_card_id, r.issued_by, r.fee, r.fee_status,
+        r.fee_decided_by || "", r.fee_reason || ""]),
       totals: ["TOTAL", "", "", "", "", "", "", d.charged_total,
         `${d.uncharged} not charged`],
     }),

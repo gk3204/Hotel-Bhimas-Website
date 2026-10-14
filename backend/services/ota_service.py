@@ -1530,8 +1530,8 @@ def auto_confirm_draft(db, d, user=None):
             if not sf["fits_own"] and sf["fits_with_alt"]:
                 _hold_draft(db, d, (f"Only an ALTERNATE room is free: {sf['type_name']} is full for these "
                                     f"dates, but {', '.join(sf['lender_names']) or 'an alternate type'} "
-                                    f"can host it. Confirm it on the desk - check-in will ask for "
-                                    f"the alternate-room approval."))
+                                    f"can host it. Confirm it on the desk with the owner's approval code "
+                                    f"(an admin can approve it directly)."))
                 try:
                     db.commit()
                 except Exception:

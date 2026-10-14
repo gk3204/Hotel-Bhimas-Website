@@ -401,6 +401,9 @@ def confirm_draft(draft_id: int, data: OtaDraftConfirm,
         # Actual figures the voucher stated — preferred over %×gross (apply_ota_fields).
         ota_commission_amount=float(d.commission_amount) if d.commission_amount is not None else None,
         ota_net_payout=float(d.net_payout) if d.net_payout is not None else None,
+        use_alternate=bool(getattr(data, 'use_alternate', False)),   # v7g
+        alt_otp_id=getattr(data, 'alt_otp_id', None),
+        alt_otp_code=getattr(data, 'alt_otp_code', None)
     )
 
     # Call the desk-booking handler directly (plain function — Depends bypassed by explicit args).

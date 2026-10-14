@@ -56,6 +56,7 @@ OTP_ACTIONS = frozenset({
     "arrival_fee",             # v5m: early check-in fee changed from the rule's quote (or rule says always)
     "extend_hours",            # v5m: hourly extension fee changed from the rule's quote (or rule says always)
     "lost_card_waive",         # v6m: reception waives the lost-key-card fee (charged by default)
+    "alt_room_booking",        # v7g: book into an ALTERNATE room type because the booked type is full
 })
 
 
@@ -276,6 +277,13 @@ def _sum_extend_hours(ctx):
             f"({_booking_label(ctx)})")
 
 
+def _sum_alt_room_booking(ctx):
+    rt = ctx.get("room_type_name") or "the booked type"
+    alt = ctx.get("alternate_names") or "an alternate room type"
+    return (f"Book {ctx.get('quantity') or 1} x {rt} into {alt} ({rt} is full) for "
+            f"{ctx.get('guest_name') or 'a guest'} - {ctx.get('check_in') or '?'} to {ctx.get('check_out') or '?'}")
+
+
 def _sum_lost_card_waive(ctx):
     return (f"Waive the {_inr(abs(ctx.get('amount') or 0))} lost key card fee for "
             f"{_guest_label(ctx)} — {_rooms_label(ctx.get('rooms'))}")
@@ -283,6 +291,7 @@ def _sum_lost_card_waive(ctx):
 
 _SUMMARY_BUILDERS = {
     "lost_card_waive": _sum_lost_card_waive,
+    "alt_room_booking": _sum_alt_room_booking,
     "refund": _sum_refund,
     "discount_below_floor": _sum_discount,
     "void": _sum_void,

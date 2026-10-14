@@ -182,3 +182,58 @@ def generate_week_report_pdf(report):
                f"Rs {d['collected']:,.0f}", d["arrivals"], d["departures"]] for d in report.get("days", [])])
     doc.build(elements)
     return file_path
+
+
+
+def generate_hk_owner_report_pdf(day, room_detail, maintenance, lost_cards) -> str:
+    """v7g (owner): "everyday along with daily report need 1 report to owner which will contain Room
+    detail (HK + Fraud) with fraud rows marked in a colour, maintenance detail and lost key cards for
+    the previous day (12am-12am)". Landscape - Room Detail is 12 columns wide.
+
+    Each argument is (columns, rows[, totals]); `room_detail` also carries a list of booleans - which
+    rows had a fraud alert - and those rows are shaded red."""
+    from reportlab.lib.pagesizes import landscape
+    rd_cols, rd_rows, rd_flags = room_detail
+    path = os.path.join(tempfile.gettempdir(), f"hk_owner_report_{day}.pdf")
+    doc = SimpleDocTemplate(path, pagesize=landscape(A4), rightMargin=18, leftMargin=18,
+                            topMargin=18, bottomMargin=18)
+    styles = getSampleStyleSheet()
+    styles["Normal"].fontSize = 7
+    styles["Normal"].leading = 8.5
+    el = []
+    _brand_header(el, styles)
+    _title(el, styles, f"Housekeeping, frauds, maintenance & lost cards - {day:%d %b %Y} (00:00-24:00)")
+    n_fraud = sum(1 for f in rd_flags if f)
+    el.append(Paragraph(
+        f"Rooms checked out: <b>{len(rd_rows)}</b> &nbsp;·&nbsp; with a fraud alert: "
+        f"<font color='#B00020'><b>{n_fraud}</b></font> (shaded red) &nbsp;·&nbsp; maintenance tickets: "
+        f"<b>{len(maintenance[1])}</b> &nbsp;·&nbsp; lost key cards: <b>{len(lost_cards[1])}</b>",
+        styles["Normal"]))
+
+    head_style = ParagraphStyle(name="HKSec", parent=styles["Normal"], fontSize=10,
+                                textColor=colors.HexColor("#B8860B"), spaceBefore=10, spaceAfter=4,
+                                fontName="Helvetica-Bold")
+    el.append(Paragraph("Room Detail (housekeeping + frauds)", head_style))
+    if rd_rows:
+        data = [[Paragraph(f"<b>{c}</b>", styles["Normal"]) for c in rd_cols]]
+        for r in rd_rows:
+            data.append([Paragraph(_cell(v), styles["Normal"]) for v in r])
+        t = Table(data, repeatRows=1)
+        style = [("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#F3E7C6")),
+                 ("GRID", (0, 0), (-1, -1), 0.4, colors.HexColor("#CCCCCC")),
+                 ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]
+        for i, flagged in enumerate(rd_flags, start=1):
+            if flagged:
+                style.append(("BACKGROUND", (0, i), (-1, i), colors.HexColor("#F8D7DA")))
+                style.append(("TEXTCOLOR", (-1, i), (-1, i), colors.HexColor("#B00020")))
+        t.setStyle(TableStyle(style))
+        el.append(t)
+    else:
+        el.append(Paragraph("— no room checked out —", styles["Normal"]))
+
+    _section(el, styles, "Maintenance detail", maintenance[0],
+             maintenance[1] + ([maintenance[2]] if len(maintenance) > 2 and maintenance[2] else []))
+    _section(el, styles, "Lost key cards", lost_cards[0],
+             lost_cards[1] + ([lost_cards[2]] if len(lost_cards) > 2 and lost_cards[2] else []))
+    doc.build(el)
+    return path

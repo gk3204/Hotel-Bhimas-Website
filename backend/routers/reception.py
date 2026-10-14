@@ -199,6 +199,7 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
         # Validate + availability (row-locked to prevent concurrent overbooking)
         rt_map = {}
         _alt_notes = []   # v7b
+        _alt_approved = False   # v7g
         for item in data.rooms:
             rt = db.query(RoomType).filter(
                 RoomType.room_type_id == item.room_type_id,
@@ -231,11 +232,29 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             available = rt.total_rooms - int(booked) - int(inactive) - held - lent
             if item.quantity > available:
                 alt = int(_plan["alt_free"].get(item.room_type_id, 0))
-                if _ALLOW_ALTERNATE.get() and item.quantity <= max(0, available) + alt:
-                    # an OTA guest the channel already sold - booked into its alternate rooms; the
-                    # check-in will ask for the alternate-room approval (_assert_booked_type_sold_out)
-                    _alt_notes.append(f"{item.quantity - max(0, available)} x {rt.name} needs an ALTERNATE room "
-                                      f"(only alternates were free when confirmed) - check-in needs approval")
+                fits_alt = alt > 0 and item.quantity <= max(0, available) + alt
+                # v7g (owner): any source may book into an ALTERNATE room type when its own is full -
+                # with the owner's approval code, or an admin login asking for it. (OTA confirms too:
+                # v7b took them without approval and left it to check-in.)
+                _is_admin = (user or {}).get("role") == "admin"
+                _approved = False
+                if fits_alt and _is_admin and (data.use_alternate or _ALLOW_ALTERNATE.get()):
+                    _approved = True
+                elif fits_alt and data.alt_otp_id:
+                    consume_otp(db, data.alt_otp_id, data.alt_otp_code, "alt_room_booking", user)
+                    _approved = True
+                if _approved:
+                    _lenders = ", ".join(sorted({t.name for t in db.query(RoomType).filter(
+                        RoomType.room_type_id.in_([x for x, _n in _plan["lenders"].get(item.room_type_id, [])] or [0]))}))
+                    _alt_notes.append(f"{item.quantity - max(0, available)} x {rt.name} in an ALTERNATE room "
+                                      f"({_lenders or 'alternate type'}) - approved at booking")
+                    _alt_approved = True
+                elif fits_alt:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(f"alternate_approval_required: only {max(0, available)} {rt.name} free for these "
+                                f"dates, and {alt} more through alternate room types. Booking into an alternate "
+                                f"room needs the owner's approval code (an admin can approve it directly)."))
                 else:
                     why = (f" ({held} held by unconfirmed OTA booking(s) for these dates — confirm or "
                            f"dismiss them on OTA Bookings)" if held else "")
@@ -364,6 +383,8 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
         )
         if _alt_notes:   # v7b: say so on the booking, for the desk at check-in
             booking.admin_notes = ("; ".join(_alt_notes) + ("; " + booking.admin_notes if booking.admin_notes else ""))[:500]
+        if _alt_approved:   # v7g: approved now - check-in does not ask again
+            booking.alternate_approved = True
         db.add(booking)
         db.flush()
         # OTA tracking snapshot (prompt 17): stamp OTA booking id + commission + net payout when the
@@ -1242,7 +1263,10 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # later) has nothing to collect at check-in, so — like a prepaid channel booking — it
         # is not asked for money. The owner's OTP already approved the comp itself.
         is_comp = (getattr(booking, "comp_mode", "none") or "none") in ("all", "room")
-        if not is_comp and total_paid_including_prepaid(db, booking.booking_id) <= 0:
+        # v7g (owner): "for agent based check-in can be allowed without payment as they normally do
+        # payment at check-out". The bill is still settled at check-out (balance gate unchanged).
+        is_agent = bool(getattr(booking, "agent_id", None))
+        if not is_comp and not is_agent and total_paid_including_prepaid(db, booking.booking_id) <= 0:
             raise HTTPException(status_code=409,
                                 detail="No payment recorded for this booking — record a desk payment first")
 
@@ -1331,7 +1355,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # than one approval that names all three.
         # Consumed AFTER all validation and BEFORE any mutation: consume_otp only flushes, so
         # a bad code costs nothing and a good one is spent only if the check-in commits.
-        if alt_sales and app_settings.get_fraud_config(db).get("alt_room_type_otp_required"):
+        if (alt_sales and app_settings.get_fraud_config(db).get("alt_room_type_otp_required")
+                and not getattr(booking, "alternate_approved", False)):   # v7g: approved at booking
             consume_otp(db, data.owner_otp_id, data.owner_otp_code, "room_assignment", user)
 
         # ---- assign rooms (split a multi-room line into one row per ARRIVING room) ----

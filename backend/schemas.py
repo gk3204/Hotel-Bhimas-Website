@@ -199,6 +199,11 @@ class DeskBookingCreate(BaseModel):
     # colleagues on one corporate reservation each want their own. Default 'group' - every
     # booking ever taken until now, and the shape nothing else has to think about.
     billing_mode: str = Field("group", pattern="^(group|room)$")
+    # v7g (owner): book into an ALTERNATE room type when the booked type is full - with the owner's
+    # approval code (action alt_room_booking), or `use_alternate` from an admin login.
+    use_alternate: bool = False
+    alt_otp_id: Optional[int] = Field(None, gt=0)
+    alt_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     agent_id: Optional[int] = Field(None, gt=0)  # prompt 10: price from this travel agent's rate + accrue commission
     # prompt 17: OTA tracking — set when booking_source is an OTA channel. commission % defaults to
     # the per-OTA config (ota_channels) when not supplied; net payout is computed server-side.
@@ -259,6 +264,10 @@ class OtaDraftConfirm(BaseModel):
     # v6f raised that to 40. A six-room voucher could not be confirmed by ANYONE - desk or admin -
     # and the error said nothing about a cap.
     quantity: int = Field(1, ge=1, le=40)  # matches BookingItemCreate
+    # v7g: the owner's approval to confirm into an alternate room type (admin: use_alternate)
+    use_alternate: bool = False
+    alt_otp_id: Optional[int] = Field(None, gt=0)
+    alt_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     guest_name: Optional[str] = Field(None, min_length=2, max_length=100)
     phone: Optional[str] = Field(None, min_length=7, max_length=15)
     email: Optional[EmailStr] = None
