@@ -57,6 +57,7 @@ OTP_ACTIONS = frozenset({
     "extend_hours",            # v5m: hourly extension fee changed from the rule's quote (or rule says always)
     "lost_card_waive",         # v6m: reception waives the lost-key-card fee (charged by default)
     "alt_room_booking",        # v7g: book into an ALTERNATE room type because the booked type is full
+    "no_show",                 # v7i: reception marks a booking a no-show (admin needs no code)
 })
 
 
@@ -284,6 +285,21 @@ def _sum_alt_room_booking(ctx):
             f"{ctx.get('guest_name') or 'a guest'} - {ctx.get('check_in') or '?'} to {ctx.get('check_out') or '?'}")
 
 
+def _sum_no_show(ctx):
+    b = ctx.get("booking") or {}
+    who = (ctx.get("guest") or {}).get("name") or b.get("guest_name") or "the guest"
+    src = b.get("booking_source") or "?"
+    if b.get("ota_booking_id"):
+        src += f" {b['ota_booking_id']}"
+    money = f"bill {_inr(b.get('grand_total') or 0)}"
+    if b.get("prepaid_amount"):
+        money += f", PREPAID {_inr(b['prepaid_amount'])}"
+    if ctx.get("paid_at_desk"):
+        money += f", paid at desk {_inr(ctx['paid_at_desk'])}"
+    return (f"Mark {who} ({_booking_label(ctx)}, {src}, {b.get('check_in') or '?'} to {b.get('check_out') or '?'}, "
+            f"{money}) as a NO-SHOW - {ctx.get('reason') or 'no reason given'}")
+
+
 def _sum_lost_card_waive(ctx):
     return (f"Waive the {_inr(abs(ctx.get('amount') or 0))} lost key card fee for "
             f"{_guest_label(ctx)} — {_rooms_label(ctx.get('rooms'))}")
@@ -292,6 +308,7 @@ def _sum_lost_card_waive(ctx):
 _SUMMARY_BUILDERS = {
     "lost_card_waive": _sum_lost_card_waive,
     "alt_room_booking": _sum_alt_room_booking,
+    "no_show": _sum_no_show,
     "refund": _sum_refund,
     "discount_below_floor": _sum_discount,
     "void": _sum_void,
@@ -379,6 +396,10 @@ def build_context(db, action: str, *, booking=None, rooms=None, folio=None, gues
                 "comp_mode": getattr(booking, "comp_mode", None),
                 "nights": nights,
                 "grand_total": _num(booking.grand_total),
+                # v7i: what the owner needs to judge a no-show - who it is and what was already paid
+                "guest_name": getattr(booking, "display_guest_name", None),
+                "prepaid_amount": _num(getattr(booking, "prepaid_amount", None) or 0),
+                "ota_booking_id": getattr(booking, "ota_booking_id", None),
             }
             if guest is None:
                 guest = getattr(booking, "guest", None)

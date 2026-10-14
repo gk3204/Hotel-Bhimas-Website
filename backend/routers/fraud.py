@@ -353,10 +353,17 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
     # safe_extras() drops the server-owned keys. Without it a client posting
     # {"booking": ...} in `context` would collide with build_context's own keyword
     # parameter and 500 the request.
+    extras = safe_extras(data.context)
+    if data.action == "no_show" and booking is not None:
+        # v7i: the owner judges a no-show by the money already taken - the server's figure,
+        # never the desk's
+        extras["paid_at_desk"] = round(float(db.query(func.coalesce(func.sum(Payment.amount), 0))
+                                             .filter(Payment.booking_id == booking.booking_id,
+                                                     Payment.status == "paid").scalar() or 0), 2)
     context = build_context(db, data.action, booking=booking, rooms=rooms, folio=folio,
                             amount=amount, user=user,
                             reasons=(data.context or {}).get("reasons"),
-                            **safe_extras(data.context))
+                            **extras)
 
     otp, delivery = create_otp(db, data.action, context, user, return_delivery=True)
     write_audit(db, user, "fraud.otp_request", "owner_otp", otp.id,

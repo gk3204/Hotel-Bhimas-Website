@@ -13,6 +13,7 @@ The AUTOMATIC no-show lives in utils/night_audit.mark_no_shows: a `confirmed` bo
 check-out date is over is a no-show — never earlier, so a badly-late guest can still be checked
 in on any booked date (arrival rules decide the stay clock).
 """
+import json
 import logging
 from datetime import date, datetime, time, timedelta
 from typing import Optional
@@ -26,6 +27,7 @@ from models import Booking, BookingItem, RoomType
 from services import ota_service
 from utils import availability
 from utils.audit import write_audit
+from utils.owner_otp import consume_otp
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils import clock          # F-03: one clock - see utils/clock.py
 
@@ -45,6 +47,9 @@ def get_db():
 class NoShowRequest(BaseModel):
     reason: Optional[str] = Field(None, max_length=200)
     client_ref: Optional[str] = Field(None, max_length=64)
+    # v7i (owner): a reception login needs the owner's approval code (action "no_show")
+    otp_id: Optional[int] = None
+    otp_code: Optional[str] = Field(None, max_length=10)
 
 
 class RedateRequest(BaseModel):
@@ -71,7 +76,7 @@ def _serialize(b: Booking) -> dict:
     }
 
 
-def mark_no_show(db, booking: Booking, user, reason=None, client="desktop", automatic=False):
+def mark_no_show(db, booking: Booking, user, reason=None, client="desktop", automatic=False, approval_otp_id=None):
     """Shared by the endpoint and the night audit. Caller commits."""
     booking.status = "no_show"
     booking.no_show_at = clock.now_utc()      # F-03: an instant, stored UTC
@@ -80,7 +85,8 @@ def mark_no_show(db, booking: Booking, user, reason=None, client="desktop", auto
                 after={"status": "no_show", "reason": reason,
                        "automatic": automatic, "check_in": str(booking.check_in),
                        "check_out": str(booking.check_out),
-                       "prepaid_amount": float(booking.prepaid_amount or 0)},
+                       "prepaid_amount": float(booking.prepaid_amount or 0),
+                       "approval_otp_id": approval_otp_id},
                 client=client, commit=False)
 
 
@@ -98,7 +104,22 @@ def no_show(booking_id: int, data: NoShowRequest = Body(default=NoShowRequest())
         raise HTTPException(status_code=409,
                             detail=f"The guest is expected at {_expected(b, db):%d-%m-%Y %H:%M} — "
                                    f"a no-show can only be marked after that")
-    mark_no_show(db, b, user, reason=data.reason, client="desktop")
+    # v7i (owner, after prod #637): reception marked a PREPAID Yatra stay a no-show and re-sold the
+    # guest a walk-in, so the guest paid twice. A no-show at the desk now needs the owner's code;
+    # an admin login decides on its own. The code must have been issued for THIS booking.
+    otp = None
+    if (user or {}).get("role") != "admin":
+        otp = consume_otp(db, data.otp_id, data.otp_code, "no_show", user)
+        try:
+            ctx = json.loads(otp.context or "{}")
+        except (TypeError, ValueError):
+            ctx = {}
+        if ((ctx.get("booking") or {}).get("booking_id")) != b.booking_id:
+            db.rollback()
+            raise HTTPException(status_code=403,
+                                detail="This owner approval code was issued for another booking")
+    mark_no_show(db, b, user, reason=data.reason, client="desktop",
+                 approval_otp_id=(otp.id if otp is not None else None))
     db.commit()
     db.refresh(b)
     return _serialize(b)
