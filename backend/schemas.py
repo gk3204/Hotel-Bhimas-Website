@@ -368,6 +368,9 @@ class ExcessReturnRequest(BaseModel):
     booking_id: int = Field(..., gt=0)
     mode: str = Field("cash", pattern="^(cash|upi|bank)$")   # how the money is handed back
     reference: Optional[str] = Field(None, max_length=100)   # UPI / bank ref of the payout
+    # v7j: a booking paid (partly) by BANK transfer needs the owner's code to hand money back
+    otp_id: Optional[int] = None
+    otp_code: Optional[str] = Field(None, max_length=10)
 
 
 class DeskCollectRequest(BaseModel):
@@ -719,6 +722,9 @@ class EarlyCheckoutRequest(BaseModel):
     room_ids: Optional[List[int]] = Field(None, max_length=40)
     new_check_out: Optional[date] = None
     dry_run: bool = False
+    # v7j: dropping the nights of a WEBSITE booking needs the owner's code (reception login)
+    otp_id: Optional[int] = None
+    otp_code: Optional[str] = Field(None, max_length=10)
 
 
 class PromotionCreate(BaseModel):

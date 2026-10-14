@@ -13,7 +13,6 @@ The AUTOMATIC no-show lives in utils/night_audit.mark_no_shows: a `confirmed` bo
 check-out date is over is a no-show — never earlier, so a badly-late guest can still be checked
 in on any booked date (arrival rules decide the stay clock).
 """
-import json
 import logging
 from datetime import date, datetime, time, timedelta
 from typing import Optional
@@ -27,7 +26,7 @@ from models import Booking, BookingItem, RoomType
 from services import ota_service
 from utils import availability
 from utils.audit import write_audit
-from utils.owner_otp import consume_otp
+from utils.owner_otp import consume_otp_for_booking
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils import clock          # F-03: one clock - see utils/clock.py
 
@@ -109,15 +108,7 @@ def no_show(booking_id: int, data: NoShowRequest = Body(default=NoShowRequest())
     # an admin login decides on its own. The code must have been issued for THIS booking.
     otp = None
     if (user or {}).get("role") != "admin":
-        otp = consume_otp(db, data.otp_id, data.otp_code, "no_show", user)
-        try:
-            ctx = json.loads(otp.context or "{}")
-        except (TypeError, ValueError):
-            ctx = {}
-        if ((ctx.get("booking") or {}).get("booking_id")) != b.booking_id:
-            db.rollback()
-            raise HTTPException(status_code=403,
-                                detail="This owner approval code was issued for another booking")
+        otp = consume_otp_for_booking(db, data.otp_id, data.otp_code, "no_show", b.booking_id, user)
     mark_no_show(db, b, user, reason=data.reason, client="desktop",
                  approval_otp_id=(otp.id if otp is not None else None))
     db.commit()

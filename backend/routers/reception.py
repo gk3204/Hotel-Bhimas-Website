@@ -45,7 +45,7 @@ from routers.folio import (open_folio, _recompute, _get_invoice, _active_charges
 from routers.crm import check_guest_gate, match_guest, accrue_loyalty_on_checkout
 from scripts.expire_booking_jobs import expire_pending_bookings
 from services import folio_resolver, company_service, ota_service, room_posting
-from utils.owner_otp import consume_otp
+from utils.owner_otp import consume_otp, consume_otp_for_booking
 from utils import clock          # F-03: one clock - see utils/clock.py
 
 logger = logging.getLogger(__name__)
@@ -2454,6 +2454,25 @@ def _early_checkout_new_co(db, booking: Booking, now: datetime) -> date:
     return today if now <= deadline else today + timedelta(days=1)
 
 
+def _is_ota_prepaid(db, booking) -> bool:
+    """v7j: an OTA stay (MakeMyTrip, Goibibo, Yatra, ...) - prepaid to the channel."""
+    return ((booking.prepaid_source or "") == "ota"
+            or ota_service.is_ota_source(booking.booking_source, db))
+
+
+def early_checkout_preview(db, booking):
+    """v7j: what the early check-out would drop TODAY (nights, credit) - for the owner's approval
+    text. Same rule as the endpoint's default new check-out."""
+    new_co = _early_checkout_new_co(db, booking, datetime.now())
+    ids = [f.id for f in folio_resolver.folios_for_booking(db, booking.booking_id)]
+    lines = (db.query(FolioCharge)
+               .filter(FolioCharge.folio_id.in_(ids), FolioCharge.type == "room",
+                       FolioCharge.charge_date >= new_co, FolioCharge.reversal_of_id.is_(None),
+                       FolioCharge.void == False).all()) if ids else []  # noqa: E712
+    return {"nights_dropped": max(0, (booking.check_out - new_co).days),
+            "credit": round(sum(float(l.amount or 0) for l in lines), 2)}
+
+
 @router.post("/checkout/early")
 def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
                    user=Depends(require_reception_or_admin)):
@@ -2473,6 +2492,17 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
             raise HTTPException(
                 status_code=409,
                 detail=f"Only an in-house stay can be checked out early (this one is '{booking.status}')")
+        # v7j (owner): "for prepaid like MMT, Yatra, OTA you can early check-out but dropping unused
+        # nights should not be supported (amount won't be returned of unused nights)". The guest
+        # may still leave early - the normal checkout does that - but the booking stays billed in
+        # full. Nobody, admin included, drops an OTA stay's nights here.
+        if _is_ota_prepaid(db, booking):
+            raise HTTPException(
+                status_code=409,
+                detail=f"ota_no_drop: this stay was booked and PREPAID through "
+                       f"{ota_service._channel_meta(booking.booking_source or 'the OTA')['display_name']}"
+                       f" - unused nights are not returned. The guest can still leave early: just check out; "
+                       f"the booking stays billed in full.")
         # v6e: a stay can have a bill per room. The unused nights being credited are found
         # across ALL of them, and each credit lands back on the bill that carried the charge.
         _folios = folio_resolver.folios_for_booking(db, booking.booking_id)
@@ -2513,6 +2543,14 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
                     "folio_balance_before": bal_before,
                     "folio_balance_after": round(bal_before - credit, 2)}
 
+        # v7j (owner): "for website bookings dropping unused nights needs owner approval code"
+        _approval = None
+        if (booking.booking_source or "") == "website" and (user or {}).get("role") != "admin":
+            _approval = consume_otp_for_booking(
+                db, data.otp_id, data.otp_code, "early_checkout_drop", booking.booking_id, user,
+                missing_detail=f"dropping the unused nights of a WEBSITE booking (Rs {credit:,.2f} back to "
+                               f"the guest) needs the owner's approval code")
+
         before = {"check_out": str(booking.check_out), "grand_total": float(booking.grand_total or 0),
                   "folio_balance": bal_before}
         for line in lines:
@@ -2545,7 +2583,8 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
                     before=before,
                     after={"check_out": str(new_co), "nights_dropped": nights_dropped,
                            "credit": credit, "grand_total": float(booking.grand_total or 0),
-                           "folio_balance": float(folio.balance or 0)},
+                           "folio_balance": float(folio.balance or 0),
+                           "approval_otp_id": (_approval.id if _approval is not None else None)},
                     client="desktop", commit=True)
 
         return {"booking_id": booking.booking_id, "dry_run": False,

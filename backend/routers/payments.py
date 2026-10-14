@@ -22,7 +22,7 @@ from utils.email_service import send_booking_email
 from utils.auth_utils import require_reception_or_admin, require_admin, get_current_user
 from services import folio_resolver, payment_split
 from utils.audit import write_audit, _resolve_user_id
-from utils.owner_otp import consume_otp
+from utils.owner_otp import consume_otp, consume_otp_for_booking
 from utils.settings import (get_desk_pay_config, set_setting,
                             DESK_PAY_EDITABLE_KEYS, DESK_PAY_GATEWAY_KEY)
 from services import phonepe_client
@@ -795,6 +795,12 @@ def require_excess_return_permission(user=Depends(get_current_user)):
         raise HTTPException(status_code=403, detail="Access denied")
     return user
 
+def _bank_payments(db: Session, booking_id: int) -> list:
+    """v7j: the booking's live payments taken by bank transfer."""
+    return (db.query(Payment).filter(Payment.booking_id == booking_id, Payment.status == "paid",
+                                     Payment.method == "bank").all())
+
+
 def total_paid(db: Session, booking_id: int) -> float:
     """Sum of MONEY THE HOTEL RECEIVED for a booking. Recorded = Payment.status == 'paid'.
 
@@ -1038,6 +1044,10 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
                 _dup = [p for p in _dup if _target is None or db.query(FolioCharge).filter(
                     FolioCharge.payment_id == p.payment_id, FolioCharge.folio_id == _target.id).first()]
             _dup = _dup[0] if _dup else None
+            if _dup is not None and data.client_ref and _dup.client_ref == data.client_ref:
+                # the SAME press arriving twice at once (outbox re-flush racing the first) - it
+                # committed between the idempotency lookup above and here: hand back the original
+                return _desk_payment_response(db, _dup, duplicate=True)
             if _dup is not None:
                 _who = db.query(User).filter(User.user_id == _dup.collected_by).first() if _dup.collected_by else None
                 raise HTTPException(
@@ -1568,7 +1578,13 @@ def refund_payment(data: PaymentRefundRequest, db: Session = Depends(get_db),
     # Owner-approval OTP (prompt 11): opt-in, admin-editable in Settings (FE-12). Consumed here
     # so the code is only spent if the refund itself commits. 403 if missing/invalid/expired.
     if app_settings.get_fraud_config(db)["refund_requires_owner_otp"]:
-        consume_otp(db, data.owner_otp_id, data.owner_otp_code, "refund", user)
+        consume_otp(db, data.owner_otp_id, data.owner_otp_code,
+                    ("refund", "bank_refund") if payment.method == "bank" else "refund", user)
+    elif (user or {}).get("role") != "admin" and _bank_payments(db, payment.booking_id):
+        # v7j: even with the general refund code switched off, a bank-paid booking needs one
+        consume_otp_for_booking(db, data.owner_otp_id, data.owner_otp_code, "bank_refund",
+                                payment.booking_id, user,
+                                missing_detail="this guest paid by BANK transfer - a refund needs the owner's approval code")
 
     folio = folio_resolver.primary_folio(db, payment.booking_id)
     # Backlog v2 TBC-1: post the credit line to the folio even once the folio is
@@ -1733,6 +1749,16 @@ def return_excess(data: ExcessReturnRequest, db: Session = Depends(get_db),
             status_code=409,
             detail=f"Excess ₹{excess:,.2f} exceeds refundable desk payments — "
                    f"refund the online payment via Refund (admin) instead")
+
+    # v7j (owner): "room rent is 4000, they say the guest paid 5000 via bank but the guest paid only
+    # 4000, and they refund 1000 cash - 1000 is lost". A bank transfer is the one payment the desk
+    # cannot see arrive, so handing money back on a booking that has one needs the owner's code.
+    _approval = None
+    if (user or {}).get("role") != "admin" and _bank_payments(db, data.booking_id):
+        _approval = consume_otp_for_booking(
+            db, data.otp_id, data.otp_code, "bank_refund", data.booking_id, user,
+            missing_detail=f"this guest paid by BANK transfer - returning Rs {excess:,.2f} needs the "
+                           f"owner's approval code (the owner checks the bank statement first)")
 
     try:
         shift = _open_shift(db) if data.mode == "cash" else None

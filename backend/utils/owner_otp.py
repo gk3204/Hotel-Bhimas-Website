@@ -58,6 +58,8 @@ OTP_ACTIONS = frozenset({
     "lost_card_waive",         # v6m: reception waives the lost-key-card fee (charged by default)
     "alt_room_booking",        # v7g: book into an ALTERNATE room type because the booked type is full
     "no_show",                 # v7i: reception marks a booking a no-show (admin needs no code)
+    "early_checkout_drop",     # v7j: drop the unused nights of a WEBSITE booking at early check-out
+    "bank_refund",             # v7j: hand money back on a booking that was paid (partly) by BANK transfer
 })
 
 
@@ -300,6 +302,23 @@ def _sum_no_show(ctx):
             f"{money}) as a NO-SHOW - {ctx.get('reason') or 'no reason given'}")
 
 
+def _sum_early_checkout_drop(ctx):
+    b = ctx.get("booking") or {}
+    who = (ctx.get("guest") or {}).get("name") or b.get("guest_name") or "the guest"
+    return (f"Early check-out: drop {ctx.get('nights_dropped') or '?'} unused night(s) for {who} "
+            f"({_booking_label(ctx)}, {b.get('booking_source') or '?'}, {b.get('check_in') or '?'} to "
+            f"{b.get('check_out') or '?'}) - {_inr(ctx.get('credit') or 0)} goes back to the guest's bill"
+            + (f" - {ctx['reason']}" if ctx.get("reason") else ""))
+
+
+def _sum_bank_refund(ctx):
+    b = ctx.get("booking") or {}
+    who = (ctx.get("guest") or {}).get("name") or b.get("guest_name") or "the guest"
+    return (f"Refund {_inr(ctx.get('refund_amount') or 0)} to {who} ({_booking_label(ctx)}). This guest's payments "
+            f"include {_inr(ctx.get('bank_total') or 0)} by BANK transfer{(' (ref ' + ctx['bank_refs'] + ')') if ctx.get('bank_refs') else ''}"
+            f" - check your bank statement shows it before approving")
+
+
 def _sum_lost_card_waive(ctx):
     return (f"Waive the {_inr(abs(ctx.get('amount') or 0))} lost key card fee for "
             f"{_guest_label(ctx)} — {_rooms_label(ctx.get('rooms'))}")
@@ -309,6 +328,8 @@ _SUMMARY_BUILDERS = {
     "lost_card_waive": _sum_lost_card_waive,
     "alt_room_booking": _sum_alt_room_booking,
     "no_show": _sum_no_show,
+    "early_checkout_drop": _sum_early_checkout_drop,
+    "bank_refund": _sum_bank_refund,
     "refund": _sum_refund,
     "discount_below_floor": _sum_discount,
     "void": _sum_void,
@@ -466,6 +487,25 @@ def build_context(db, action: str, *, booking=None, rooms=None, folio=None, gues
         logger.warning(f"otp context: summary for {action} failed: {e}")
         ctx["summary"] = f"Approve: {action.replace('_', ' ')}"
     return ctx
+
+
+def consume_otp_for_booking(db, otp_id, code, action, booking_id, user=None, missing_detail=None):
+    """v7i/v7j: consume_otp, and the code must have been issued for THIS booking - a code the owner
+    released for booking A must not approve the same action on booking B. `missing_detail` is the
+    403 shown when no code was sent at all (the desk keys its approval panel on
+    'owner_otp_required'). Does NOT commit; on a mismatch the caller's transaction must roll back
+    (the raised HTTPException does that in every caller) so the code is not spent."""
+    if missing_detail and (not otp_id or not code):
+        raise HTTPException(status_code=403, detail=f"owner_otp_required: {missing_detail}")
+    otp = consume_otp(db, otp_id, code, action, user)
+    try:
+        ctx = json.loads(otp.context or "{}")
+    except (TypeError, ValueError):
+        ctx = {}
+    if ((ctx.get("booking") or {}).get("booking_id")) != booking_id:
+        db.rollback()
+        raise HTTPException(status_code=403, detail="This owner approval code was issued for another booking")
+    return otp
 
 
 def consume_otp(db, otp_id, code, action, user=None):

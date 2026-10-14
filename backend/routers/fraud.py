@@ -354,6 +354,18 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
     # {"booking": ...} in `context` would collide with build_context's own keyword
     # parameter and 500 the request.
     extras = safe_extras(data.context)
+    if data.action == "early_checkout_drop" and booking is not None:
+        from routers.reception import early_checkout_preview
+        extras.update(early_checkout_preview(db, booking))           # v7j: nights + credit, server-side
+    if data.action == "bank_refund" and booking is not None:
+        _bank = (db.query(Payment).filter(Payment.booking_id == booking.booking_id, Payment.status == "paid",
+                                          Payment.method == "bank").all())
+        extras["bank_total"] = round(sum(float(p.amount or 0) for p in _bank), 2)
+        extras["bank_refs"] = ", ".join(sorted({p.payment_id_gateway for p in _bank if p.payment_id_gateway}))[:120]
+        _fs = folio_resolver.folios_for_booking(db, booking.booking_id)
+        _excess = round(-sum(float(f.balance or 0) for f in _fs), 2)
+        # the excess the desk would return - or, for a single-payment refund, the amount asked
+        extras["refund_amount"] = _excess if _excess > 0 else round(float(amount or 0), 2)
     if data.action == "no_show" and booking is not None:
         # v7i: the owner judges a no-show by the money already taken - the server's figure,
         # never the desk's
