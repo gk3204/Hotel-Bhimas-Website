@@ -37,6 +37,7 @@ from services import folio_resolver
 from services import room_posting
 from utils import settings as app_settings
 from utils.audit import write_audit
+from utils.job_lock import job_lock
 
 logger = logging.getLogger(__name__)
 
@@ -330,11 +331,15 @@ def sweep_overstays(db: Session, *, now=None, dry_run=False, generated_by="sched
     # in four processes. The other four schedulers survive that by being upsert-idempotent; a
     # biller is not. This advisory lock is the single most important guard in the batch, and
     # it also covers a Railway rolling redeploy overlapping old and new instances.
-    locked = False
+    # v7l: on its OWN connection (utils/job_lock). It was taken on the ORM session, and the commit
+    # after billing a night returned that connection to the pool, so the unlock ran on another
+    # connection and the lock was stranded: on prod from 13:07 on 14 Oct every other worker's sweep
+    # skipped as "locked" and room 17 overstayed with no charge.
+    _lock = None
     if not dry_run:
-        locked = bool(db.execute(text("SELECT pg_try_advisory_lock(:k)"),
-                                 {"k": _SWEEP_LOCK_KEY}).scalar())
-        if not locked:
+        _lock = job_lock(db, _SWEEP_LOCK_KEY, "overstay sweep")
+        if not _lock.__enter__():
+            _lock.__exit__(None, None, None)
             logger.info("overstay sweep: another instance holds the lock, skipping")
             result["skipped"].append("locked")
             return result
@@ -364,12 +369,8 @@ def sweep_overstays(db: Session, *, now=None, dry_run=False, generated_by="sched
                 result["billed"] += 1
                 result["amount"] = round(result["amount"] + outcome["amount"], 2)
     finally:
-        if locked:
-            try:
-                db.execute(text("SELECT pg_advisory_unlock(:k)"), {"k": _SWEEP_LOCK_KEY})
-                db.commit()
-            except Exception as e:                              # pragma: no cover
-                logger.warning(f"overstay sweep: unlock failed: {e}")
+        if _lock is not None:
+            _lock.__exit__(None, None, None)
 
     if dry_run:
         result["amount"] = round(sum(c.get("would_charge") or 0 for c in result["candidates"]), 2)

@@ -27,6 +27,7 @@ from sqlalchemy import text
 from models import Booking, BookingItem, FraudAlert, Payment, RoomType
 from utils import availability
 from utils.audit import write_audit
+from utils.job_lock import job_lock
 
 logger = logging.getLogger(__name__)
 
@@ -215,28 +216,21 @@ def last_runs(db) -> dict:
 
 def reconcile_razorpay_locked(db, days: int = 2, kind: str = "quick") -> dict | None:
     """The scheduled sweep: one worker at a time (uvicorn runs several), never raises."""
-    lock_conn = None
-    try:
-        # v6m.6: the lock on its OWN connection (closing it releases it). On the ORM session, a commit
-        # inside the sweep returns that connection to the pool and the unlock runs elsewhere.
-        lock_conn = db.get_bind().connect()
-        got = lock_conn.execute(text("SELECT pg_try_advisory_lock(:k)"), {"k": _RECONCILE_LOCK_KEY}).scalar()
+    # v7l: utils/job_lock. "Closing it releases it" was wrong - close() on a POOLED connection only
+    # returns it to the pool, still holding the lock (prod 14 Oct: held from 09:57 by an idle
+    # connection, so the other workers' sweeps all skipped).
+    with job_lock(db, _RECONCILE_LOCK_KEY, "Razorpay reconcile") as got:
         if not got:
             return None
-        res = reconcile_razorpay(db, days=days, dry_run=False)
-        record_run(db, kind, days, res)
-        return res
-    except Exception as e:
-        logger.error(f"Razorpay reconcile sweep failed: {e}")
         try:
-            db.rollback()
-        except Exception:
-            pass
-        record_run(db, kind, days, None, error=str(e)[:200])
-        return None
-    finally:
-        if lock_conn is not None:
+            res = reconcile_razorpay(db, days=days, dry_run=False)
+            record_run(db, kind, days, res)
+            return res
+        except Exception as e:
+            logger.error(f"Razorpay reconcile sweep failed: {e}")
             try:
-                lock_conn.close()
+                db.rollback()
             except Exception:
                 pass
+            record_run(db, kind, days, None, error=str(e)[:200])
+            return None
