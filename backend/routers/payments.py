@@ -995,6 +995,9 @@ def _try_live_reconcile(db: Session, payment: Payment):
         logger.warning(f"live reconcile failed for payment {getattr(payment, 'payment_id', '?')}: {e}")
 
 
+DUP_WINDOW_MINUTES = 10   # v7h
+
+
 @router.post("/record")
 def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
                         user=Depends(require_reception_or_admin)):
@@ -1015,6 +1018,34 @@ def record_desk_payment(data: DeskPaymentRecord, db: Session = Depends(get_db),
             raise HTTPException(
                 status_code=409,
                 detail=f"Cannot record a payment against a '{booking.status}' booking")
+
+        # v7h (owner): "record + reg slip is done once but when I close and open it shows again, the
+        # receptionist presses it multiple times and receipts were added". On production 5 bookings
+        # have the same amount recorded twice within 26 s - 6 min (#396: Rs 2,050 cash twice, a
+        # no-show). The same booking, amount and mode inside the window is a double press until the
+        # desk says otherwise.
+        if not data.confirm_duplicate:
+            _dup = (db.query(Payment)
+                    .filter(Payment.booking_id == booking.booking_id, Payment.status == "paid",
+                            Payment.gateway == "desk", Payment.method == data.method,
+                            Payment.amount == Decimal(str(round(data.amount, 2))),
+                            Payment.created_at >= clock.now_utc() - timedelta(minutes=DUP_WINDOW_MINUTES))
+                    .order_by(Payment.created_at.desc()).all())
+            # a stay billed per room: room 10 and room 11 paying the same amount is two bills
+            # settling, not a double press - only the same ROOM's bill counts (v7e payment_id)
+            if _dup and data.room_id and folio_resolver.is_per_room(booking):
+                _target = folio_resolver.folio_by_room(db, booking).get(data.room_id)
+                _dup = [p for p in _dup if _target is None or db.query(FolioCharge).filter(
+                    FolioCharge.payment_id == p.payment_id, FolioCharge.folio_id == _target.id).first()]
+            _dup = _dup[0] if _dup else None
+            if _dup is not None:
+                _who = db.query(User).filter(User.user_id == _dup.collected_by).first() if _dup.collected_by else None
+                raise HTTPException(
+                    status_code=409,
+                    detail=(f"duplicate_payment: Rs {float(_dup.amount):,.2f} by {_dup.method} was already recorded "
+                            f"for this booking at {clock.to_local(_dup.created_at):%H:%M} by "
+                            f"{(_who.full_name or _who.username) if _who else 'the desk'} (receipt RCPT-{_dup.payment_id}). "
+                            f"If this is a SECOND payment, confirm it."))
 
         payment = Payment(
             booking_id=booking.booking_id,

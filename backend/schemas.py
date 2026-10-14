@@ -339,6 +339,9 @@ class DeskPaymentRecord(BaseModel):
     method: str = Field(..., pattern="^(cash|card|upi|bank)$")
     reference: Optional[str] = Field(None, max_length=100)   # UPI ref / card-machine slip no / bank txn
     client_ref: Optional[str] = Field(None, max_length=64)   # desktop uuid (offline outbox dedupe)
+    # v7h: the same booking + amount + mode within DUP_WINDOW_MINUTES is refused as a probable double
+    # press; a real second payment of that amount is recorded with confirm_duplicate = true.
+    confirm_duplicate: bool = False
     # v6e: WHICH room is paying, when the stay bills per room. Omitted (and always, on a stay
     # billed as a group) the money is applied across the open bills oldest-first. Naming the room
     # is what lets room 12 settle and leave while the rest of the party stays.

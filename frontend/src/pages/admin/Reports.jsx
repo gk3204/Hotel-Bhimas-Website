@@ -64,8 +64,8 @@ const REPORTS = {
   "cashier-summary": {
     label: "Cashier Summary",
     path: "cashier-summary",
-    dateParam: "day",
-    note: "Front-office collections for the day, grouped by payment mode with Guest check-out bills / Advance receipts / Paid-outs, plus unsettled and nil-amount checkouts.",
+    range: true,   // v7h: one day, or the dates you pick
+    note: "Front-office collections for the dates picked, grouped by payment mode with Guest check-out bills / Advance receipts / Paid-outs, plus unsettled and nil-amount checkouts, every invoice raised, and the rooms in house.",
     fetch: (p) => api.getCashierSummary(p),
     project: (d) => {
       const rows = [];
@@ -85,6 +85,10 @@ const REPORTS = {
       (d.unsettled || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", "", "", fmt(x.balance), "", "UNSETTLED", x.user || ""]));
       if ((d.nil_checkouts || []).length) rows.push({ kind: "section", label: "Checkout Bills With Nil Amount" });
       (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", "", "", fmt(x.balance), "", "NIL", x.user || ""]));
+      // v7h: every invoice raised in the period
+      if ((d.invoices || []).length) rows.push({ kind: "section", label: `Invoices Raised (${d.invoices.length}) - ${fmt(d.invoices_total)}` });
+      (d.invoices || []).forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room, x.guest || "", "", "", fmt(x.balance), "",
+        `INVOICE ${fmt(x.amount)}${x.prepaid ? ` (prepaid ${fmt(x.prepaid)})` : ""}${x.source ? ` - ${x.source}` : ""}`, x.user || ""]));
       // v7e: rooms in house (end of the day / now)
       if ((d.in_house || []).length) rows.push({ kind: "section", label: `Rooms In House (${d.in_house.length})` });
       (d.in_house || []).forEach((x) => rows.push([`#${x.booking_id}`, (x.checked_in || "").split(" ")[0], (x.checked_in || "").split(" ")[1] || "",

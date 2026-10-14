@@ -1037,32 +1037,40 @@ def _online_payment(p) -> bool:
             and not getattr(p, "collect_method", None))
 
 
-def cashier_summary_data(db, day):
+def cashier_summary_data(db, day, day_to=None):
     """Front-office cashier summary for one day, in the legacy printout shape: paid Payments grouped
     by payment MODE (cash/card/upi/bank), each split into Guest Check-out Bills / Advance Receipts /
     Paid-outs, with per-row Bill/Vou no, room, guest, receipt, payment, balance, CR no, remarks, user.
     Plus per-mode totals, a grand total, unsettled checkout bills, and nil-amount checkouts. Uses our
     invoice + payment ids for the bill/voucher references."""
+    # v7h (owner): "for selected dates" - a range as well as one day
+    day_to = day_to or day
+    _bd = clock.business_date_sql
     pays = (db.query(Payment).filter(Payment.status == "paid",
-                                     clock.business_date_sql(Payment.created_at) == day)
+                                     _bd(Payment.created_at) >= day, _bd(Payment.created_at) <= day_to)
             .order_by(Payment.created_at).all())
-    from models import PrepaidReceipt
+    from models import PrepaidReceipt, Expense, Invoice
     prepaid = (db.query(PrepaidReceipt)
-               .filter(clock.business_date_sql(PrepaidReceipt.issued_at) == day)
+               .filter(_bd(PrepaidReceipt.issued_at) >= day, _bd(PrepaidReceipt.issued_at) <= day_to)
                .order_by(PrepaidReceipt.issued_at).all())
-    from models import Expense
-    expenses = (db.query(Expense).filter(clock.business_date_sql(Expense.created_at) == day)
+    expenses = (db.query(Expense).filter(_bd(Expense.created_at) >= day, _bd(Expense.created_at) <= day_to)
                 .order_by(Expense.created_at).all())
-    _s, _e = clock.business_day_bounds(day)
+    _s, _e = clock.business_day_bounds(day, day_to)
     # v7e: paid-outs are the refunds PAID OUT this day - a refund today of yesterday's payment was
     # missing from today and filed under yesterday
     _ron = func.coalesce(Payment.refunded_at, Payment.created_at)
     refunds_today = (db.query(Payment).filter(Payment.refund_status == "completed",
-                                              clock.business_date_sql(_ron) == day)
+                                              _bd(_ron) >= day, _bd(_ron) <= day_to)
                      .order_by(_ron).all())
-    out = _cashier_summary_core(db, receipts=pays, refunds=refunds_today, checkouts_day=day, prepaid=prepaid,
-                                expenses=expenses, in_house_at=min(_e, clock.now_utc()))
-    return {"day": str(day), **out}
+    # v7h (owner): "all invoices for the shift should come in shift summary and in cashier summary"
+    invoices = (db.query(Invoice).filter(_bd(Invoice.created_at) >= day, _bd(Invoice.created_at) <= day_to)
+                .order_by(Invoice.created_at).all())
+    out = _cashier_summary_core(db, receipts=pays, refunds=refunds_today,
+                                checkouts_day=(day if day_to == day else None),
+                                checkouts_window=(None if day_to == day else (_s, _e)),
+                                prepaid=prepaid, expenses=expenses, invoices=invoices,
+                                in_house_at=min(_e, clock.now_utc()))
+    return {"day": str(day), "day_to": str(day_to), **out}
 
 
 def cashier_summary_for_shift(db, shift):
@@ -1091,8 +1099,12 @@ def cashier_summary_for_shift(db, shift):
     # and settled with no receipt (nil amount) - with who checked them out.
     from models import Expense
     expenses = db.query(Expense).filter(Expense.shift_id == shift.id).order_by(Expense.created_at).all()
+    from models import Invoice
+    invoices = (db.query(Invoice).filter(Invoice.created_at >= shift.opened_at, Invoice.created_at < end)
+                .order_by(Invoice.created_at).all())          # v7h: the invoices raised in this shift
     out = _cashier_summary_core(db, receipts=receipts, refunds=refunds, checkouts_day=None, prepaid=prepaid,
-                                checkouts_window=(shift.opened_at, end), expenses=expenses, in_house_at=end)
+                                checkouts_window=(shift.opened_at, end), expenses=expenses, in_house_at=end,
+                                invoices=invoices)
     return {"shift_id": shift.id, **out}
 
 
@@ -1160,7 +1172,7 @@ def _in_house_rows(db, at_utc):
 
 
 def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=None, checkouts_window=None,
-                          expenses=None, in_house_at=None):
+                          expenses=None, in_house_at=None, invoices=None):
     """Shared body of the two cashier summaries. `receipts` = paid Payment rows to list as
     check-out bills / advances; `refunds` = Payment rows whose completed refund is a paid-out.
     `checkouts_day` adds the unsettled / nil-amount checkout sections for that calendar day."""
@@ -1322,8 +1334,35 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     # v7e (owner): "Cashier summary should also have rooms that are in house"
     in_house = _in_house_rows(db, in_house_at) if in_house_at is not None else []
 
+    # v7h (owner): every invoice raised in the period - an OTA stay settled by its channel, a bill
+    # with no receipt at the desk, a per-room bill - so none is missing from the summary.
+    inv_rows = []
+    for inv in (invoices or []):
+        b = db.query(Booking).filter(Booking.booking_id == inv.booking_id).first()
+        f = db.query(Folio).filter(Folio.id == inv.folio_id).first()
+        at = _loc(inv.created_at)
+        try:
+            from utils.booking_source import source_label as _src
+            src = _src(db, b) if b else ""
+        except Exception:
+            src = ""
+        prepaid_amt = round(float(getattr(b, "prepaid_amount", 0) or 0), 2) if b else 0.0
+        inv_rows.append({
+            "bill_no": inv.invoice_no, "booking_id": inv.booking_id,
+            "date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
+            "room": (_bill_room_label(db, f) or _booking_room_label(db, inv.booking_id, rcache)),
+            "guest": (b.display_guest_name if b else None),
+            "amount": round(float(inv.grand_total or 0), 2),
+            "prepaid": prepaid_amt,
+            "balance": round(float(inv.balance_due or 0), 2),
+            "source": src,
+            "user": _user_name(db, inv.created_by),
+        })
+
     return {"modes": mode_rows, "grand": grand,
-            "unsettled": unsettled, "nil_checkouts": nil_checkouts, "in_house": in_house}
+            "unsettled": unsettled, "nil_checkouts": nil_checkouts, "in_house": in_house,
+            "invoices": inv_rows,
+            "invoices_total": round(sum(x["amount"] for x in inv_rows), 2)}
 
 
 def _cashier_table(data):
@@ -1361,6 +1400,13 @@ def _cashier_table(data):
         for x in data["nil_checkouts"]:
             rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "", "", "",
                          x["balance"], "", "NIL", x.get("user") or ""])
+    if data.get("invoices"):
+        rows.append({"section": f"Invoices Raised ({len(data['invoices'])}) - Rs {data.get('invoices_total', 0):,.2f}"})
+        for x in data["invoices"]:
+            rem = f"INVOICE Rs {x['amount']:,.2f}" + (f" (prepaid {x['prepaid']:,.2f})" if x.get("prepaid") else "") \
+                + (f" - {x['source']}" if x.get("source") else "")
+            rows.append([x["bill_no"], x["date"], x["time"], x["room"], x.get("guest") or "", "", "",
+                         x["balance"], "", rem, x.get("user") or ""])
     if data.get("in_house"):
         rows.append({"section": f"Rooms In House ({len(data['in_house'])})"})
         for x in data["in_house"]:
@@ -2078,14 +2124,21 @@ def occupancy_analysis_report(as_on: str | None = Query(None), format: str = Que
 
 
 @router.get("/cashier-summary", dependencies=[Depends(require_admin)])
-def cashier_summary_report(day: str | None = Query(None), format: str = Query("json"),
+def cashier_summary_report(day: str | None = Query(None), from_: str | None = Query(None, alias="from"),
+                           to: str | None = Query(None), format: str = Query("json"),
                            db: Session = Depends(get_db)):
-    """Adapted Front-Office Cashier Summary for one day: receipts by method (advance vs checkout),
-    paid-outs, and unsettled checkout bills."""
-    d = _parse_date(day, "day") if day else date.today()
-    data = cashier_summary_data(db, d)
+    """Adapted Front-Office Cashier Summary for one day - or v7h, a range (from / to): receipts by method
+    (advance vs checkout), paid-outs, unsettled / nil checkout bills, the invoices raised and the rooms
+    in house."""
+    if from_ or to:
+        d, d2 = _range(from_, to)
+    else:
+        d = _parse_date(day, "day") if day else date.today()
+        d2 = d
+    data = cashier_summary_data(db, d, d2)
     cols, rows, totals = _cashier_table(data)
-    meta = {"Day": f"{d:%d-%m-%Y}", "Unsettled bills": len(data["unsettled"]), **_meta()}
+    meta = {("Day" if d == d2 else "Period"): (f"{d:%d-%m-%Y}" if d == d2 else f"{d:%d-%m-%Y} to {d2:%d-%m-%Y}"),
+            "Unsettled bills": len(data["unsettled"]), "Invoices": len(data.get("invoices", [])), **_meta()}
     return _export_or_json(format, data, title="Front-Office Cashier Summary", columns=cols,
                            rows=rows, totals_row=totals, meta=meta, filename="cashier_summary")
 
