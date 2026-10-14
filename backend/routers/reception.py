@@ -554,16 +554,20 @@ def booking_checkout_moment(booking: Booking, ref=None, item: BookingItem | None
     _extended = (item.checkout_extended_until if item is not None else None)         or getattr(booking, "checkout_extended_until", None)
     _anchor_src = item if (item is not None and item.checked_in_at) else booking
     nights = max(1, (_check_out - booking.check_in).days)
+    # v5m: an hourly extension (checkout_extended_until) is an explicit checkout moment that beats
+    # every derived one — card window, overstay sweep and reminders all follow it.
+    # v7k: checked BEFORE the OTA noon rule. It came after it, so an OTA guest's paid late checkout
+    # was ignored everywhere: prod #589 (Goibibo) paid Rs 630 to stay until 15:00, the extension
+    # card was cut to expire at 13:00, and the 13:07 overstay sweep billed a whole night (Rs 1,995)
+    # and killed the card.
+    if _extended:
+        return _extended
     # OTA stays are contracted NOON-to-NOON: checkout is always the checkout date @ 12:00, never
     # derived from the actual (often late) check-in moment — even under the property's 24h policy.
     # This one anchor feeds card expiry, overstay auto-billing and the reminders, so all of them
     # become fixed 12→12 for an OTA booking together.
     if ota_service.is_ota_source(booking.booking_source):
         return datetime.combine(_check_out, time(hour=12))
-    # v5m: an hourly extension (checkout_extended_until) is an explicit checkout moment that beats
-    # every derived one — card window, overstay sweep and reminders all follow it.
-    if _extended:
-        return _extended
     if _checkout_mode() == "fixed":
         return datetime.combine(_check_out, time(hour=_checkout_hour()))
     # v5m: the 24h clock runs from stay_started_at (set at check-in by the arrival rules — the
