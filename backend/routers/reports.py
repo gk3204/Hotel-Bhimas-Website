@@ -1178,8 +1178,21 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     `checkouts_day` adds the unsettled / nil-amount checkout sections for that calendar day."""
     from models import Folio
     from routers.folio import _get_invoice
+    from utils.booking_source import source_label as _srclabel
     rcache = {}   # booking_id -> room label
+    scache = {}   # booking_id -> source label (v7n)
     modes = {}    # mode -> {section -> [rows], "receipt","payment"}
+
+    def _src(b):
+        """v7n (owner): where the stay came from - Walk-in, MakeMyTrip, Website, Agent ..."""
+        if b is None:
+            return ""
+        if b.booking_id not in scache:
+            try:
+                scache[b.booking_id] = _srclabel(db, b) or ""
+            except Exception:
+                scache[b.booking_id] = (b.booking_source or "").replace("_", " ").title()
+        return scache[b.booking_id]
 
     def _mode(m):
         return modes.setdefault(m, {"checkout": [], "advance": [], "paidout": [], "prepaid": [],
@@ -1198,6 +1211,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
         return b, folio, {
             "date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
             "room": room, "guest": (b.display_guest_name if b else None), "booking_id": p.booking_id,
+            "source": _src(b),
             "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
             # CR No = the card/UPI transaction reference (gateway txn id), blank for manual cash.
             # (client_ref is the desk's offline-outbox dedupe UUID — internal, not a cashier ref.)
@@ -1267,6 +1281,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
         mc = _mode("cash")
         mc["paidout"].append({"date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
                               "room": "—", "guest": None, "booking_id": None, "balance": 0.0,
+                              "source": "Expense",
                               "bill_no": f"EXP-{e.id}", "cr_no": getattr(e, "receipt_url", None) or "",
                               "receipt": 0.0, "payment": round(amt, 2),
                               "remarks": f"EXPENSE - {(e.category or '').upper()}: {e.description or ''}"[:120],
@@ -1286,12 +1301,18 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
                 "date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
                 "room": _booking_room_label(db, pr.booking_id, rcache),
                 "guest": (b.display_guest_name if b else None), "booking_id": pr.booking_id,
+                "source": _src(b),
                 "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
                 "bill_no": receipt_no(pr), "cr_no": pr.reference or "",
                 "receipt": round(float(pr.amount or 0), 2), "payment": 0.0,
                 "remarks": mode_label(pr).upper(), "user": _user_name(db, pr.issued_by)})
             mp["receipt"] += float(pr.amount or 0)
 
+    # v7n (owner): each section in document-number order - RCPT-9 before RCPT-10, RFND, PRE, EXP,
+    # the INV/... series - not in the order the money happened to be taken.
+    for v in modes.values():
+        for k in ("checkout", "advance", "paidout", "prepaid"):
+            v[k].sort(key=lambda x: doc_number_key(x.get("bill_no")))
     mode_rows = []
     for m in sorted(modes, key=lambda k: (k in _CASHIER_MEMO_MODES, k)):
         v = modes[m]
@@ -1321,7 +1342,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
         _out = _loc(out_at)
         rowc = {"bill_no": (inv.invoice_no if inv else f"F{f.id}" if f else "—"),
                 "room": room, "guest": (b.display_guest_name or None),
-                "booking_id": b.booking_id, "balance": bal,
+                "booking_id": b.booking_id, "balance": bal, "source": _src(b),
                 # v7d (owner): when, and which reception user checked them out
                 "date": _out.strftime("%d/%m/%y") if _out else "",
                 "time": _out.strftime("%H:%M") if _out else "",
@@ -1331,8 +1352,13 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
         elif b.booking_id not in receipted_bookings:
             nil_checkouts.append(rowc)
 
+    unsettled.sort(key=lambda x: doc_number_key(x.get("bill_no")))
+    nil_checkouts.sort(key=lambda x: doc_number_key(x.get("bill_no")))
+
     # v7e (owner): "Cashier summary should also have rooms that are in house"
     in_house = _in_house_rows(db, in_house_at) if in_house_at is not None else []
+    for x in in_house:
+        x["source"] = _src(db.query(Booking).filter(Booking.booking_id == x["booking_id"]).first())
 
     # v7h (owner): every invoice raised in the period - an OTA stay settled by its channel, a bill
     # with no receipt at the desk, a per-room bill - so none is missing from the summary.
@@ -1359,16 +1385,24 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             "user": _user_name(db, inv.created_by),
         })
 
+    inv_rows.sort(key=lambda x: doc_number_key(x.get("bill_no")))
     return {"modes": mode_rows, "grand": grand,
             "unsettled": unsettled, "nil_checkouts": nil_checkouts, "in_house": in_house,
             "invoices": inv_rows,
             "invoices_total": round(sum(x["amount"] for x in inv_rows), 2)}
 
 
+def doc_number_key(no):
+    """v7n: sort document numbers as numbers - RCPT-9 < RCPT-10, INV/2026-27/00009 < .../00010."""
+    import re
+    parts = re.split(r"(\d+)", str(no or ""))
+    return tuple((0, int(p)) if p.isdigit() else (1, p) for p in parts if p != "")
+
+
 def _cashier_table(data):
     """Flatten the grouped cashier summary into (columns, rows, totals) for the CSV/PDF export —
     mode + section header rows, then detail rows, then a per-mode total, then unsettled / nil sections."""
-    cols = ["Bill/Vou", "Date", "Time", "Room", "Guest", "Receipt", "Payment", "Balance",
+    cols = ["Bill/Vou", "Date", "Time", "Room", "Guest", "Source", "Receipt", "Payment", "Balance",
             "CR No", "Remarks", "User"]
 
     def _sub(label):
@@ -1382,39 +1416,38 @@ def _cashier_table(data):
             rows.append({"section": f"   {sec['label']}"})
             for x in sec["rows"]:
                 guest = " · ".join(str(v) for v in (x.get("guest"), f"#{x['booking_id']}" if x.get("booking_id") else None) if v)
-                rows.append([x["bill_no"], x["date"], x["time"], x["room"], guest,
+                rows.append([x["bill_no"], x["date"], x["time"], x["room"], guest, x.get("source") or "",
                              x["receipt"] or "", x["payment"] or "", x["balance"], x["cr_no"],
                              x["remarks"] or "", x["user"] or ""])
         tr = _sub(f"Total ({md['label']})")
-        tr[5], tr[6] = md["receipt"], md["payment"]
+        tr[6], tr[7] = md["receipt"], md["payment"]
         if md.get("memo"):
-            tr[9] = "MEMO - not in grand total"
+            tr[10] = "MEMO - not in grand total"
         rows.append({"subtotal": tr})
     if data["unsettled"]:
         rows.append({"section": "Unsettled Checkout Bills"})
         for x in data["unsettled"]:
-            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "", "", "",
-                         x["balance"], "", "UNSETTLED", x.get("user") or ""])
+            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "",
+                         x.get("source") or "", "", "", x["balance"], "", "UNSETTLED", x.get("user") or ""])
     if data["nil_checkouts"]:
         rows.append({"section": "Checkout Bills With Nil Amount"})
         for x in data["nil_checkouts"]:
-            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "", "", "",
-                         x["balance"], "", "NIL", x.get("user") or ""])
+            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "",
+                         x.get("source") or "", "", "", x["balance"], "", "NIL", x.get("user") or ""])
     if data.get("invoices"):
         rows.append({"section": f"Invoices Raised ({len(data['invoices'])}) - Rs {data.get('invoices_total', 0):,.2f}"})
         for x in data["invoices"]:
-            rem = f"INVOICE Rs {x['amount']:,.2f}" + (f" (prepaid {x['prepaid']:,.2f})" if x.get("prepaid") else "") \
-                + (f" - {x['source']}" if x.get("source") else "")
-            rows.append([x["bill_no"], x["date"], x["time"], x["room"], x.get("guest") or "", "", "",
-                         x["balance"], "", rem, x.get("user") or ""])
+            rem = f"INVOICE Rs {x['amount']:,.2f}" + (f" (prepaid {x['prepaid']:,.2f})" if x.get("prepaid") else "")
+            rows.append([x["bill_no"], x["date"], x["time"], x["room"], x.get("guest") or "", x.get("source") or "",
+                         "", "", x["balance"], "", rem, x.get("user") or ""])
     if data.get("in_house"):
         rows.append({"section": f"Rooms In House ({len(data['in_house'])})"})
         for x in data["in_house"]:
             _d, _t = (x.get("checked_in") or " ").split(" ", 1) if x.get("checked_in") else ("", "")
-            rows.append([f"#{x['booking_id']}", _d, _t, x["room"], x.get("guest") or "", "", "",
-                         x["balance"], "", f"IN HOUSE - out {x.get('check_out') or ''}", ""])
+            rows.append([f"#{x['booking_id']}", _d, _t, x["room"], x.get("guest") or "", x.get("source") or "",
+                         "", "", x["balance"], "", f"IN HOUSE - out {x.get('check_out') or ''}", ""])
     g = data["grand"]
-    totals = ["GRAND TOTAL", "", "", "", "", g["receipt"], g["payment"], "", "", f"net {g['net']}", ""]
+    totals = ["GRAND TOTAL", "", "", "", "", "", g["receipt"], g["payment"], "", "", f"net {g['net']}", ""]
     return cols, rows, totals
 
 

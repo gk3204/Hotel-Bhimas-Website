@@ -2470,7 +2470,7 @@ def early_checkout_preview(db, booking):
     new_co = _early_checkout_new_co(db, booking, datetime.now())
     ids = [f.id for f in folio_resolver.folios_for_booking(db, booking.booking_id)]
     lines = (db.query(FolioCharge)
-               .filter(FolioCharge.folio_id.in_(ids), FolioCharge.type == "room",
+               .filter(FolioCharge.folio_id.in_(ids), FolioCharge.type.in_(("room", "extra_person")),
                        FolioCharge.charge_date >= new_co, FolioCharge.reversal_of_id.is_(None),
                        FolioCharge.void == False).all()) if ids else []  # noqa: E712
     return {"nights_dropped": max(0, (booking.check_out - new_co).days),
@@ -2530,9 +2530,10 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
 
         nights_dropped = (booking.check_out - new_co).days
         # Unused booked room-nights: non-voided room lines dated on/after the new check-out.
+        # v7n: and the extra-person nights on them (charged per night now).
         lines = (db.query(FolioCharge)
                    .filter(FolioCharge.folio_id.in_([_f.id for _f in _folios]),
-                           FolioCharge.type == "room",
+                           FolioCharge.type.in_(("room", "extra_person")),
                            FolioCharge.charge_date >= new_co,
                            FolioCharge.reversal_of_id.is_(None),
                            FolioCharge.void == False)  # noqa: E712
@@ -2557,8 +2558,11 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
 
         before = {"check_out": str(booking.check_out), "grand_total": float(booking.grand_total or 0),
                   "folio_balance": bal_before}
+        room_credit = round(sum(float(l.amount or 0) for l in lines if l.type == "room"), 2)
         for line in lines:
             _void_charge_row(db, line, "Early check-out — unused night dropped", user)
+            if line.type != "room":
+                continue        # an extra-person night: voided, but never part of the booked total
             item = db.query(BookingItem).filter(
                 BookingItem.booking_item_id == line.booking_item_id).first()
             if item:
@@ -2574,8 +2578,8 @@ def early_checkout(data: EarlyCheckoutRequest, db: Session = Depends(get_db),
         for _it in target_items(booking, getattr(data, "room_ids", None)):
             _it.check_out = new_co
         sync_booking_from_items(booking)
-        booking.total_amount = round(float(booking.total_amount or 0) - credit, 2)
-        booking.grand_total = round(float(booking.grand_total or 0) - credit, 2)
+        booking.total_amount = round(float(booking.total_amount or 0) - room_credit, 2)
+        booking.grand_total = round(float(booking.grand_total or 0) - room_credit, 2)
         # The stay window just got shorter — the card now outlives the stay, so it must be re-cut.
         booking.card_reencode_required = True
 
@@ -3132,6 +3136,8 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
                 "overstay_night_charged": overstay_night,
                 "items": preview["per_item"],
                 "quoted_amount": quoted, "applied_amount": None,
+                # v7n: the extra persons' nights are added with the room nights (not in the quote)
+                "extra_person_amount": float(preview.get("extra_person_amount") or 0),
                 "comped": comped,
                 "requires_reason": applied != quoted,
                 "requires_admin": _extend_waive_requires_admin(),
@@ -3141,7 +3147,7 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
                 "requires_owner_otp": bool(needs_owner_otp),
                 "folio_id": folio.id,
                 "folio_balance_before": balance_before,
-                "folio_balance_after": round(balance_before + applied, 2),
+                "folio_balance_after": round(balance_before + applied + float(preview.get("extra_person_amount") or 0), 2),
                 "grand_total_before": grand_before,
                 "grand_total_after": round(grand_before + applied, 2),
                 "posted_charge_ids": [], "superseded_card_ids": [],

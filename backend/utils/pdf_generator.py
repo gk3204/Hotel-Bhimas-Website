@@ -1619,8 +1619,9 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
     safe = re.sub(r"[^A-Za-z0-9]+", "_", (title or "report")).strip("_").lower() or "report"
     file_path = os.path.join(tempfile.gettempdir(), f"report_{safe}.pdf")
 
-    # v7m: a wide report (the check-out summary has 18 columns) prints landscape, smaller, fitted.
-    wide = len(columns or []) > 12
+    # v7m: a wide report (the check-out summary has 18 columns, the cashier summary 12 since v7n)
+    # prints landscape, smaller, fitted.
+    wide = len(columns or []) >= 12
     doc = SimpleDocTemplate(file_path, pagesize=(landscape(A4) if wide else A4),
                             rightMargin=22, leftMargin=22, topMargin=22, bottomMargin=22)
     styles = getSampleStyleSheet()

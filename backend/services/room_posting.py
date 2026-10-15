@@ -142,6 +142,37 @@ def _apply_override(amounts: list, override_total, quoted_grand: float) -> list:
     return [each] * (len(amounts) - 1) + [round(item_share - each * (len(amounts) - 1), 2)]
 
 
+def _post_extra_person_nights(db: Session, booking: Booking, room_charges, uid, posting_reason) -> float:
+    """v7n: for each room night just posted, repeat the room's extra-person line from the night
+    before (same persons, same price, same slab). Idempotent per (room, night): an extra-person line
+    already on that night - even a voided one - is never posted twice."""
+    total = 0.0
+    for rc in room_charges:
+        if not rc.booking_item_id or not rc.charge_date:
+            continue
+        exists = db.query(FolioCharge.id).filter(
+            FolioCharge.type == "extra_person", FolioCharge.booking_item_id == rc.booking_item_id,
+            FolioCharge.charge_date == rc.charge_date, FolioCharge.reversal_of_id.is_(None)).first()
+        if exists:
+            continue
+        prev = (db.query(FolioCharge)
+                .filter(FolioCharge.type == "extra_person", FolioCharge.booking_item_id == rc.booking_item_id,
+                        FolioCharge.charge_date == rc.charge_date - timedelta(days=1),
+                        FolioCharge.void == False, FolioCharge.reversal_of_id.is_(None))  # noqa: E712
+                .order_by(FolioCharge.id).all())
+        for p in prev:
+            desc = (p.description or "Extra person")
+            old = f"{p.charge_date:%d %b %Y}"
+            desc = desc.replace(old, f"{rc.charge_date:%d %b %Y}") if old in desc else f"{desc} — {rc.charge_date:%d %b %Y}"
+            db.add(FolioCharge(
+                folio_id=rc.folio_id, type="extra_person", description=desc[:200], qty=p.qty,
+                unit_price=p.unit_price, amount=p.amount, gst_percent=p.gst_percent, posted_by=uid,
+                room_id=p.room_id, booking_item_id=rc.booking_item_id, charge_date=rc.charge_date,
+                posting_reason=posting_reason))
+            total = round(total + float(p.amount or 0), 2)
+    return total
+
+
 def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date_to: date, *,
                      user=None,
                      posting_reason: str = REASON_CHECKIN,
@@ -287,6 +318,12 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
             })
         posted.extend(item_posted)
 
+    # v7n (owner): an extra person is charged for every night - a night added here (extend / overstay)
+    # carries the extra persons the room had on the night before, at that night's price.
+    extra_amount = 0.0
+    if price_mode == PRICE_QUOTE and posted:
+        extra_amount = _post_extra_person_nights(db, booking, posted, uid, posting_reason)
+
     db.flush()   # so the caller sees ids, and so the unique index fires here not at commit
     if recompute:
         from routers.folio import _recompute      # local: routers.folio imports services
@@ -297,6 +334,7 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
         "posted": [c.id for c in posted],
         "skipped": sorted(set(skipped)),
         "amount": round(total_posted, 2),
+        "extra_person_amount": round(extra_amount, 2),     # v7n: not in "amount" (room nights only)
         "quoted_amount": round(quoted_grand, 2) if price_mode == PRICE_QUOTE else None,
         "per_item": per_item,
         "comped": False,

@@ -73,31 +73,32 @@ const REPORTS = {
         rows.push({ kind: "section", label: m.label });
         (m.sections || []).forEach((sec) => {
           rows.push({ kind: "section", label: `  ${sec.label}` });
+          // v7n: a Source column; the server sends each section in document-number order
           sec.rows.forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room,
-            [x.guest, x.booking_id ? `#${x.booking_id}` : ""].filter(Boolean).join(" · "),
+            [x.guest, x.booking_id ? `#${x.booking_id}` : ""].filter(Boolean).join(" · "), x.source || "",
             x.receipt ? fmt(x.receipt) : "", x.payment ? fmt(x.payment) : "", fmt(x.balance),
             x.cr_no, x.remarks || "", x.user || ""]));
         });
-        rows.push({ kind: "subtotal", cells: [`Total (${m.label})`, "", "", "", "",
+        rows.push({ kind: "subtotal", cells: [`Total (${m.label})`, "", "", "", "", "",
           fmt(m.receipt), fmt(m.payment), "", "", m.memo ? "MEMO - not in grand total" : "", ""] });
       });
       if ((d.unsettled || []).length) rows.push({ kind: "section", label: "Unsettled Checkout Bills" });
-      (d.unsettled || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", "", "", fmt(x.balance), "", "UNSETTLED", x.user || ""]));
+      (d.unsettled || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "", "UNSETTLED", x.user || ""]));
       if ((d.nil_checkouts || []).length) rows.push({ kind: "section", label: "Checkout Bills With Nil Amount" });
-      (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", "", "", fmt(x.balance), "", "NIL", x.user || ""]));
+      (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "", "NIL", x.user || ""]));
       // v7h: every invoice raised in the period
       if ((d.invoices || []).length) rows.push({ kind: "section", label: `Invoices Raised (${d.invoices.length}) - ${fmt(d.invoices_total)}` });
-      (d.invoices || []).forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room, x.guest || "", "", "", fmt(x.balance), "",
-        `INVOICE ${fmt(x.amount)}${x.prepaid ? ` (prepaid ${fmt(x.prepaid)})` : ""}${x.source ? ` - ${x.source}` : ""}`, x.user || ""]));
+      (d.invoices || []).forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "",
+        `INVOICE ${fmt(x.amount)}${x.prepaid ? ` (prepaid ${fmt(x.prepaid)})` : ""}`, x.user || ""]));
       // v7e: rooms in house (end of the day / now)
       if ((d.in_house || []).length) rows.push({ kind: "section", label: `Rooms In House (${d.in_house.length})` });
       (d.in_house || []).forEach((x) => rows.push([`#${x.booking_id}`, (x.checked_in || "").split(" ")[0], (x.checked_in || "").split(" ")[1] || "",
-        x.room, x.guest || "", "", "", fmt(x.balance), "", `IN HOUSE - out ${x.check_out || ""}`, ""]));
+        x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "", `IN HOUSE - out ${x.check_out || ""}`, ""]));
       return {
-        columns: ["Bill/Vou", "Date", "Time", "Room", "Guest", "Receipt", "Payment", "Balance",
+        columns: ["Bill/Vou", "Date", "Time", "Room", "Guest", "Source", "Receipt", "Payment", "Balance",
           "CR No", "Remarks", "User"],
         rows,
-        totals: ["GRAND TOTAL", "", "", "", "", fmt(d.grand.receipt), fmt(d.grand.payment), "", "",
+        totals: ["GRAND TOTAL", "", "", "", "", "", fmt(d.grand.receipt), fmt(d.grand.payment), "", "",
           `net ${fmt(d.grand.net)}`, ""],
       };
     },

@@ -783,8 +783,11 @@ def post_charge(folio_id: int, data: FolioChargeCreate, db: Session = Depends(ge
         raise HTTPException(status_code=500, detail="Failed to post charge")
 
 
-# --- Extra person (v6l) ---------------------------------------------------------------------------
-# A one-time charge per extra person, priced by the ROOM TYPE's AC flag from web Settings, before GST
+# --- Extra person (v6l; per night since v7n) -------------------------------------------------------
+# v7n (owner): "extra person charges have to be computed for each day stayed rather than one time".
+# One line per remaining night of the room's stay, dated like the room nights, so an extension or the
+# overstay sweep adds the new nights (services/room_posting) and an early check-out drops them.
+# Was: a one-time charge per extra person, priced by the ROOM TYPE's AC flag from web Settings, before GST
 # (GST added on top; the line carries that slab). Server-priced so the desk cannot disagree with
 # Settings, and posted on the ROOM's bill when the stay bills per room.
 
@@ -803,8 +806,20 @@ def _extra_person_rooms(db: Session, folio: Folio, booking: Booking) -> list[dic
                     "room_id": i.room_id,
                     "room_number": i.room.room_number if i.room is not None else None,
                     "room_type": rt.name if rt else None,
-                    "is_ac": is_ac, "price": base, "price_incl_gst": incl})
+                    "is_ac": is_ac, "price": base, "price_incl_gst": incl,
+                    "nights": len(extra_person_nights(booking, i))})
     return out
+
+
+def extra_person_nights(booking: Booking, item) -> list:
+    """v7n: the nights an extra person added NOW is charged for - tonight (the hotel's business
+    date, or the stay's first night if that is later) up to the room's check-out. On the check-out
+    day itself (a late add) it is the last night, so it is never zero."""
+    co = (item.check_out if item is not None and item.check_out else booking.check_out)
+    start = max(booking.check_in, clock.business_today())
+    if start >= co:
+        start = co - timedelta(days=1)
+    return [start + timedelta(days=n) for n in range((co - start).days)]
 
 
 @router.get("/{folio_id}/extra-person")
@@ -849,27 +864,37 @@ def post_extra_person(folio_id: int, data: ExtraPersonRequest, db: Session = Dep
             _ensure_chargeable(db, target)
         label = f" — Room {pick['room_number']}" if pick["room_number"] else ""
         note = f" ({data.note.strip()})" if data.note and data.note.strip() else ""
-        amount = round(pick["price_incl_gst"] * data.persons, 2)
-        charge = FolioCharge(
-            folio_id=target.id,
-            type=app_settings.EXTRA_PERSON_CHARGE_TYPE,
-            description=(f"Extra person × {data.persons}{label} "
-                         f"({'AC' if pick['is_ac'] else 'Non-AC'} ₹{pick['price']:,.0f} + "
-                         f"{cfg['gst_percent']:g}% GST){note}")[:200],
-            qty=data.persons,
-            unit_price=pick["price_incl_gst"],
-            amount=amount,
-            gst_percent=cfg["gst_percent"],
-            posted_by=_resolve_user_id(db, user),
-            room_id=pick["room_id"],
-        )
-        db.add(charge)
+        per_night = round(pick["price_incl_gst"] * data.persons, 2)
+        nights = extra_person_nights(booking, item)
+        uid = _resolve_user_id(db, user)
+        charges = []
+        for night in nights:
+            charge = FolioCharge(
+                folio_id=target.id,
+                type=app_settings.EXTRA_PERSON_CHARGE_TYPE,
+                description=(f"Extra person × {data.persons}{label} — {night:%d %b %Y} "
+                             f"({'AC' if pick['is_ac'] else 'Non-AC'} ₹{pick['price']:,.0f} + "
+                             f"{cfg['gst_percent']:g}% GST){note}")[:200],
+                qty=data.persons,
+                unit_price=pick["price_incl_gst"],
+                amount=per_night,
+                gst_percent=cfg["gst_percent"],
+                posted_by=uid,
+                room_id=pick["room_id"],
+                booking_item_id=item.booking_item_id,      # the room-night slot it belongs to
+                charge_date=night,
+            )
+            db.add(charge)
+            charges.append(charge)
+        db.flush()
+        amount = round(per_night * len(nights), 2)
         _recompute(db, target)
         db.commit()
         write_audit(db, user, "folio.extra_person", "folio", target.id,
-                    after={"charge_id": charge.id, "persons": data.persons,
+                    after={"charge_ids": [c.id for c in charges], "persons": data.persons,
                            "booking_item_id": pick["booking_item_id"], "is_ac": pick["is_ac"],
                            "price": pick["price"], "gst_percent": cfg["gst_percent"],
+                           "nights": [str(n) for n in nights], "per_night": per_night,
                            "amount": amount},
                     client="desktop", commit=True)
         return _folio_detail(db, folio)
