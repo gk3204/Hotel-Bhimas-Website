@@ -188,14 +188,20 @@ def list_documents(db: Session, q: str = "", type_: str = "all", dfrom: Optional
                                 f"/payments/{p.payment_id}/receipt/pdf?kind=refund"))
 
     # ---- registration slips (checked-in / checked-out stays)
+    # v7m/v7o: named by the slip's own number (REG-n) when it has been printed; a stay whose slip has
+    # never been printed shows "REG (not printed yet)" and gets its number the first time it is opened.
     if "slip" in want:
+        from models import RegistrationSlip
         qq = (db.query(Booking).filter(Booking.status.in_(("checked_in", "checked_out")),
                                        Booking.checked_in_at.isnot(None),
                                        *_dt_window(Booking.checked_in_at)))
-        qq = qq.filter(*_booking_filter(Booking.booking_id, None, ("SLIP",)))
+        qq = qq.filter(*_booking_filter(Booking.booking_id, None, ("SLIP", "REG")))
         for b in qq.order_by(Booking.checked_in_at.desc()).all():
             _, g = _ctx(b.booking_id)
-            out.append(_row("slip", f"SLIP-{b.booking_id}", b.checked_in_at, b, g, None,
+            regs = (db.query(RegistrationSlip).filter(RegistrationSlip.booking_id == b.booking_id)
+                    .order_by(RegistrationSlip.id).all())
+            number = ", ".join(f"REG-{r.id}" for r in regs) or "REG (not printed yet)"
+            out.append(_row("slip", number, b.checked_in_at, b, g, None,
                             b.status.replace("_", " "), f"/reception/checkin/{b.booking_id}/slip"))
 
     # ---- booking confirmations (every live / completed booking)
@@ -259,6 +265,124 @@ def documents(q: str = Query(""), type: str = Query("all"),
     rows = list_documents(db, q, type, _parse(from_, "from"), _parse(to, "to"))
     return {"total": len(rows), "data": rows[offset:offset + limit],
             "types": list(DOC_TYPES)}
+
+
+# =====================================================================================================
+# v7o (owner): "room booking with its receipts, invoice everything viewable and downloadable at one place
+# for each successful check-in". Bookings is cluttered with cancelled website bookings, so this lists
+# ONLY stays that were checked in, each with every document it produced.
+# =====================================================================================================
+
+def _stay_doc_counts(db: Session, booking_id: int) -> dict:
+    """Cheap counts for the list (no PDF payloads)."""
+    from models import GuestRequest, PrepaidReceipt
+    pays = db.query(Payment).filter(Payment.booking_id == booking_id).all()
+    return {
+        "receipts": sum(1 for p in pays if p.status == "paid" and float(p.amount or 0) > 0),
+        "refunds": sum(1 for p in pays if p.refund_status == "completed" and float(p.refund_amount or 0) > 0),
+        "prepaid": db.query(PrepaidReceipt).filter(PrepaidReceipt.booking_id == booking_id).count(),
+        "food_bills": db.query(GuestRequest).filter(GuestRequest.booking_id == booking_id,
+                                                    GuestRequest.type == "room_service",
+                                                    GuestRequest.folio_charge_id.isnot(None)).count(),
+        "invoices": db.query(Invoice).filter(Invoice.booking_id == booking_id).count(),
+        "slips": len({it.checked_in_at.date() for it in
+                      db.query(BookingItem).filter(BookingItem.booking_id == booking_id,
+                                                   BookingItem.checked_in_at.isnot(None),
+                                                   BookingItem.room_id.isnot(None)).all()}),
+    }
+
+
+def _checked_in_stay(db: Session, booking_id: int) -> Booking:
+    b = db.query(Booking).filter(Booking.booking_id == booking_id).first()
+    if not b or b.checked_in_at is None or b.status not in ("checked_in", "checked_out"):
+        raise HTTPException(status_code=404, detail="No checked-in stay with that booking number")
+    return b
+
+
+@router.get("/stays", dependencies=[Depends(require_admin)])
+def stays(q: str = Query(""), from_: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None),
+          limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), db: Session = Depends(get_db)):
+    """Every stay that was CHECKED IN (in house or checked out) - never a cancelled / no-show / unpaid
+    booking - newest check-in first. `from`/`to` bound the check-in date; `q` matches guest name /
+    phone, booking number, room number or the OTA booking id."""
+    from utils.booking_source import source_label
+    from utils.doc_rooms import booking_rooms_label
+    dfrom, dto = _parse(from_, "from"), _parse(to, "to")
+    qq = db.query(Booking).filter(Booking.status.in_(("checked_in", "checked_out")),
+                                  Booking.checked_in_at.isnot(None))
+    if dfrom:
+        qq = qq.filter(Booking.checked_in_at >= datetime.combine(dfrom, datetime.min.time()))
+    if dto:
+        qq = qq.filter(Booking.checked_in_at < datetime.combine(dto + timedelta(days=1), datetime.min.time()))
+    q = (q or "").strip()
+    if q:
+        ids = set(_booking_ids_matching(db, q))
+        for (bid,) in db.query(Booking.booking_id).filter(Booking.ota_booking_id.ilike(_like(q))).all():
+            ids.add(bid)
+        qq = qq.filter(Booking.booking_id.in_(ids or [-1]))
+    total = qq.count()
+    rows = []
+    for b in qq.order_by(Booking.checked_in_at.desc()).offset(offset).limit(limit).all():
+        g = db.query(Guest).filter(Guest.guest_id == b.guest_id).first() if b.guest_id else None
+        rows.append({
+            "booking_id": b.booking_id,
+            "guest": b.display_guest_name or (g.name if g else None),
+            "phone": g.phone if g else None,
+            "rooms": booking_rooms_label(db, b.booking_id),
+            "source": source_label(db, b),
+            "ota_booking_id": b.ota_booking_id,
+            "status": b.status,
+            "checked_in_at": b.checked_in_at.isoformat() if b.checked_in_at else None,
+            "check_out": str(b.check_out) if b.check_out else None,
+            "grand_total": float(b.grand_total or 0),
+            "documents": _stay_doc_counts(db, b.booking_id),
+        })
+    return {"total": total, "data": rows}
+
+
+@router.get("/stays/{booking_id}", dependencies=[Depends(require_admin)])
+def stay_documents(booking_id: int, db: Session = Depends(get_db)):
+    """The stay's documents (no PDFs rendered here - each opens through .../file)."""
+    from services.day_documents import documents_of_booking
+    b = _checked_in_stay(db, booking_id)
+    docs = []
+    for folder, fname, typ, at, bid, guest, source, mode, amount, ref, by, _render in documents_of_booking(db, booking_id):
+        docs.append({"key": f"{folder}/{fname}", "folder": folder, "number": fname.rsplit(".", 1)[0],
+                     "type": typ, "date": at.isoformat() if at else None,
+                     "amount": round(float(amount), 2) if amount is not None else None,
+                     "mode": mode or "", "reference": ref or "", "by": by or ""})
+    order = ["Registration slips", "Prepaid", "Receipts", "Food bills", "Refunds", "Invoices"]
+    docs.sort(key=lambda d: (next((i for i, f in enumerate(order) if d["folder"].startswith(f)), 99),
+                             d["date"] or ""))
+    return {"booking_id": b.booking_id, "guest": b.display_guest_name, "status": b.status, "documents": docs}
+
+
+@router.get("/stays/{booking_id}/file", dependencies=[Depends(require_admin)])
+def stay_document_file(booking_id: int, key: str = Query(...), download: int = Query(0),
+                       db: Session = Depends(get_db)):
+    """One document of the stay as a PDF - inline to view, `download=1` to save."""
+    from fastapi.responses import Response
+    from services.day_documents import documents_of_booking, render_document
+    _checked_in_stay(db, booking_id)
+    doc = next((d for d in documents_of_booking(db, booking_id) if f"{d[0]}/{d[1]}" == key), None)
+    if doc is None:
+        raise HTTPException(status_code=404, detail="That document is not part of this stay")
+    data = render_document(doc)
+    disp = "attachment" if download else "inline"
+    return Response(content=data, media_type="application/pdf",
+                    headers={"Content-Disposition": f'{disp}; filename="{doc[1]}"'})
+
+
+@router.get("/stays/{booking_id}/zip", dependencies=[Depends(require_admin)])
+def stay_documents_zip(booking_id: int, db: Session = Depends(get_db)):
+    """Every document of the stay in one ZIP, in the same folders as the day's ZIP."""
+    from services.day_documents import build_booking_zip
+    _checked_in_stay(db, booking_id)
+    parts = build_booking_zip(db, booking_id)
+    if not parts:
+        raise HTTPException(status_code=404, detail="This stay has no documents yet")
+    path, name = parts[0]
+    return FileResponse(path, media_type="application/zip", filename=name)
 
 
 @router.get("/bookings/{booking_id}/confirmation/pdf", dependencies=[Depends(require_admin)])

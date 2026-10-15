@@ -111,17 +111,18 @@ const REPORTS = {
     fetch: (p) => api.getCheckoutSummary(p),
     project: (d) => ({
       // v7m (owner): room rent and food each show their CGST / SGST
-      columns: ["Bill", "Rooms", "Room Rent", "Room CGST", "Room SGST", "Food", "Food CGST", "Food SGST",
-        "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance", "Refund", "Bill Amt",
-        "Checked out", "By"],
-      rows: d.rows.map((r) => [r.bill_no, r.rooms, fmt(r.room_rent), fmt(r.room_cgst), fmt(r.room_sgst),
-        fmt(r.food), fmt(r.food_cgst), fmt(r.food_sgst), fmt(r.laundry), fmt(r.misc), fmt(r.discount),
-        fmt(r.cgst), fmt(r.sgst), fmt(r.advance), fmt(r.refund), fmt(r.bill_amount),
-        r.checked_out_at || "", r.checked_out_by || ""]),
-      totals: ["TOTAL", "", fmt(d.totals.room_rent), fmt(d.totals.room_cgst), fmt(d.totals.room_sgst),
+      // v7o (owner): check-in and check-out date + time
+      columns: ["Bill", "Rooms", "Check-in", "Check-out", "Room Rent", "Room CGST", "Room SGST", "Food",
+        "Food CGST", "Food SGST", "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance",
+        "Refund", "Bill Amt", "By"],
+      rows: d.rows.map((r) => [r.bill_no, r.rooms, r.checked_in_at || "", r.checked_out_at || "",
+        fmt(r.room_rent), fmt(r.room_cgst), fmt(r.room_sgst), fmt(r.food), fmt(r.food_cgst), fmt(r.food_sgst),
+        fmt(r.laundry), fmt(r.misc), fmt(r.discount), fmt(r.cgst), fmt(r.sgst), fmt(r.advance), fmt(r.refund),
+        fmt(r.bill_amount), r.checked_out_by || ""]),
+      totals: ["TOTAL", "", "", "", fmt(d.totals.room_rent), fmt(d.totals.room_cgst), fmt(d.totals.room_sgst),
         fmt(d.totals.food), fmt(d.totals.food_cgst), fmt(d.totals.food_sgst), fmt(d.totals.laundry),
         fmt(d.totals.misc), fmt(d.totals.discount), fmt(d.totals.cgst), fmt(d.totals.sgst),
-        fmt(d.totals.advance), fmt(d.totals.refund), fmt(d.totals.bill_amount), "", ""],
+        fmt(d.totals.advance), fmt(d.totals.refund), fmt(d.totals.bill_amount), ""],
     }),
   },
   "sales/daily": {

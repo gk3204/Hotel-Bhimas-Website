@@ -56,3 +56,28 @@ export const downloadDocument = (pdfUrl) => {
   const params = Object.fromEntries(new URLSearchParams(qs || ""));
   return download(path, { ...params, format: "pdf" });
 };
+
+// ---- v7o (owner): Stays & Documents - every document of each checked-in stay, in one place ----
+
+/** { total, data: [{booking_id, guest, phone, rooms, source, ota_booking_id, status, checked_in_at,
+ *  check_out, grand_total, documents: {receipts, refunds, prepaid, food_bills, invoices, slips}}] } */
+export const listStays = (params) =>
+  fetch(`${BASE_URL}/documents/stays${query(params)}`, { headers: authHeaders() }).then(handle);
+
+/** { booking_id, guest, status, documents: [{key, folder, number, type, date, amount, mode, reference, by}] } */
+export const stayDocuments = (bookingId) =>
+  fetch(`${BASE_URL}/documents/stays/${bookingId}`, { headers: authHeaders() }).then(handle);
+
+const stayFilePath = (bookingId, key) =>
+  `/documents/stays/${bookingId}/file?key=${encodeURIComponent(key)}`;
+
+/** An object URL of one stay document, for the in-page viewer. */
+export const stayDocumentObjectUrl = (bookingId, key) => documentObjectUrl(stayFilePath(bookingId, key));
+
+/** Save one stay document (the server names the file, e.g. RCPT-12.pdf). */
+export const downloadStayDocument = (bookingId, key) =>
+  download(`/documents/stays/${bookingId}/file`, { key, download: 1, format: "pdf" });
+
+/** Save every document of the stay as one ZIP. */
+export const downloadStayZip = (bookingId) =>
+  download(`/documents/stays/${bookingId}/zip`, { format: "zip" });

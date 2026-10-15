@@ -10,7 +10,10 @@ receipts, invoices, reg slip of 1 for any date and download".
     Prepaid/PRE-<n>.pdf
     Food bills/KOT-<kot no>.pdf           (room-service bills charged to a room)
     Invoices/INV-2026-27-00001.pdf        (tax invoices raised that day)
-    Registration slips/REG-<booking>.pdf  (rooms that checked in that day)
+    Registration slips/REG-<n>.pdf        (rooms that checked in that day; the slip's own number, v7m)
+
+v7o: the same collector serves one STAY (documents_of_booking / build_booking_zip) for the
+web "Documents -> By stay" view.
     Expenses.csv                          (petty-cash vouchers)
     index.csv                             (one line per document, with its folder)
 
@@ -54,6 +57,18 @@ def _receipt_folder(p) -> str:
 def documents_of_day(db, day):
     """[(folder, file_name, type, when_local, booking_id, guest, source, mode, amount, reference, by, render)]
     where render() returns a PDF path. Lazy, so a ZIP part only renders what it packs."""
+    return _documents(db, day=day)
+
+
+def documents_of_booking(db, booking_id):
+    """v7o (owner): every document of ONE stay - its receipts, refunds, prepaid receipt, food bills,
+    invoices (each bill of a per-room stay) and registration slips - the same tuples as a day."""
+    return _documents(db, booking_id=booking_id)
+
+
+def _documents(db, day=None, booking_id=None):
+    """Shared by documents_of_day and documents_of_booking, so the two can never list a document
+    differently. Exactly one of `day` / `booking_id`."""
     from routers.payments import receipt_payload
     from services.prepaid_receipts import prepaid_receipt_payload, receipt_no
     from utils.pdf_generator import generate_payment_receipt_pdf
@@ -61,8 +76,11 @@ def documents_of_day(db, day):
     docs = []
 
     # receipts - every paid payment of the day, by payment type
-    for p in (db.query(Payment).filter(Payment.status == "paid",
-                                       clock.business_date_sql(Payment.created_at) == day)
+    def _scope(col_booking, col_date):
+        return ([col_booking == booking_id] if booking_id is not None
+                else [clock.business_date_sql(col_date) == day])
+
+    for p in (db.query(Payment).filter(Payment.status == "paid", *_scope(Payment.booking_id, Payment.created_at))
               .order_by(Payment.created_at).all()):
         if not float(p.amount or 0):
             continue
@@ -75,7 +93,7 @@ def documents_of_day(db, day):
     # refunds - by the day the refund was paid out
     refunded_on = func.coalesce(Payment.refunded_at, Payment.created_at)
     for p in (db.query(Payment).filter(Payment.refund_status == "completed",
-                                       clock.business_date_sql(refunded_on) == day)
+                                       *_scope(Payment.booking_id, refunded_on))
               .order_by(refunded_on).all()):
         if not float(p.refund_amount or 0):
             continue
@@ -87,7 +105,7 @@ def documents_of_day(db, day):
                      (lambda pl=pl: generate_payment_receipt_pdf(pl))))
 
     # prepaid receipts (OTA / agent / website), issued at check-in
-    for pr in (db.query(PrepaidReceipt).filter(clock.business_date_sql(PrepaidReceipt.issued_at) == day)
+    for pr in (db.query(PrepaidReceipt).filter(*_scope(PrepaidReceipt.booking_id, PrepaidReceipt.issued_at))
                .order_by(PrepaidReceipt.issued_at).all()):
         pl = prepaid_receipt_payload(db, pr)
         docs.append(("Prepaid", f"{receipt_no(pr)}.pdf", "Prepaid receipt", clock.to_local(pr.issued_at),
@@ -99,7 +117,7 @@ def documents_of_day(db, day):
     from services import room_service as RS
     for r in (db.query(GuestRequest).filter(GuestRequest.type == "room_service",
                                             GuestRequest.folio_charge_id.isnot(None),
-                                            clock.business_date_sql(GuestRequest.created_at) == day)
+                                            *_scope(GuestRequest.booking_id, GuestRequest.created_at))
               .order_by(GuestRequest.created_at).all()):
         try:
             bp = RS.bill_payload(db, r)
@@ -115,7 +133,7 @@ def documents_of_day(db, day):
     # tax invoices raised that day
     from routers.folio import _invoice_payload
     from utils.pdf_generator import generate_folio_invoice_pdf
-    for inv in (db.query(Invoice).filter(clock.business_date_sql(Invoice.created_at) == day)
+    for inv in (db.query(Invoice).filter(*_scope(Invoice.booking_id, Invoice.created_at))
                 .order_by(Invoice.created_at).all()):
         f = db.query(Folio).filter(Folio.id == inv.folio_id).first()
         if f is None:
@@ -134,12 +152,17 @@ def documents_of_day(db, day):
     from routers.reception import registration_slip_data
     from utils.pdf_generator import generate_registration_slip_pdf
     arrived = {}
-    for it in (db.query(BookingItem).filter(BookingItem.checked_in_at.isnot(None), BookingItem.room_id.isnot(None))
-               .filter(BookingItem.checked_in_at >= datetime.combine(day, datetime.min.time()),
-                       BookingItem.checked_in_at < datetime.combine(day, datetime.max.time()))
-               .all()):
-        arrived.setdefault(it.booking_id, []).append(it)
-    for bid, items in sorted(arrived.items()):
+    _iq = db.query(BookingItem).filter(BookingItem.checked_in_at.isnot(None), BookingItem.room_id.isnot(None))
+    if booking_id is not None:
+        # a stay's slips: one per arrival day (a split arrival - two cars on two days - is two slips)
+        for it in _iq.filter(BookingItem.booking_id == booking_id).all():
+            arrived.setdefault((it.booking_id, it.checked_in_at.date()), []).append(it)
+    else:
+        for it in (_iq.filter(BookingItem.checked_in_at >= datetime.combine(day, datetime.min.time()),
+                              BookingItem.checked_in_at < datetime.combine(day, datetime.max.time()))
+                   .all()):
+            arrived.setdefault((it.booking_id, day), []).append(it)
+    for (bid, _arr_day), items in sorted(arrived.items()):
         b = db.query(Booking).filter(Booking.booking_id == bid).first()
         if b is None or b.status not in ("checked_in", "checked_out"):
             continue
@@ -186,6 +209,14 @@ def _expenses_csv(db, day) -> str:
     return buf.getvalue()
 
 
+def build_booking_zip(db, booking_id) -> list:
+    """v7o: every document of one stay as a ZIP in the same folders (no Expenses.csv)."""
+    docs = documents_of_booking(db, booking_id)
+    if not docs:
+        return []
+    return _zip_docs(docs, f"stay_{booking_id}", None, PART_BYTES * 4)
+
+
 def build_documents_zip(db, day, part_bytes=None) -> list:
     """The day's documents as ZIP file(s) in folders; each part carries index.csv and Expenses.csv.
     Returns [(path, filename)] - empty when the day had nothing."""
@@ -194,6 +225,17 @@ def build_documents_zip(db, day, part_bytes=None) -> list:
     expenses = _expenses_csv(db, day)
     if not docs and expenses.count("\n") <= 1:
         return []
+    return _zip_docs(docs, f"documents_{day}", expenses, limit)
+
+
+def render_document(doc) -> bytes:
+    """v7o: one document's PDF bytes (the writers reuse temp file names - read before the next render)."""
+    path = doc[-1]()
+    with open(path, "rb") as fh:
+        return fh.read()
+
+
+def _zip_docs(docs, base_name, expenses, limit) -> list:
     rendered = []
     for d in docs:
         folder, fname, typ, at, bid, guest, source, mode, amount, ref, by, render = d
@@ -223,7 +265,7 @@ def build_documents_zip(db, day, part_bytes=None) -> list:
     out = []
     for i, part in enumerate(parts, 1):
         suffix = f"_part{i}of{len(parts)}" if len(parts) > 1 else ""
-        name = f"documents_{day}{suffix}.zip"
+        name = f"{base_name}{suffix}.zip"
         zpath = os.path.join(tempfile.gettempdir(), name)
         idx = io.StringIO()
         w = csv.writer(idx)
@@ -232,7 +274,8 @@ def build_documents_zip(db, day, part_bytes=None) -> list:
             w.writerow(row)
         with zipfile.ZipFile(zpath, "w", zipfile.ZIP_DEFLATED) as z:
             z.writestr("index.csv", idx.getvalue())
-            z.writestr("Expenses.csv", expenses)
+            if expenses is not None:
+                z.writestr("Expenses.csv", expenses)
             for arc, data, _sz, _row in part:
                 z.writestr(arc, data)
         out.append((zpath, name))

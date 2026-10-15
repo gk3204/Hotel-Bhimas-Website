@@ -3,10 +3,13 @@
 // company invoices and cash-shift reports. Read-only index over GET /documents; each row's PDF is
 // regenerated on demand by the endpoint that owns it. Layout mirrors the Audit Log page.
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { FaSearch, FaFileInvoice, FaEye, FaDownload } from "react-icons/fa";
-import { listDocuments, documentObjectUrl, downloadDocument } from "../../api/documents";
+import { FaSearch, FaFileInvoice, FaEye, FaDownload, FaFileArchive } from "react-icons/fa";
 import {
-  Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField, money, useToast,
+  listDocuments, documentObjectUrl, downloadDocument,
+  listStays, stayDocuments, stayDocumentObjectUrl, downloadStayDocument, downloadStayZip,
+} from "../../api/documents";
+import {
+  Card, Chip, DataTable, Field, GhostButton, Modal, PageShell, PrimaryButton, SelectField, Tabs, money, useToast,
 } from "../../components/admin/BackofficeUI";
 
 const PAGE = 50;
@@ -30,8 +33,212 @@ const TYPE_TONE = {
   slip: "neutral", company_invoice: "gold", shift_report: "neutral",
 };
 
+// v7o (owner): "room booking with its receipts, invoice everything viewable and downloadable at one
+// place for each successful check-in". Bookings is cluttered with cancelled website bookings, so the
+// "By stay" tab lists ONLY stays that were checked in, each with every document it produced.
 export default function Documents() {
   const [toast, showToast] = useToast();
+  const [tab, setTab] = useState("stays");
+  return (
+    <PageShell
+      icon="🗂️"
+      title="Documents"
+      subtitle="By stay: every check-in with all its receipts, refunds, prepaid receipt, food bills, invoice and registration slip. All documents: search every PDF the system generates."
+      toast={toast}
+    >
+      <Tabs tabs={[["stays", "By stay (check-ins)"], ["all", "All documents"]]} active={tab} onChange={setTab} />
+      {tab === "stays" ? <StaysTab showToast={showToast} /> : <AllDocuments showToast={showToast} />}
+    </PageShell>
+  );
+}
+
+const COUNT_LABELS = [
+  ["slips", "Slip"], ["prepaid", "Prepaid"], ["receipts", "Receipt"], ["food_bills", "Food bill"],
+  ["refunds", "Refund"], ["invoices", "Invoice"],
+];
+const DOC_TONE = {
+  "Registration slip": "neutral", "Prepaid receipt": "ok", Receipt: "info", "Food bill": "neutral",
+  "Refund voucher": "warn", "Tax invoice": "gold",
+};
+
+function StaysTab({ showToast }) {
+  const [filters, setFilters] = useState({ q: "", from: daysAgo(30), to: today() });
+  const [rows, setRows] = useState([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [stay, setStay] = useState(null);          // { row, docs, loading }
+  const [preview, setPreview] = useState(null);    // { doc, url }
+  const [busy, setBusy] = useState(null);
+  const previewUrl = useRef(null);
+
+  const load = useCallback(async (pg) => {
+    setLoading(true);
+    setError("");
+    try {
+      const data = await listStays({ ...filters, limit: PAGE, offset: pg * PAGE });
+      setRows(data.data || []);
+      setTotal(data.total || 0);
+    } catch (e) {
+      setError(e.message || "Failed to load stays");
+      setRows([]);
+    } finally {
+      setLoading(false);
+    }
+  }, [filters]);
+
+  useEffect(() => {
+    load(page);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page]);
+
+  const apply = () => { if (page === 0) load(0); else setPage(0); };
+
+  const openStay = async (r) => {
+    setStay({ row: r, docs: [], loading: true });
+    try {
+      const data = await stayDocuments(r.booking_id);
+      setStay({ row: r, docs: data.documents || [], loading: false });
+    } catch (e) {
+      showToast(e.message || "Could not load this stay's documents", "error");
+      setStay(null);
+    }
+  };
+
+  const closePreview = () => {
+    if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
+    previewUrl.current = null;
+    setPreview(null);
+  };
+  useEffect(() => () => { if (previewUrl.current) URL.revokeObjectURL(previewUrl.current); }, []);
+
+  const view = async (d) => {
+    setBusy(d.key);
+    try {
+      const url = await stayDocumentObjectUrl(stay.row.booking_id, d.key);
+      if (previewUrl.current) URL.revokeObjectURL(previewUrl.current);
+      previewUrl.current = url;
+      setPreview({ doc: d, url });
+    } catch (e) {
+      showToast(e.message || "Could not open the document", "error");
+    } finally {
+      setBusy(null);
+    }
+  };
+  const save = async (d) => {
+    setBusy(d.key);
+    try { await downloadStayDocument(stay.row.booking_id, d.key); }
+    catch (e) { showToast(e.message || "Download failed", "error"); }
+    finally { setBusy(null); }
+  };
+  const saveAll = async (bookingId) => {
+    setBusy(`zip-${bookingId}`);
+    try { await downloadStayZip(bookingId); }
+    catch (e) { showToast(e.message || "Download failed", "error"); }
+    finally { setBusy(null); }
+  };
+
+  const pageCount = Math.max(1, Math.ceil(total / PAGE));
+  return (
+    <>
+      <Card className="mb-6">
+        <div className="p-5 grid grid-cols-1 md:grid-cols-5 gap-4 items-end">
+          <div className="md:col-span-2">
+            <Field label="Search" value={filters.q} placeholder="Guest · phone · booking # · room · OTA booking id"
+              onChange={(e) => setFilters({ ...filters, q: e.target.value })}
+              onKeyDown={(e) => { if (e.key === "Enter") apply(); }} />
+          </div>
+          <Field label="Checked in from" type="date" value={filters.from}
+            onChange={(e) => setFilters({ ...filters, from: e.target.value })} />
+          <Field label="To" type="date" value={filters.to}
+            onChange={(e) => setFilters({ ...filters, to: e.target.value })} />
+          <PrimaryButton onClick={apply}><FaSearch size={14} /> Search</PrimaryButton>
+        </div>
+      </Card>
+
+      <Card title="Checked-in stays"
+        right={<span className="text-slate-400 text-sm flex items-center gap-2"><FaFileInvoice /> {total} stays</span>}>
+        <DataTable
+          columns={["Booking", "Guest", "Room(s)", "Source", "Checked in", "Check-out", "Documents", ""]}
+          rows={rows} loading={loading} error={error} pageSize={0}
+          empty="No checked-in stays match these filters."
+          renderRow={(r) => [
+            <span key="b" className="font-mono text-xs">#{r.booking_id}{r.ota_booking_id ? <span className="block text-slate-500">{r.ota_booking_id}</span> : null}</span>,
+            <span key="g">{r.guest || "—"}{r.phone && <span className="text-slate-500 text-xs"> · {r.phone}</span>}</span>,
+            r.rooms || "—",
+            r.source || "—",
+            <span key="ci" className="text-xs whitespace-nowrap">{when(r.checked_in_at)}</span>,
+            <span key="co" className="text-xs whitespace-nowrap">{r.check_out || "—"}{r.status === "checked_in" ? " (in house)" : ""}</span>,
+            <span key="dc" className="flex flex-wrap gap-1">
+              {COUNT_LABELS.filter(([k]) => (r.documents || {})[k]).map(([k, lbl]) => (
+                <Chip key={k} tone="neutral">{r.documents[k]} {lbl}{r.documents[k] > 1 ? "s" : ""}</Chip>
+              ))}
+            </span>,
+            <span key="x" className="flex gap-2 justify-end whitespace-nowrap">
+              <GhostButton onClick={() => openStay(r)}><FaEye size={12} /> Open</GhostButton>
+              <GhostButton onClick={() => saveAll(r.booking_id)} disabled={busy === `zip-${r.booking_id}`}>
+                <FaFileArchive size={12} /> All (ZIP)
+              </GhostButton>
+            </span>,
+          ]}
+        />
+        {total > PAGE && (
+          <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-slate-700 text-sm text-slate-400">
+            <span>Page {page + 1} / {pageCount}</span>
+            <div className="flex items-center gap-2">
+              <button onClick={() => setPage((p) => Math.max(0, p - 1))} disabled={page === 0 || loading}
+                className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white disabled:opacity-40 transition">Prev</button>
+              <button onClick={() => setPage((p) => Math.min(pageCount - 1, p + 1))} disabled={page >= pageCount - 1 || loading}
+                className="px-3 py-1.5 rounded-lg bg-slate-700 hover:bg-slate-600 text-white disabled:opacity-40 transition">Next</button>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {stay && !preview && (
+        <Modal title={`Stay #${stay.row.booking_id} · ${stay.row.guest || ""} · room ${stay.row.rooms || "—"}`}
+          onClose={() => setStay(null)} wide>
+          <div className="flex items-center justify-between gap-3 mb-4 text-sm text-slate-400">
+            <span>{stay.row.source} · checked in {when(stay.row.checked_in_at)} · check-out {stay.row.check_out}</span>
+            <PrimaryButton onClick={() => saveAll(stay.row.booking_id)} disabled={busy === `zip-${stay.row.booking_id}`}>
+              <FaFileArchive size={12} /> Download all (ZIP)
+            </PrimaryButton>
+          </div>
+          <DataTable
+            columns={["Document", "Number", "Date & time", "Amount", "Mode / ref", "By", ""]}
+            rows={stay.docs} loading={stay.loading} pageSize={0}
+            empty="No documents for this stay yet."
+            renderRow={(d) => [
+              <Chip key="t" tone={DOC_TONE[d.type] || "neutral"}>{d.type}</Chip>,
+              <span key="n" className="font-mono text-xs whitespace-nowrap">{d.number}</span>,
+              <span key="d" className="text-xs whitespace-nowrap">{when(d.date)}</span>,
+              <span key="a" className="block text-right tabular-nums">{d.amount != null ? money(d.amount) : "—"}</span>,
+              <span key="m" className="text-xs text-slate-400">{[d.mode, d.reference].filter(Boolean).join(" · ") || "—"}</span>,
+              <span key="u" className="text-xs">{d.by || "—"}</span>,
+              <span key="x" className="flex gap-2 justify-end whitespace-nowrap">
+                <GhostButton onClick={() => view(d)} disabled={busy === d.key}><FaEye size={12} /> View</GhostButton>
+                <GhostButton onClick={() => save(d)} disabled={busy === d.key}><FaDownload size={12} /> Download</GhostButton>
+              </span>,
+            ]}
+          />
+        </Modal>
+      )}
+
+      {preview && (
+        <Modal title={`${preview.doc.type} · ${preview.doc.number}`} onClose={closePreview} wide>
+          <div className="flex items-center justify-between gap-3 mb-3 text-sm text-slate-400">
+            <span>{when(preview.doc.date)} · stay #{stay?.row.booking_id}</span>
+            <PrimaryButton onClick={() => save(preview.doc)}><FaDownload size={12} /> Download</PrimaryButton>
+          </div>
+          <iframe title={preview.doc.number} src={preview.url} className="w-full h-[70vh] rounded-lg bg-white" />
+        </Modal>
+      )}
+    </>
+  );
+}
+
+function AllDocuments({ showToast }) {
   const [filters, setFilters] = useState({ q: "", type: "all", from: daysAgo(30), to: today() });
   const [rows, setRows] = useState([]);
   const [total, setTotal] = useState(0);
@@ -107,12 +314,7 @@ export default function Documents() {
   const to = Math.min(total, (page + 1) * PAGE);
 
   return (
-    <PageShell
-      icon="🗂️"
-      title="Documents"
-      subtitle="Every invoice, receipt, refund voucher, registration slip, booking confirmation, company invoice and shift report — search, preview, download."
-      toast={toast}
-    >
+    <>
       <Card className="mb-6">
         <div className="p-5 grid grid-cols-1 md:grid-cols-6 gap-4 items-end">
           <div className="md:col-span-2">
@@ -189,6 +391,6 @@ export default function Documents() {
           <iframe title={preview.row.number} src={preview.url} className="w-full h-[70vh] rounded-lg bg-white" />
         </Modal>
       )}
-    </PageShell>
+    </>
   );
 }

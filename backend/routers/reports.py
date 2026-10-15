@@ -1511,10 +1511,14 @@ def checkout_summary_data(db, day):
                  for it in _its if it is not None and it.room_id]
         inv = _get_invoice(db, f.id)
         _co = clock.to_local(_out_at)
+        # v7o (owner): when the room(s) on this bill checked in (local wall clock, the earliest)
+        _cin = min((it.checked_in_at for it in _its if it is not None and it.checked_in_at), default=None) \
+            or b.checked_in_at
         rows.append({
             "bill_no": (inv.invoice_no if inv else f"F{f.id}"),
+            "checked_in_at": _cin.strftime("%d/%m/%y %H:%M") if _cin else "",
             # v7d (owner): when they left and which reception user checked them out
-            "checked_out_at": _co.strftime("%d/%m %H:%M") if _co else "",
+            "checked_out_at": _co.strftime("%d/%m/%y %H:%M") if _co else "",
             "checked_out_by": _user_name(db, _by) or "",
             "rooms": ", ".join(r.room_number for r in rooms if r) or "—",
             "room_rent": room_rent, "sgst": sgst, "cgst": cgst, "food": food, "laundry": laundry,
@@ -1533,17 +1537,18 @@ def checkout_summary_table(data):
     """v7m: one layout for the screen's PDF / CSV and the end-of-day mail. Room rent and food each
     show the CGST and SGST inside them; the bill's total CGST / SGST (every line, after discount)
     stays as it was."""
-    cols = ["Bill", "Rooms", "Room Rent", "Room CGST", "Room SGST", "Food", "Food CGST", "Food SGST",
-            "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance", "Refund", "Bill Amt",
-            "Out", "By"]
-    rows = [[r["bill_no"], r["rooms"], r["room_rent"], r["room_cgst"], r["room_sgst"], r["food"],
-             r["food_cgst"], r["food_sgst"], r["laundry"], r["misc"], r["discount"], r["cgst"], r["sgst"],
-             r["advance"], r["refund"], r["bill_amount"], r.get("checked_out_at", ""),
+    # v7o (owner): check-in and check-out date + time beside the rooms
+    cols = ["Bill", "Rooms", "Check-in", "Check-out", "Room Rent", "Room CGST", "Room SGST", "Food",
+            "Food CGST", "Food SGST", "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance",
+            "Refund", "Bill Amt", "By"]
+    rows = [[r["bill_no"], r["rooms"], r.get("checked_in_at", ""), r.get("checked_out_at", ""), r["room_rent"],
+             r["room_cgst"], r["room_sgst"], r["food"], r["food_cgst"], r["food_sgst"], r["laundry"], r["misc"],
+             r["discount"], r["cgst"], r["sgst"], r["advance"], r["refund"], r["bill_amount"],
              r.get("checked_out_by", "")] for r in data["rows"]]
     t = data["totals"]
-    totals = ["TOTAL", "", t["room_rent"], t["room_cgst"], t["room_sgst"], t["food"], t["food_cgst"],
+    totals = ["TOTAL", "", "", "", t["room_rent"], t["room_cgst"], t["room_sgst"], t["food"], t["food_cgst"],
               t["food_sgst"], t["laundry"], t["misc"], t["discount"], t["cgst"], t["sgst"], t["advance"],
-              t["refund"], t["bill_amount"], "", ""]
+              t["refund"], t["bill_amount"], ""]
     return cols, rows, totals
 
 
