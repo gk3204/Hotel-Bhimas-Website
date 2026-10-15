@@ -200,13 +200,13 @@ const FraudDashboard = () => {
                     <tbody className="divide-y divide-slate-700">
                       {alerts.map((a) => (
                         <tr key={a.id} className="hover:bg-slate-700/30 transition align-top">
-                          <td className="px-6 py-4 font-medium">{pretty(a.type)}</td>
+                          <td className="px-6 py-4 font-medium">{a.title || pretty(a.type)}</td>
                           <td className="px-6 py-4"><span className={`px-3 py-1 rounded-full text-xs font-bold border ${sevChip(a.severity)}`}>{a.severity}</span></td>
                           <td className="px-6 py-4 text-slate-300 whitespace-nowrap">
                             {a.room_number ? `Room ${a.room_number}` : "—"}{a.booking_id ? ` · #${a.booking_id}` : ""}
                           </td>
                           <td className="px-6 py-4 text-slate-400 text-sm whitespace-nowrap">{(a.detected_at || "").slice(0, 16).replace("T", " ")}</td>
-                          <td className="px-6 py-4 text-slate-400 text-xs max-w-xs">{a.detail?.note || JSON.stringify(a.detail)}</td>
+                          <td className="px-6 py-4 text-slate-300 text-sm max-w-md">{a.sentence || a.detail?.note || JSON.stringify(a.detail)}{a.status_text && a.status !== "open" ? <span className="block text-xs text-slate-500 mt-1">{a.status_text}</span> : null}</td>
                           <td className="px-6 py-4"><span className={`px-3 py-1 rounded-full text-xs font-bold border ${statusChip(a.status)}`}>{a.status}</span></td>
                           <td className="px-6 py-4 whitespace-nowrap">
                             {a.status === "open" ? (
@@ -353,12 +353,14 @@ const FraudDashboard = () => {
         {reviewFor && (
           <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
             <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md border border-slate-700 shadow-2xl">
-              <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">{pretty(reviewFor.type)}</h2>
+              <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">{reviewFor.title || pretty(reviewFor.type)}</h2>
               <p className="text-slate-400 text-sm mb-6">
                 {reviewFor.room_number ? `Room ${reviewFor.room_number}` : ""}{reviewFor.booking_id ? ` · Booking #${reviewFor.booking_id}` : ""}
               </p>
               <div className="rounded-lg bg-slate-900/50 border border-slate-700 p-3 mb-5 text-xs text-slate-300 break-words">
-                {reviewFor.detail?.note || JSON.stringify(reviewFor.detail)}
+                <p className="text-sm text-slate-200">{reviewFor.sentence || reviewFor.detail?.note || JSON.stringify(reviewFor.detail)}</p>
+                {reviewFor.meaning && <p className="mt-2 text-slate-400"><b className="text-slate-300">Why it matters:</b> {reviewFor.meaning}</p>}
+                {reviewFor.check && <p className="mt-1 text-slate-400"><b className="text-slate-300">What to check:</b> {reviewFor.check}</p>}
               </div>
               <div className="space-y-4">
                 <div className="flex flex-col">

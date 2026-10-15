@@ -72,6 +72,7 @@ export const getShiftPayments = (p) => getReport("shift-payments", p);
 export const getCardAudit = (p) => getReport("card-audit", p);
 export const getLostCards = (p) => getReport("lost-cards", p);
 export const getFraudSummary = (p) => getReport("fraud-summary", p);
+export const getRoomTurnaround = (p) => getReport("room-turnaround", p);   // v7p
 
 // ---- dashboard + trends ----
 export const getDashboard = () => getReport("dashboard");

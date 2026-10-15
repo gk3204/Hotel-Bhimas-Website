@@ -58,6 +58,9 @@ def _parse_detail(raw):
         return {"raw": raw}
 
 
+from utils.fraud_explain import explain as _explain   # noqa: E402  (v7p)
+
+
 def _alert_dict(db, a: FraudAlert, room_numbers=None):
     room_number = None
     if a.room_id:
@@ -70,6 +73,8 @@ def _alert_dict(db, a: FraudAlert, room_numbers=None):
         "booking_id": a.booking_id, "room_id": a.room_id, "room_number": room_number,
         "card_id": a.card_id,
         "detail": _parse_detail(a.detail),
+        # v7p (owner): readable - what happened, why it matters, what to check
+        **{k: v for k, v in _explain(db, a).items() if k in ("title", "sentence", "meaning", "check", "status_text", "staff", "guest")},
         "detected_at": str(a.detected_at) if a.detected_at else None,
         "reviewed_by": a.reviewed_by,
         "reviewed_at": str(a.reviewed_at) if a.reviewed_at else None,

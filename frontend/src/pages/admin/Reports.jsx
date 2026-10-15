@@ -205,10 +205,11 @@ const REPORTS = {
         // v7g: cleaning card cut / returned; a start taken from the card cut is marked "(card)"
         columns: ["Room", "Guest", "Check-in", "Check-out", "Card cut", "Card returned", "Cleaning start",
           "Cleaning end", "Inspected", "Cleaned by", "Inspected by", "Frauds"],
-        rows: d.rows.map((r) => [r.room, r.guest, t(r.check_in), t(r.check_out),
+        // v7p: frauds in plain words; a row with a fraud alert is shaded red
+        rows: d.rows.map((r) => ({ kind: "row", danger: r.has_fraud, cells: [r.room, r.guest, t(r.check_in), t(r.check_out),
           t(r.card_cut), (r.card_returned || "").startsWith("20") ? t(r.card_returned) : (r.card_returned || ""),
           t(r.cleaning_started) + (r.cleaning_started_from_card ? " (card)" : ""), t(r.cleaning_ended),
-          t(r.inspected_at), r.cleaned_by || "", r.inspected_by || "", r.frauds || ""]),
+          t(r.inspected_at), r.cleaned_by || "", r.inspected_by || "", r.frauds || ""] })),
       };
     },
   },
@@ -388,16 +389,76 @@ const REPORTS = {
         r.status, r.issued_by, r.station_id, (r.issued_at || "").replace("T", " ").slice(0, 16)]),
     }),
   },
+  "room-turnaround": {
+    label: "Room Turnaround & Cards",
+    path: "room-turnaround",
+    range: true,
+    note: "Every step of each stay - check-in, key card cut, check-out, card wiped, cleaning card cut, cleaning start / end, cleaning card back, inspected - with the minutes between them (in brackets) and red flags; then the viewing cards and whether the room was checked in after. KPIs on top.",
+    fetch: (p) => api.getRoomTurnaround(p),
+    project: (d) => {
+      const t = (s) => (s && s.startsWith("20") ? `${s.slice(8, 10)}/${s.slice(5, 7)} ${s.slice(11, 16)}` : (s || "—"));
+      const m = (v) => (v == null ? "" : ` (${v >= 0 ? "+" : ""}${Math.round(v)}m)`);
+      const k = d.kpis || {};
+      const v = (x, u = "") => (x == null ? "—" : `${x}${u}`);
+      const tiles = [
+        { label: "Rooms checked out", value: v(k.stays) },
+        { label: "Stays with a red flag", value: v(k.suspicious_stays), tone: k.suspicious_stays ? "bad" : "" },
+        { label: "Avg check-in → key card", value: v(k.avg_checkin_to_card_min, " min") },
+        { label: "Key cards wiped at check-out", value: v(k.pct_cards_wiped_at_checkout, "%") },
+        { label: "Avg check-out → cleaning start", value: v(k.avg_checkout_to_clean_start_min, " min") },
+        { label: "Avg cleaning time", value: v(k.avg_clean_minutes, " min") },
+        { label: "Cleanings too fast", value: v(k.pct_cleaned_too_fast, "%"), tone: k.pct_cleaned_too_fast ? "bad" : "" },
+        { label: "Cleaning cards returned", value: v(k.pct_cleaning_cards_returned, "%") },
+        { label: "Avg check-out → room ready", value: v(k.avg_turnaround_min, " min") },
+        { label: "Rooms inspected", value: v(k.pct_inspected, "%") },
+        { label: "Viewing cards", value: v(k.viewings) },
+        { label: "Viewings → check-in", value: v(k.viewing_to_checkin_pct, "%") },
+        { label: "Viewing cards returned", value: v(k.viewing_cards_returned_pct, "%") },
+        { label: "Viewings with a red flag", value: v(k.suspicious_viewings), tone: k.suspicious_viewings ? "bad" : "" },
+      ];
+      const rows = [{ kind: "section", label: `Room stays (${(d.rows || []).length})` }];
+      (d.rows || []).forEach((r) => {
+        const x = r.diff || {};
+        rows.push({ kind: "row", danger: r.suspicious, cells: [
+          r.room, r.guest || "", t(r.check_in), t(r.checkin_card) + m(x.ci_to_card), t(r.check_out),
+          r.checkout_wipe_note || (t(r.checkout_wipe) + m(x.co_to_wipe)),
+          t(r.clean_card_cut) + m(x.co_to_clean_card), t(r.clean_start), t(r.clean_end) + m(x.clean_minutes),
+          t(r.clean_card_returned) + m(x.end_to_card_return),
+          r.inspected_at ? `${t(r.inspected_at)}${m(x.end_to_inspected)}${r.inspected_by ? ` by ${r.inspected_by}` : ""}` : "—",
+          x.turnaround == null ? "—" : `${Math.round(x.turnaround)} min`,
+          (r.flags || []).join("; ") || "OK"] });
+      });
+      rows.push({ kind: "section", label: `Viewing cards (${(d.viewings || []).length}) - room, cut, returned, minutes out (allowed), cut by, checked in after?, red flags` });
+      (d.viewings || []).forEach((w) => rows.push({ kind: "row", danger: w.suspicious, cells: [
+        w.room, "viewing", t(w.cut), "", w.returned ? t(w.returned) : w.status, "",
+        w.minutes_out == null ? "" : `${Math.round(w.minutes_out)} min out`, w.allowed_minutes ? `allowed ${w.allowed_minutes}` : "",
+        w.issued_by || "", "", w.checked_in ? `Checked in - #${w.checkin_booking_id}, ${Math.round(w.minutes_to_checkin)} min later` : "Not checked in",
+        "", (w.flags || []).join("; ") || "OK"] }));
+      return {
+        tiles,
+        columns: ["Room", "Guest", "Check-in", "Key card cut", "Check-out", "Card wiped", "Clean card cut",
+          "Clean start", "Clean end", "Clean card back", "Inspected", "Ready after", "Red flags"],
+        rows,
+      };
+    },
+  },
   "fraud-summary": {
     label: "Fraud Summary",
     path: "fraud-summary",
     range: true,
     fetch: (p) => api.getFraudSummary(p),
-    project: (d) => ({
-      columns: ["Alert", "Type", "Severity", "Status", "Booking", "Room", "Detected At"],
-      rows: d.rows.map((r) => [r.id, r.type, r.severity, r.status, r.booking_id, r.room_id,
-        (r.detected_at || "").replace("T", " ").slice(0, 16)]),
-    }),
+    note: "Every alert in plain words - what happened, in which room, who did it, and whether anyone has checked it. Grouped by kind, most frequent first; each group says why it matters and what to check.",
+    // v7p (owner): readable - grouped by kind, each alert as a sentence
+    project: (d) => {
+      const rows = [];
+      (d.kinds || []).forEach((k) => {
+        rows.push({ kind: "section", label: `${k.title} - ${k.count} alert${k.count === 1 ? "" : "s"} (${k.open} not reviewed). ${k.meaning} Check: ${k.check}` });
+        d.rows.filter((r) => r.type === k.type).forEach((r) => rows.push([
+          r.when, r.room || "—", [r.guest, r.booking_id ? `#${r.booking_id}` : ""].filter(Boolean).join(" · ") || "—",
+          r.what_happened, r.staff || "—", r.status_text]));
+      });
+      return { columns: ["When", "Room", "Guest / booking", "What happened", "Staff", "Status"], rows };
+    },
   },
 };
 
@@ -655,6 +716,19 @@ export default function Reports() {
           {cfg.note && <p className="text-slate-500 text-xs mt-3">ⓘ {cfg.note}</p>}
         </div>
 
+        {/* v7p: KPI tiles (Room Turnaround & Cards) */}
+        {projected?.tiles && !loading && !error && (
+          <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-7 gap-3 mb-6">
+            {projected.tiles.map((tl) => (
+              <div key={tl.label} className={`rounded-xl border p-3 ${tl.tone === "bad"
+                ? "border-red-500/50 bg-red-900/20" : "border-slate-700 bg-slate-800/60"}`}>
+                <div className="text-xs text-slate-400">{tl.label}</div>
+                <div className={`text-xl font-bold ${tl.tone === "bad" ? "text-red-300" : "text-[#E5C07B]"}`}>{tl.value}</div>
+              </div>
+            ))}
+          </div>
+        )}
+
         {/* Table */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 rounded-2xl shadow-xl overflow-hidden backdrop-blur">
           <div className="p-5 border-b border-slate-700 flex items-center gap-2">
@@ -700,13 +774,17 @@ export default function Reports() {
                       );
                     }
                     const isSub = r && r.kind === "subtotal";
-                    const cells = isSub ? r.cells : r;
+                    // v7p: {kind: "row", cells, danger} - a row with a red flag is shaded red
+                    const isRow = r && r.kind === "row";
+                    const cells = isSub || isRow ? r.cells : r;
                     return (
                       <tr key={key} className={isSub
                         ? "bg-slate-800/40 font-semibold text-slate-100 border-t border-slate-600"
+                        : isRow && r.danger ? "bg-red-900/25 hover:bg-red-900/35 transition"
                         : "hover:bg-slate-700/30 transition"}>
                         {cells.map((c, j) => (
-                          <td key={j} className={`px-4 py-2.5 text-slate-200 whitespace-nowrap ${moneyCols.has(j) ? "text-right tabular-nums" : ""}`}>
+                          <td key={j} className={`px-4 py-2.5 text-slate-200 ${String(c ?? "").length > 45
+                            ? "whitespace-normal min-w-[18rem]" : "whitespace-nowrap"} ${moneyCols.has(j) ? "text-right tabular-nums" : ""}`}>
                             {c == null ? (isSub ? "" : "—") : String(c)}
                           </td>
                         ))}

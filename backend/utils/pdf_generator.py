@@ -1566,8 +1566,10 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
         # scaled to the printable width. Without this the 18-column check-out summary ran off both edges.
         def _w(i):
             vals = [header[i]] + [_cell(r[i]) for r in rows if isinstance(r, (list, tuple)) and i < len(r)]
-            longest = max((len(w) for v in vals for w in str(v).split()), default=4)
-            return max(4, min(longest, 16))
+            longest_word = max((len(w) for v in vals for w in str(v).split()), default=4)
+            longest_text = max((len(str(v)) for v in vals), default=4)
+            # a sentence column (v7p fraud summary) gets room to read; a number column its width
+            return max(7, min(longest_word, 16), min(longest_text, 18) if longest_text <= 40 else 40)
         weights = [_w(i) for i in range(ncols)]
         col_widths = [avail_width * w / sum(weights) for w in weights]
     table = Table(table_rows, repeatRows=1, colWidths=col_widths)
@@ -1621,7 +1623,8 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
 
     # v7m: a wide report (the check-out summary has 18 columns, the cashier summary 12 since v7n)
     # prints landscape, smaller, fitted.
-    wide = len(columns or []) >= 12
+    wordy = any(len(str(c)) > 70 for r in (rows or []) if isinstance(r, (list, tuple)) for c in r)
+    wide = len(columns or []) >= 12 or wordy      # v7p: plain-language reports (fraud summary) too
     doc = SimpleDocTemplate(file_path, pagesize=(landscape(A4) if wide else A4),
                             rightMargin=22, leftMargin=22, topMargin=22, bottomMargin=22)
     styles = getSampleStyleSheet()

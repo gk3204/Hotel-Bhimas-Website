@@ -35,6 +35,7 @@ from utils import ordering
 from utils.audit import write_audit
 from utils.auth_utils import require_admin
 from utils.settings import get_reports_config
+from utils import settings as app_settings   # v7p
 from services import ota_service
 from services import folio_resolver
 from utils import clock, gst          # F-03: one clock - see utils/clock.py
@@ -679,9 +680,12 @@ def build_hk_owner_report(db, day) -> tuple:
     flags = [bool(r.get("has_fraud")) for r in rd["rows"]]
     mt = maintenance_detail_table(maintenance_detail_data(db, day, day))
     lc = lost_cards_table(lost_cards_data(db, day, day))
-    pdf = generate_hk_owner_report_pdf(day, (rd_cols, rd_rows, flags), mt, lc)
+    # v7p (owner): the Room Turnaround & Cards KPIs and red flags for the same day, in the same PDF
+    ta = room_turnaround_data(db, day, day)
+    pdf = generate_hk_owner_report_pdf(day, (rd_cols, rd_rows, flags), mt, lc, turnaround=ta)
     caption = (f"Hotel Bhimas - housekeeping report {day:%d %b}: {len(rd_rows)} room(s) checked out, "
-               f"{sum(flags)} with a fraud alert, {len(mt[1])} maintenance ticket(s), "
+               f"{sum(flags)} with a fraud alert, {ta['kpis']['suspicious_stays']} stay(s) and "
+               f"{ta['kpis']['suspicious_viewings']} viewing(s) with a red flag, {len(mt[1])} maintenance ticket(s), "
                f"{len(lc[1])} lost key card(s). PDF attached.")
     return pdf, caption
 
@@ -873,22 +877,56 @@ def staff_performance_data(db, dfrom, dto):
 
 
 def fraud_summary_data(db, dfrom, dto):
-    """Fraud-alert summary over alerts detected in the range: counts by type/severity/status + list."""
+    """Fraud-alert summary over alerts detected in the range (hotel days): counts by type/severity/status
+    + every alert in plain language.
+
+    v7p (owner): "make fraud summary readable - the owner should clearly be able to understand what had
+    happened, how". Each row now says what happened (room, times, people, money), why it matters and
+    whether anyone has looked at it (utils/fraud_explain); `kinds` groups them, commonest first."""
+    from utils.fraud_explain import explain
     q = (db.query(FraudAlert)
-         .filter(func.date(FraudAlert.detected_at) >= dfrom, func.date(FraudAlert.detected_at) <= dto)
+         .filter(clock.business_date_sql(FraudAlert.detected_at) >= dfrom,
+                 clock.business_date_sql(FraudAlert.detected_at) <= dto)
          .order_by(FraudAlert.detected_at.desc()))
     alerts = q.all()
     by_type, by_severity, by_status = {}, {}, {}
-    rows = []
+    rows, kinds, cache = [], {}, {}
     for a in alerts:
         by_type[a.type] = by_type.get(a.type, 0) + 1
         by_severity[a.severity] = by_severity.get(a.severity, 0) + 1
         by_status[a.status] = by_status.get(a.status, 0) + 1
+        e = explain(db, a, cache)
         rows.append({"id": a.id, "type": a.type, "severity": a.severity, "status": a.status,
-                     "booking_id": a.booking_id, "room_id": a.room_id,
+                     "booking_id": a.booking_id, "room_id": a.room_id, "room": e["room"],
+                     "guest": e["guest"], "staff": e["staff"], "title": e["title"],
+                     "what_happened": e["sentence"], "meaning": e["meaning"], "check": e["check"],
+                     "status_text": e["status_text"], "when": e["when"],
                      "detected_at": clock.to_local(a.detected_at).isoformat() if a.detected_at else None})
+        k = kinds.setdefault(a.type, {"type": a.type, "title": e["title"], "meaning": e["meaning"],
+                                      "check": e["check"], "count": 0, "open": 0})
+        k["count"] += 1
+        k["open"] += 1 if a.status == "open" else 0
     return {"from": str(dfrom), "to": str(dto), "count": len(alerts),
+            "open": sum(1 for a in alerts if a.status == "open"),
+            "kinds": sorted(kinds.values(), key=lambda k: (-k["count"], k["title"])),
             "by_type": by_type, "by_severity": by_severity, "by_status": by_status, "rows": rows}
+
+
+def fraud_summary_table(data):
+    """v7p: grouped by kind of alert - a band says what it is, how many, why it matters and what to
+    check; under it, each alert as a sentence."""
+    cols = ["When", "Room", "Guest / booking", "What happened", "Staff", "Status"]
+    rows = []
+    for k in data["kinds"]:
+        rows.append({"section": f"{k['title']} - {k['count']} alert{'s' if k['count'] != 1 else ''}"
+                                f" ({k['open']} not reviewed). {k['meaning']} Check: {k['check']}"})
+        for r in data["rows"]:
+            if r["type"] != k["type"]:
+                continue
+            gb = " · ".join(x for x in (r.get("guest"), f"#{r['booking_id']}" if r.get("booking_id") else None) if x)
+            rows.append([r["when"], r.get("room") or "—", gb or "—", r["what_happened"],
+                         r.get("staff") or "—", r["status_text"]])
+    return cols, rows
 
 
 # ============================================================
@@ -1652,6 +1690,7 @@ def room_detail_data(db, dfrom, dto):
     every alert ever raised on the room, which made each row look fraudulent."""
     from models import HousekeepingTask
     rows = []
+    _fx_cache = {}
     out_at = func.coalesce(BookingItem.checked_out_at, Booking.checked_out_at)
     q = (db.query(BookingItem, Booking)
          .join(Booking, Booking.booking_id == BookingItem.booking_id)
@@ -1699,9 +1738,12 @@ def room_detail_data(db, dfrom, dto):
                               (FraudAlert.room_id == it.room_id)
                               & (FraudAlert.detected_at >= ci_utc) & (FraudAlert.detected_at <= win_end)))
                   .order_by(FraudAlert.detected_at).all())
-        fr = "; ".join(f"{a.type}({a.severity})" for a in frauds)
+        # v7p (owner): readable - what happened, not "type(severity)"
+        from utils.fraud_explain import explain as _explain
+        _ex = [_explain(db, a, _fx_cache) for a in frauds]
+        fr = " | ".join(f"{e['title']}: {e['short']}" for e in _ex)
         rows.append({
-            "booking_id": b.booking_id, "room": r.room_number if r else "—",
+            "booking_id": b.booking_id, "room": r.room_number if r else "—", "room_id": it.room_id,
             "guest": b.display_guest_name or None,
             "check_in": ci_local.isoformat() if ci_local else None,
             "check_out": clock.to_local(co).isoformat() if co else None,
@@ -1718,6 +1760,273 @@ def room_detail_data(db, dfrom, dto):
         })
     return {"from": str(dfrom), "to": str(dto), "rows": rows,
             "totals": {"stays": len(rows), "with_fraud": len([x for x in rows if x["has_fraud"]])}}
+
+
+# =====================================================================================================
+# v7p (owner, 15 Oct, items 4 + 5): "one more report to owner - room check-in, check-out, check-in card cut,
+# checkout card cut, cleaning card cut, clean start, clean end, clean card return, inspected by - and the
+# differences between them, meaningful to understand if any fraud happened; we can use it as a KPI metric
+# and it should also show in the UI". Plus "view card cut time, view card return time, then after viewing
+# was the room checked in". Built on room_detail_data (one row per room stay that checked out).
+# =====================================================================================================
+
+VIEWING_CHECKIN_WINDOW_MIN = 180          # a viewing "converted" when the room was checked in within 3 h
+CARD_LATE_AFTER_CHECKIN_MIN = 30
+
+
+def _iso_local(v):
+    """room_detail_data's ISO strings (already the hotel's clock) -> datetime, or None for text."""
+    if not v or not isinstance(v, str) or v[:2] != "20":
+        return None
+    try:
+        return datetime.fromisoformat(v[:26])
+    except ValueError:
+        return None
+
+
+def _mins(a, b):
+    return round((b - a).total_seconds() / 60.0, 1) if a and b else None
+
+
+def room_turnaround_data(db, dfrom, dto):
+    """Per room stay that checked out in the range: every moment from check-in to the room being ready
+    again, the minutes between them, and plain-language red flags; the viewing cards cut in the range and
+    whether a check-in followed; KPIs over both."""
+    from models import HousekeepingTask  # noqa: F401  (room_detail_data imports it too)
+    fcfg = app_settings.get_fraud_config(db)
+    cmin, cmax = float(fcfg.get("cleaning_min_minutes") or 0), float(fcfg.get("cleaning_max_minutes") or 0)
+    rd = room_detail_data(db, dfrom, dto)
+    rows = []
+    for r in rd["rows"]:
+        room = db.query(Room).filter(Room.room_id == r.get("room_id")).first() if r.get("room_id") else None
+        is_card_room = not room or (room.lock_type or "card") != "key"
+        ci, co = _iso_local(r["check_in"]), _iso_local(r["check_out"])
+        guest_cards = (db.query(CardIssuance)
+                       .filter(CardIssuance.booking_id == r["booking_id"], CardIssuance.room_id == r.get("room_id"),
+                               CardIssuance.card_type == "guest")
+                       .order_by(CardIssuance.issued_at).all()) if r.get("room_id") else []
+        first = next((c for c in guest_cards if c.issue_type == "checkin"), guest_cards[0] if guest_cards else None)
+        card_cut = clock.to_local(first.issued_at) if first and first.issued_at else None
+        live = [c for c in guest_cards if c.status == "active"]
+        wiped = [c.erased_at for c in guest_cards if c.erased_at]
+        wipe_at = clock.to_local(max(wiped)) if wiped else None
+        if not is_card_room:
+            wipe_txt = "key room"
+        elif live:
+            wipe_txt = "NOT wiped - still works"
+        elif wipe_at:
+            wipe_txt = None
+        elif guest_cards:
+            wipe_txt = "not wiped (closed in the system only)"
+        else:
+            wipe_txt = "no card"
+        cc_cut, cc_back = _iso_local(r.get("card_cut")), _iso_local(r.get("card_returned"))
+        st, en, insp = _iso_local(r.get("cleaning_started")), _iso_local(r.get("cleaning_ended")), _iso_local(r.get("inspected_at"))
+        d = {
+            "ci_to_card": _mins(ci, card_cut),
+            "co_to_wipe": _mins(co, wipe_at),
+            "co_to_clean_card": _mins(co, cc_cut),
+            "co_to_clean_start": _mins(co, st),
+            "clean_minutes": _mins(st, en),
+            "end_to_card_return": _mins(en, cc_back),
+            "end_to_inspected": _mins(en, insp),
+            "turnaround": _mins(co, insp or en),
+        }
+        flags = []
+        if is_card_room:
+            if card_cut is None:
+                flags.append("No key card was cut for this check-in")
+            elif d["ci_to_card"] is not None and d["ci_to_card"] < -5:
+                flags.append(f"Key card cut {abs(d['ci_to_card']):.0f} min BEFORE check-in")
+            elif d["ci_to_card"] is not None and d["ci_to_card"] > CARD_LATE_AFTER_CHECKIN_MIN:
+                flags.append(f"Key card cut {d['ci_to_card']:.0f} min after check-in")
+            if wipe_txt and wipe_txt.startswith("NOT"):
+                flags.append("Guest's key card was NOT wiped at check-out - it still opens the room")
+            elif wipe_txt and wipe_txt.startswith("not wiped"):
+                flags.append("Guest's key card was not wiped on the encoder at check-out")
+        if d["clean_minutes"] is not None and cmin and d["clean_minutes"] < cmin:
+            flags.append(f"Cleaned in only {d['clean_minutes']:.0f} min (minimum {cmin:.0f})")
+        if d["clean_minutes"] is not None and cmax and d["clean_minutes"] > cmax:
+            flags.append(f"Cleaning took {d['clean_minutes']:.0f} min (limit {cmax:.0f})")
+        if r.get("card_cut") and not cc_back:
+            flags.append(f"Cleaning card {r.get('card_returned') or 'not returned'}")
+        if d["end_to_card_return"] is not None and d["end_to_card_return"] < -5:
+            flags.append("Cleaning card returned BEFORE cleaning was marked done")
+        if (st or en) and not insp:
+            flags.append("Room never inspected after cleaning")
+        if not (st or en) and co:
+            flags.append("No cleaning recorded after check-out")
+        if r.get("has_fraud"):
+            flags.append("Fraud alert(s): " + (r.get("frauds") or ""))
+        rows.append({
+            "booking_id": r["booking_id"], "room": r["room"], "guest": r["guest"], "lock": "card" if is_card_room else "key",
+            "check_in": ci.isoformat() if ci else None, "checkin_card": card_cut.isoformat() if card_cut else None,
+            "check_out": co.isoformat() if co else None, "checkout_wipe": wipe_at.isoformat() if wipe_at else None,
+            "checkout_wipe_note": wipe_txt,
+            "clean_card_cut": r.get("card_cut"), "clean_start": r.get("cleaning_started"),
+            "clean_end": r.get("cleaning_ended"), "clean_card_returned": r.get("card_returned"),
+            "inspected_at": r.get("inspected_at"), "inspected_by": r.get("inspected_by"),
+            "cleaned_by": r.get("cleaned_by"), "diff": d, "flags": flags, "suspicious": bool(flags),
+        })
+
+    # ---- viewing cards (item 5): cut / returned / then checked in?
+    views = []
+    vcfg_min = None
+    try:
+        vcfg_min = int(app_settings.get_frontdesk_config(db).get("viewing_card_minutes") or 0) or None
+    except Exception:
+        pass
+    for c in (db.query(CardIssuance)
+              .filter(CardIssuance.card_type == "viewing", CardIssuance.status != "cancelled",
+                      clock.business_date_sql(CardIssuance.issued_at) >= dfrom,
+                      clock.business_date_sql(CardIssuance.issued_at) <= dto)
+              .order_by(CardIssuance.issued_at).all()):
+        room = db.query(Room).filter(Room.room_id == c.room_id).first() if c.room_id else None
+        cut = clock.to_local(c.issued_at) if c.issued_at else None
+        back = clock.to_local(c.erased_at) if c.erased_at else None
+        allowed = (round((c.valid_to - c.valid_from).total_seconds() / 60) if c.valid_to and c.valid_from else vcfg_min)
+        out_min = _mins(cut, back) if back else (_mins(cut, clock.now_local()) if c.status == "active" else None)
+        nxt = None
+        if cut and c.room_id:
+            nxt = (db.query(BookingItem, Booking).join(Booking, Booking.booking_id == BookingItem.booking_id)
+                   .filter(BookingItem.room_id == c.room_id, BookingItem.checked_in_at.isnot(None),
+                           BookingItem.checked_in_at >= cut,
+                           BookingItem.checked_in_at <= cut + timedelta(minutes=VIEWING_CHECKIN_WINDOW_MIN))
+                   .order_by(BookingItem.checked_in_at).first())
+        vflags = []
+        if c.status == "active" and not back:
+            vflags.append(f"Viewing card still out ({out_min:.0f} min)" if out_min is not None else "Viewing card still out")
+        elif not back:
+            vflags.append(f"Viewing card not returned ({c.status})")
+        if out_min is not None and allowed and out_min > allowed + 5:
+            vflags.append(f"Kept {out_min:.0f} min (allowed {allowed})")
+        if nxt is None and out_min is not None and out_min > 60:
+            vflags.append("Out over an hour with no check-in - check whether the room was used")
+        views.append({
+            "card_id": c.id, "room": room.room_number if room else "—",
+            "cut": cut.isoformat() if cut else None, "returned": back.isoformat() if back else None,
+            "status": c.status, "minutes_out": out_min, "allowed_minutes": allowed,
+            "issued_by": _user_name(db, c.issued_by),
+            "checked_in": bool(nxt),
+            "checkin_booking_id": nxt[1].booking_id if nxt else None,
+            "minutes_to_checkin": _mins(cut, nxt[0].checked_in_at) if nxt else None,
+            "flags": vflags, "suspicious": bool(vflags),
+        })
+
+    def _avg(key):
+        vals = [x["diff"][key] for x in rows if x["diff"].get(key) is not None and x["diff"][key] >= 0]
+        return round(sum(vals) / len(vals), 1) if vals else None
+
+    card_rows = [x for x in rows if x["lock"] == "card"]
+    cleaned = [x for x in rows if x["diff"]["clean_minutes"] is not None]
+    cc = [x for x in rows if x["clean_card_cut"]]
+    pct = (lambda n, d: round(100.0 * n / d, 1) if d else None)
+    kpis = {
+        "stays": len(rows),
+        "suspicious_stays": sum(1 for x in rows if x["suspicious"]),
+        "avg_checkin_to_card_min": _avg("ci_to_card"),
+        "pct_cards_wiped_at_checkout": pct(sum(1 for x in card_rows if x["checkout_wipe"] and not (x["checkout_wipe_note"] or "").startswith("NOT")), len(card_rows)),
+        "avg_checkout_to_clean_start_min": _avg("co_to_clean_start"),
+        "avg_clean_minutes": _avg("clean_minutes"),
+        "pct_cleaned_too_fast": pct(sum(1 for x in cleaned if cmin and x["diff"]["clean_minutes"] < cmin), len(cleaned)),
+        "pct_cleaning_cards_returned": pct(sum(1 for x in cc if _iso_local(x["clean_card_returned"])), len(cc)),
+        "avg_turnaround_min": _avg("turnaround"),
+        "pct_inspected": pct(sum(1 for x in rows if x["inspected_at"]), len(rows)),
+        "viewings": len(views),
+        "viewing_to_checkin_pct": pct(sum(1 for v in views if v["checked_in"]), len(views)),
+        "viewing_cards_returned_pct": pct(sum(1 for v in views if v["returned"]), len(views)),
+        "suspicious_viewings": sum(1 for v in views if v["suspicious"]),
+    }
+    return {"from": str(dfrom), "to": str(dto), "rows": rows, "viewings": views, "kpis": kpis,
+            "settings": {"cleaning_min_minutes": cmin, "cleaning_max_minutes": cmax,
+                         "viewing_checkin_window_min": VIEWING_CHECKIN_WINDOW_MIN}}
+
+
+KPI_LABELS = [
+    ("stays", "Rooms checked out", ""), ("suspicious_stays", "Stays with a red flag", ""),
+    ("avg_checkin_to_card_min", "Avg check-in → key card", " min"),
+    ("pct_cards_wiped_at_checkout", "Key cards wiped at check-out", "%"),
+    ("avg_checkout_to_clean_start_min", "Avg check-out → cleaning start", " min"),
+    ("avg_clean_minutes", "Avg cleaning time", " min"),
+    ("pct_cleaned_too_fast", "Cleanings too fast", "%"),
+    ("pct_cleaning_cards_returned", "Cleaning cards returned", "%"),
+    ("avg_turnaround_min", "Avg check-out → room ready", " min"),
+    ("pct_inspected", "Rooms inspected", "%"),
+    ("viewings", "Viewing cards", ""), ("viewing_to_checkin_pct", "Viewings → check-in", "%"),
+    ("viewing_cards_returned_pct", "Viewing cards returned", "%"),
+    ("suspicious_viewings", "Viewings with a red flag", ""),
+]
+
+
+def kpi_pairs(kpis):
+    return [(lbl, "—" if kpis.get(k) is None else f"{kpis[k]:g}{unit}") for k, lbl, unit in KPI_LABELS]
+
+
+def _hm(v, base=None, delta=None):
+    """'15/10 14:05 (+12m)' - the time, and minutes from the step before."""
+    t = _iso_local(v) if isinstance(v, str) else v
+    if not t:
+        return v or "—"
+    s = t.strftime("%d/%m %H:%M")
+    if delta is not None:
+        s += f" ({'+' if delta >= 0 else ''}{delta:.0f}m)"
+    return s
+
+
+TURNAROUND_STAY_COLS = ["Room", "Guest", "Check-in", "Key card cut", "Check-out", "Card wiped", "Clean card cut",
+                        "Clean start", "Clean end", "Clean card back", "Inspected", "Ready after", "Red flags"]
+TURNAROUND_VIEW_COLS = ["Room", "Viewing card cut", "Returned", "Minutes out", "Allowed", "Cut by",
+                        "Checked in after?", "Red flags"]
+
+
+def room_turnaround_tables(data):
+    """(stay_cols, stay_rows, stay_flags), (view_cols, view_rows, view_flags) - shared by the screen's PDF / CSV
+    and the owner's daily report."""
+    srows, sflags = [], []
+    for x in data["rows"]:
+        d = x["diff"]
+        srows.append([
+            x["room"], x["guest"] or "", _hm(x["check_in"]), _hm(x["checkin_card"], delta=d["ci_to_card"]),
+            _hm(x["check_out"]), x["checkout_wipe_note"] or _hm(x["checkout_wipe"], delta=d["co_to_wipe"]),
+            _hm(x["clean_card_cut"], delta=d["co_to_clean_card"]), _hm(x["clean_start"]),
+            _hm(x["clean_end"], delta=d["clean_minutes"]),
+            _hm(x["clean_card_returned"], delta=d["end_to_card_return"]),
+            (_hm(x["inspected_at"], delta=d["end_to_inspected"]) + (f" by {x['inspected_by']}" if x["inspected_by"] else "")
+             if x["inspected_at"] else "—"),
+            (f"{d['turnaround']:.0f} min" if d["turnaround"] is not None else "—"),
+            "; ".join(x["flags"]) or "OK"])
+        sflags.append(x["suspicious"])
+    vrows, vflags = [], []
+    for v in data["viewings"]:
+        vrows.append([v["room"], _hm(v["cut"]), _hm(v["returned"]) if v["returned"] else v["status"],
+                      (f"{v['minutes_out']:.0f}" if v["minutes_out"] is not None else "—"),
+                      v["allowed_minutes"] or "—", v["issued_by"] or "—",
+                      (f"Yes - booking #{v['checkin_booking_id']}, {v['minutes_to_checkin']:.0f} min later"
+                       if v["checked_in"] else "No"),
+                      "; ".join(v["flags"]) or "OK"])
+        vflags.append(v["suspicious"])
+    return (TURNAROUND_STAY_COLS, srows, sflags), (TURNAROUND_VIEW_COLS, vrows, vflags)
+
+
+@router.get("/room-turnaround", dependencies=[Depends(require_admin)])
+def room_turnaround_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                           format: str = Query("json"), db: Session = Depends(get_db)):
+    """v7p: Room Turnaround & Cards - KPIs, per-stay timeline with differences and red flags, viewing cards."""
+    dfrom, dto = _range(from_, to)
+    data = room_turnaround_data(db, dfrom, dto)
+    fmt = (format or "json").lower()
+    if fmt == "pdf":
+        from utils.report_pdf import generate_turnaround_pdf
+        path = generate_turnaround_pdf(data, f"{dfrom:%d %b %Y}" + ("" if dfrom == dto else f" to {dto:%d %b %Y}"))
+        return FileResponse(path, media_type="application/pdf", filename=f"room_turnaround_{dfrom}_{dto}.pdf")
+    if fmt == "csv":
+        (sc, sr, _sf), (vc, vr, _vf) = room_turnaround_tables(data)
+        rows = ([{"section": "KPIs"}] + [[a, b] + [""] * (len(sc) - 2) for a, b in kpi_pairs(data["kpis"])]
+                + [{"section": "Room stays"}, sc] + sr + [{"section": "Viewing cards"}, vc + [""] * (len(sc) - len(vc))]
+                + [r + [""] * (len(sc) - len(r)) for r in vr])
+        return _csv_response("room_turnaround", sc, rows, None)
+    return data
+
 
 
 ROOM_DETAIL_COLS = ["Room", "Guest", "Check-in", "Check-out", "Card cut", "Card returned", "Cleaning start",
@@ -2368,11 +2677,10 @@ def fraud_summary_report(from_: str | None = Query(None, alias="from"), to: str 
                          format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
     data = fraud_summary_data(db, dfrom, dto)
-    cols = ["Alert", "Type", "Severity", "Status", "Booking", "Room", "Detected At"]
-    rows = [[r["id"], r["type"], r["severity"], r["status"], r["booking_id"], r["room_id"],
-             r["detected_at"]] for r in data["rows"]]
-    return _export_or_json(format, data, title="Fraud-Alert Summary", columns=cols, rows=rows,
-                           meta=_meta(dfrom, dto), filename="fraud_summary")
+    cols, rows = fraud_summary_table(data)
+    meta = {**_meta(dfrom, dto), "Alerts": data["count"], "Not reviewed": data["open"]}
+    return _export_or_json(format, data, title="Fraud Summary - what happened", columns=cols, rows=rows,
+                           meta=meta, filename="fraud_summary")
 
 
 @router.get("/staff-performance", dependencies=[Depends(require_admin)])
