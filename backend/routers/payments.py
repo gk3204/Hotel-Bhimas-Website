@@ -23,6 +23,7 @@ from utils.auth_utils import require_reception_or_admin, require_admin, get_curr
 from services import folio_resolver, payment_split
 from utils.audit import write_audit, _resolve_user_id
 from utils.owner_otp import consume_otp, consume_otp_for_booking
+from utils.doc_rooms import payment_rooms_label     # v7m
 from utils.settings import (get_desk_pay_config, set_setting,
                             DESK_PAY_EDITABLE_KEYS, DESK_PAY_GATEWAY_KEY)
 from services import phonepe_client
@@ -1930,6 +1931,8 @@ def receipt_payload(db, payment, kind="payment") -> dict:
         "refund_reference": payment.refund_reference,
         # v6m.13 (owner, item 6): where the stay came from, from the booking itself
         "source": _src_label(db, booking),
+        # v7m (owner): the room(s) the money was for
+        "rooms": payment_rooms_label(db, payment),
     }
 
 

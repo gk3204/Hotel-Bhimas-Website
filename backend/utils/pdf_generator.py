@@ -1,4 +1,9 @@
-from reportlab.lib.pagesizes import A4
+from reportlab.lib.pagesizes import A4, landscape
+from reportlab import rl_config
+
+# v7m: write images (the logo on every page) as binary streams, not ASCII85 text. Half the time of a
+# 200-document day ZIP went on re-encoding the same logo as ASCII85; binary streams are standard PDF.
+rl_config.useA85 = 0
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer,
     Table, TableStyle, Image
@@ -459,13 +464,15 @@ def generate_folio_invoice_pdf(invoice_data):
         ["Invoice No", invoice_data["invoice_no"],
          "Invoice Date", (issued_at.strftime("%d-%m-%Y %H:%M") if issued_at
                           else invoice_data["invoice_date"].strftime("%d-%m-%Y"))],
+        # v7m (owner): the room(s) this bill is for
         ["Booking ID", str(booking["booking_id"]),
-         "Nights", str(booking["nights"])],
+         "Room(s)", booking.get("rooms") or "N/A"],
         ["Guest", guest["name"], "Phone", guest["phone"]],
         ["Check-in", _moment(booking.get("checked_in_at") or booking["check_in"]),
          "Check-out", _moment(booking.get("checked_out_at") or booking["check_out"])],
         ["Source", booking.get("source_label") or "N/A",
-         "Issued by", invoice_data.get("issued_by_name") or "Front desk"],
+         "Nights", str(booking["nights"])],
+        ["Issued by", invoice_data.get("issued_by_name") or "Front desk", "", ""],
     ]
     # v6m.13 (owner, item 4): the receipt for what was paid before arrival
     pre = invoice_data.get("prepaid_receipt")
@@ -751,23 +758,26 @@ def generate_registration_slip_pdf(slip_data):
 
     id_label = (slip_data.get("id_type") or "").replace("_", " ").title() or "N/A"
     meta_data = [
-        ["Booking ID", str(slip_data["booking_id"]),
+        # v7m (owner): the slip's OWN number - the booking id is no longer the slip number
+        ["Slip No", slip_data.get("slip_no") or "N/A",
          "Checked in", _dt(slip_data.get("checked_in_at"))],
+        ["Booking ID", str(slip_data["booking_id"]),
+         "Room(s)", ", ".join(slip_data.get("rooms") or []) or "N/A"],
         ["Guest", slip_data.get("guest_name") or "", "Phone", slip_data.get("phone") or ""],
         ["ID Type", id_label, "ID Number", slip_data.get("id_number_masked") or "N/A"],
-        ["Room(s)", ", ".join(slip_data.get("rooms") or []) or "N/A",
-         "Source", slip_data.get("source_label")
-         or (slip_data.get("booking_source") or "").replace("_", " ").title()],
         ["Check-in", _d(slip_data.get("check_in")),
          "Exp. check-out",
          _dt(slip_data.get("expected_check_out")) if slip_data.get("expected_check_out")
          else _d(slip_data.get("check_out"))],
+        ["Source", slip_data.get("source_label")
+         or (slip_data.get("booking_source") or "").replace("_", " ").title(), "", ""],
     ]
     meta_table = Table(meta_data, colWidths=[80, 190, 80, 130])
     meta_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
         ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f5f5f5")),
-        ('FONTNAME', (1, 1), (1, 1), 'Helvetica-Bold'),
+        ('FONTNAME', (1, 0), (1, 0), 'Helvetica-Bold'),
+        ('FONTNAME', (1, 2), (1, 2), 'Helvetica-Bold'),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
         ('TOPPADDING', (0, 0), (-1, -1), 2),
         ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
@@ -967,7 +977,8 @@ def generate_payment_receipt_pdf(receipt_data):
          (receipt_data.get("refunded_by_name") if is_refund else receipt_data.get("collected_by_name"))
          or "Front desk"],
         # v6m.13 (owner, item 6): where the stay came from, on every receipt
-        ["Source", receipt_data.get("source") or "N/A", "", ""],
+        # v7m (owner): ...and which room
+        ["Source", receipt_data.get("source") or "N/A", "Room(s)", receipt_data.get("rooms") or "N/A"],
     ]
     if is_refund:
         meta_data += [
@@ -1504,7 +1515,7 @@ def generate_company_invoice_pdf(payload):
     return file_path
 
 
-def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=None):
+def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=None, avail_width=None):
     """The branded report table used by generate_report_pdf, as a reusable flowable (v5i — the
     close-shift report embeds the cashier rows with it).
 
@@ -1549,7 +1560,17 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
     if has_totals:
         table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", body) for v in totals_row])
 
-    table = Table(table_rows, repeatRows=1)
+    col_widths = None
+    if avail_width:
+        # v7m: fit a wide report to the page - each column gets room for its longest value (capped),
+        # scaled to the printable width. Without this the 18-column check-out summary ran off both edges.
+        def _w(i):
+            vals = [header[i]] + [_cell(r[i]) for r in rows if isinstance(r, (list, tuple)) and i < len(r)]
+            longest = max((len(w) for v in vals for w in str(v).split()), default=4)
+            return max(4, min(longest, 16))
+        weights = [_w(i) for i in range(ncols)]
+        col_widths = [avail_width * w / sum(weights) for w in weights]
+    table = Table(table_rows, repeatRows=1, colWidths=col_widths)
     style = [
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#B8860B")),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -1598,10 +1619,12 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
     safe = re.sub(r"[^A-Za-z0-9]+", "_", (title or "report")).strip("_").lower() or "report"
     file_path = os.path.join(tempfile.gettempdir(), f"report_{safe}.pdf")
 
-    doc = SimpleDocTemplate(file_path, pagesize=A4,
+    # v7m: a wide report (the check-out summary has 18 columns) prints landscape, smaller, fitted.
+    wide = len(columns or []) > 12
+    doc = SimpleDocTemplate(file_path, pagesize=(landscape(A4) if wide else A4),
                             rightMargin=22, leftMargin=22, topMargin=22, bottomMargin=22)
     styles = getSampleStyleSheet()
-    styles["Normal"].fontSize = 8
+    styles["Normal"].fontSize = 7 if wide else 8
     elements = []
 
     # Header (same brand block as the invoice / shift report).
@@ -1634,7 +1657,8 @@ def generate_report_pdf(title, columns, rows, totals_row=None, meta=None):
             " &nbsp;|&nbsp; ".join(f"{k}: {v}" for k, v in meta.items()), meta_style))
     elements.append(Spacer(1, 0.08 * inch))
 
-    table = build_marker_table(columns, rows, totals_row, styles)
+    table = build_marker_table(columns, rows, totals_row, styles,
+                               font_size=(7 if wide else None), avail_width=(doc.width if wide else None))
     elements.append(table)
 
     if not rows:

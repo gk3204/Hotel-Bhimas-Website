@@ -95,6 +95,7 @@ def mode_label(pr) -> str:
 
 
 def prepaid_receipt_payload(db, pr) -> dict:
+    from utils.doc_rooms import booking_rooms_label
     """The dict generate_payment_receipt_pdf() expects, kind='prepaid'."""
     booking = db.query(Booking).filter(Booking.booking_id == pr.booking_id).first()
     guest = booking.guest if booking else None
@@ -115,6 +116,7 @@ def prepaid_receipt_payload(db, pr) -> dict:
         "channel": pr.channel,
         "collected_by_name": (issuer.full_name or issuer.username) if issuer else None,
         "source": source_label(db, booking),
+        "rooms": booking_rooms_label(db, pr.booking_id),   # v7m (owner): the room(s)
     }
 
 

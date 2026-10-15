@@ -151,7 +151,7 @@ def documents_of_day(db, day):
         except Exception as e:
             logger.warning(f"documents ZIP: registration slip {bid} skipped: {e}")
             continue
-        name = f"REG-{bid}" + (f"-rooms-{'-'.join(sd.get('rooms') or [])}" if part else "")
+        name = sd.get("slip_no") or f"REG-B{bid}"      # v7m: the slip's own number
         docs.append(("Registration slips", f"{_safe(name)}.pdf", "Registration slip",
                      min(i.checked_in_at for i in items), bid, sd.get("guest_name"), sd.get("source_label"),
                      "", None, ", ".join(sd.get("rooms") or []), "",

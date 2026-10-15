@@ -1387,6 +1387,7 @@ def _source_label(db, booking) -> str:
 
 
 def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
+    from utils.doc_rooms import folio_rooms_label
     """Everything the PDF/email needs. Charges are frozen once invoiced, so
     recomputing line groups here always matches the stored snapshot."""
     booking = db.query(Booking).options(joinedload(Booking.guest)).filter(
@@ -1496,6 +1497,7 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
             "checked_out_at": _cout,
             "source_label": _source_label(db, booking) if booking else None,
             "nights": nights,
+            "rooms": folio_rooms_label(db, folio),     # v7m (owner): the room(s) on this bill
         },
         "issued_at": clock.to_local(invoice.created_at),
         "prepaid_receipt": _prepaid_receipt(db, folio.booking_id),

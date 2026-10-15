@@ -525,6 +525,18 @@ class FolioCharge(Base):
     bill_to = Column(String(10), nullable=False, default="guest", index=True)  # guest | company
 
 
+class RegistrationSlip(Base):
+    """v7m: a registration slip's own number, REG-<id> (migration 058). One per booking + the set of
+    rooms on the slip (`room_key`, sorted room ids), so a reprint keeps its number."""
+    __tablename__ = "registration_slips"
+    __table_args__ = (UniqueConstraint("booking_id", "room_key", name="uq_registration_slip_booking_rooms"),)
+    id = Column(Integer, primary_key=True, index=True)
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=False, index=True)
+    room_key = Column(String(200), nullable=False)
+    created_at = Column(DateTime, nullable=False, server_default=func.now())
+    created_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+
+
 class EmailOutbox(Base):
     """v7d: an e-mail Mailjet refused for a reason that can pass (daily limit, outage), kept for the
     retry sweep (services/email_outbox.py). See migration 055."""

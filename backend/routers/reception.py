@@ -4564,7 +4564,29 @@ def _reg_rules(db) -> str:
         return ""
 
 
-def registration_slip_data(db, booking_id: int, room_ids: str | None = None) -> dict:
+def registration_slip_no(db, booking_id: int, room_ids, user=None) -> str:
+    """v7m (owner): every registration slip has its own number, REG-<n> - not the booking id. The
+    same booking + the same rooms is the same slip, so a reprint keeps its number; a second car on
+    a split arrival is a new slip with a new number."""
+    from models import RegistrationSlip
+    from sqlalchemy.exc import IntegrityError
+    key = ",".join(str(r) for r in sorted({int(r) for r in room_ids if r}))[:200] or "-"
+    row = (db.query(RegistrationSlip)
+           .filter(RegistrationSlip.booking_id == booking_id, RegistrationSlip.room_key == key).first())
+    if row is None:
+        try:
+            row = RegistrationSlip(booking_id=booking_id, room_key=key,
+                                   created_by=_resolve_user_id(db, user) if user else None)
+            db.add(row)
+            db.commit()
+        except IntegrityError:          # two desks printed the same slip at once - take theirs
+            db.rollback()
+            row = (db.query(RegistrationSlip)
+                   .filter(RegistrationSlip.booking_id == booking_id, RegistrationSlip.room_key == key).one())
+    return f"REG-{row.id}"
+
+
+def registration_slip_data(db, booking_id: int, room_ids: str | None = None, user=None) -> dict:
     """v7e: everything the registration slip prints - shared by the slip endpoint and the day's
     documents ZIP. `room_ids` (comma-separated) narrows it to those rooms."""
     booking = db.query(Booking).options(
@@ -4636,6 +4658,8 @@ def registration_slip_data(db, booking_id: int, room_ids: str | None = None) -> 
                    "room_number": rooms[0] if rooms else None}]
 
     slip_data = {
+        # v7m: the slip's own number (REG-n), printed on it and used as its file name
+        "slip_no": registration_slip_no(db, booking.booking_id, [i.room_id for i in slip_items], user),
         "booking_id": booking.booking_id,
         "guest_name": booking.display_guest_name,
         "phone": booking.guest.phone if booking.guest else "",
@@ -4672,7 +4696,7 @@ def registration_slip(booking_id: int, room_ids: str = Query(None),
     """The paper the guest signs. `room_ids` (comma-separated) prints the slip for just those
     rooms — v6f, because on a split arrival the first car should not have to wait for the third
     before it can sign anything. Omitted, every room that has actually arrived is on it."""
-    slip_data = registration_slip_data(db, booking_id, room_ids)   # v7e: shared with the documents ZIP
+    slip_data = registration_slip_data(db, booking_id, room_ids, user)   # v7e: shared with the documents ZIP
     try:
         pdf_path = generate_registration_slip_pdf(slip_data)
     except Exception as e:
@@ -4680,6 +4704,7 @@ def registration_slip(booking_id: int, room_ids: str = Query(None),
         raise HTTPException(status_code=500, detail="Failed to generate registration slip")
 
     write_audit(db, user, "reception.slip_print", "booking", booking_id,
-                after={"guest": slip_data["guest_name"]}, client="desktop", commit=True)
+                after={"guest": slip_data["guest_name"], "slip_no": slip_data["slip_no"]},
+                client="desktop", commit=True)
     return FileResponse(pdf_path, media_type="application/pdf",
-                        filename=f"registration_slip_{booking_id}.pdf")
+                        filename=f"registration_slip_{slip_data['slip_no']}.pdf")

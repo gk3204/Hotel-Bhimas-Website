@@ -1450,6 +1450,16 @@ def checkout_summary_data(db, day):
         pairs = [(c.gst_percent, c.amount) for c in charges if c.type not in ("payment", "discount")]
         sp = _gst_split(pairs, discount=discount)   # v6d (F-11): tax on the discounted value
         taxable, cgst, sgst = sp["taxable_total"], sp["cgst_total"], sp["sgst_total"]
+        # v7m (owner): the CGST / SGST inside the room rent and inside the food, each after its
+        # share of the bill's discount (pro-rata by amount, as the invoice applies it).
+        _gross = sp["gross_total"]
+
+        def _part(types):
+            sel = [(c.gst_percent, c.amount) for c in charges if c.type in types]
+            g = round(sum(float(a or 0) for _p, a in sel), 2)
+            share = round(abs(discount) * g / _gross, 2) if _gross and discount else 0.0
+            return _gst_split(sel, discount=share) if sel else {"cgst_total": 0.0, "sgst_total": 0.0}
+        _rs, _fs = _part(("room",)), _part(("food", "minibar"))
         advance = round(sum(float(p.amount or 0) for p in
                             db.query(Payment).filter(Payment.booking_id == b.booking_id,
                                                      Payment.status == "paid").all()
@@ -1475,13 +1485,33 @@ def checkout_summary_data(db, day):
             "checked_out_by": _user_name(db, _by) or "",
             "rooms": ", ".join(r.room_number for r in rooms if r) or "—",
             "room_rent": room_rent, "sgst": sgst, "cgst": cgst, "food": food, "laundry": laundry,
+            "room_cgst": _rs["cgst_total"], "room_sgst": _rs["sgst_total"],
+            "food_cgst": _fs["cgst_total"], "food_sgst": _fs["sgst_total"],
             "misc": misc, "discount": discount, "total": round(float(f.total or 0), 2),
             "advance": advance, "refund": refund, "bill_amount": round(float(f.total or 0), 2),
         })
     keys = ("room_rent", "sgst", "cgst", "food", "laundry", "misc", "discount", "total",
-            "advance", "refund", "bill_amount")
+            "advance", "refund", "bill_amount", "room_cgst", "room_sgst", "food_cgst", "food_sgst")
     totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
     return {"day": str(day), "rows": rows, "totals": totals}
+
+
+def checkout_summary_table(data):
+    """v7m: one layout for the screen's PDF / CSV and the end-of-day mail. Room rent and food each
+    show the CGST and SGST inside them; the bill's total CGST / SGST (every line, after discount)
+    stays as it was."""
+    cols = ["Bill", "Rooms", "Room Rent", "Room CGST", "Room SGST", "Food", "Food CGST", "Food SGST",
+            "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance", "Refund", "Bill Amt",
+            "Out", "By"]
+    rows = [[r["bill_no"], r["rooms"], r["room_rent"], r["room_cgst"], r["room_sgst"], r["food"],
+             r["food_cgst"], r["food_sgst"], r["laundry"], r["misc"], r["discount"], r["cgst"], r["sgst"],
+             r["advance"], r["refund"], r["bill_amount"], r.get("checked_out_at", ""),
+             r.get("checked_out_by", "")] for r in data["rows"]]
+    t = data["totals"]
+    totals = ["TOTAL", "", t["room_rent"], t["room_cgst"], t["room_sgst"], t["food"], t["food_cgst"],
+              t["food_sgst"], t["laundry"], t["misc"], t["discount"], t["cgst"], t["sgst"], t["advance"],
+              t["refund"], t["bill_amount"], "", ""]
+    return cols, rows, totals
 
 
 def _charge_room_label(db, charge, booking_id, _cache, _room_cache):
@@ -1794,15 +1824,7 @@ def _eod_report_pdf(db, key, day):
         d = lost_cards_data(db, day, day)
         cols, rows, totals = lost_cards_table(d)   # v7g
     elif key == "checkout_summary":
-        d = checkout_summary_data(db, day)
-        cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
-                "Advance", "Refund", "Bill Amt", "Out", "By"]
-        rows = [[r["bill_no"], r["rooms"], r["room_rent"], r["sgst"], r["cgst"], r["food"], r["laundry"],
-                 r["misc"], r["discount"], r["advance"], r["refund"], r["bill_amount"],
-                 r.get("checked_out_at", ""), r.get("checked_out_by", "")] for r in d["rows"]]
-        t = d["totals"]; totals = ["TOTAL", "", t["room_rent"], t["sgst"], t["cgst"], t["food"],
-                                   t["laundry"], t["misc"], t["discount"], t["advance"], t["refund"],
-                                   t["bill_amount"], "", ""]
+        cols, rows, totals = checkout_summary_table(checkout_summary_data(db, day))
     elif key == "room_service_by_room":
         cols, rows, totals = _rs_by_room_table(room_service_by_room_data(db, day, day))
     elif key == "room_detail":
@@ -2182,15 +2204,7 @@ def checkout_summary_report(day: str | None = Query(None), format: str = Query("
     discount, advance, refund, bill amount."""
     d = _parse_date(day, "day") if day else date.today()
     data = checkout_summary_data(db, d)
-    cols = ["Bill", "Rooms", "Room Rent", "SGST", "CGST", "Food", "Laundry", "Misc", "Discount",
-            "Advance", "Refund", "Bill Amount", "Checked out", "By"]
-    rows = [[r["bill_no"], r["rooms"], r["room_rent"], r["sgst"], r["cgst"], r["food"],
-             r["laundry"], r["misc"], r["discount"], r["advance"], r["refund"], r["bill_amount"],
-             r.get("checked_out_at", ""), r.get("checked_out_by", "")]
-            for r in data["rows"]]
-    t = data["totals"]
-    totals = ["TOTAL", "", t["room_rent"], t["sgst"], t["cgst"], t["food"], t["laundry"],
-              t["misc"], t["discount"], t["advance"], t["refund"], t["bill_amount"], "", ""]
+    cols, rows, totals = checkout_summary_table(data)
     meta = {"Day": f"{d:%d-%m-%Y}", **_meta()}
     return _export_or_json(format, data, title="Check-Out Summary", columns=cols, rows=rows,
                            totals_row=totals, meta=meta, filename="checkout_summary")
