@@ -4286,10 +4286,19 @@ def _build_desk_board(db: Session):
                 CardIssuance.card_type == "viewing", CardIssuance.status == "active").all():
             _viewing_by_room[c.room_id] = c
 
+    # v7q: the desk housekeeping grid - rows by room type (AC / fan), columns by building + floor
+    _rt_by_id = {t.room_type_id: t for t in db.query(RoomType).all()}
+    _bnames, _fnames = app_settings.room_layout_names(db)
     for r, hk in _hk_rows:
+        _rt = _rt_by_id.get(r.room_type_id)
         rooms_hk.append({
             "room_id": r.room_id,
             "room_number": r.room_number,
+            "room_type_id": r.room_type_id,
+            "room_type_name": _rt.name if _rt else None,
+            "is_ac": bool(_rt and _rt.is_ac),
+            "building_name": _bnames.get(r.building, ""),
+            "floor_name": _fnames.get(r.floor, ""),
             "room_status": r.status,
             "housekeeping_status": effective_hk_status(r, hk.status if hk else None),   # v6m.8
             "updated_at": clock.to_local(hk.updated_at).isoformat() if hk and hk.updated_at else None,

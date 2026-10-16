@@ -873,6 +873,81 @@ def get_overstay_config(db) -> dict:
 # ---------------------------------------------------------------------------
 # Extra person (v6l)
 # ---------------------------------------------------------------------------
+# v7q (owner): "each room has Hotel Building with a dropdown, values set in settings (normally 1,2,3),
+# and Hotel Floor as another dropdown". The VALUE stays a number - it is written onto the key card
+# (BBFFRR) - and may carry a name ("Main block"). Stored as JSON:
+#   {"buildings": [{"value": 1, "name": "Main block"}], "floors": [{"value": 0, "name": "Ground"}, ...]}
+ROOM_LAYOUT_KEY = "room_layout"
+
+
+def _layout_list(raw, used):
+    out, seen = [], set()
+    for e in (raw or []):
+        try:
+            v = int(e.get("value"))
+        except (TypeError, ValueError, AttributeError):
+            continue
+        if v in seen or not (1 <= v <= 99):
+            continue
+        seen.add(v)
+        out.append({"value": v, "name": str(e.get("name") or "").strip()[:30]})
+    for v in used:                         # a value a room uses is never missing from the list
+        if v not in seen:
+            out.append({"value": v, "name": ""})
+            seen.add(v)
+    return sorted(out, key=lambda x: x["value"])
+
+
+def get_room_layout(db) -> dict:
+    """Buildings and floors for the Rooms dropdowns and the desk housekeeping grid. Until the owner
+    saves a layout it is built from the values the rooms already use (or 1 / 1 with no rooms)."""
+    from models import Room
+    used_b = sorted({int(b) for (b,) in db.query(Room.building).distinct().all() if b is not None})
+    used_f = sorted({int(f) for (f,) in db.query(Room.floor).distinct().all() if f is not None})
+    raw = get_setting(db, ROOM_LAYOUT_KEY)
+    try:
+        d = json.loads(raw) if raw else {}
+    except (TypeError, ValueError):
+        d = {}
+    if not isinstance(d, dict):
+        d = {}
+    b = _layout_list(d.get("buildings"), used_b) or [{"value": 1, "name": ""}]
+    f = _layout_list(d.get("floors"), used_f) or [{"value": 1, "name": ""}]
+    return {"buildings": b, "floors": f, "used": {"buildings": used_b, "floors": used_f}}
+
+
+def validate_room_layout(d) -> list:
+    errs = []
+    if not isinstance(d, dict):
+        return ["expected an object with buildings and floors"]
+    for key, label in (("buildings", "Building"), ("floors", "Floor")):
+        items = d.get(key)
+        if not isinstance(items, list) or not items:
+            errs.append(f"add at least one {label.lower()}")
+            continue
+        seen = set()
+        for e in items:
+            try:
+                v = int((e or {}).get("value"))
+            except (TypeError, ValueError, AttributeError):
+                errs.append(f"{label} numbers must be whole numbers")
+                continue
+            if not 1 <= v <= 99:
+                errs.append(f"{label} {v}: must be 1-99 (it is written on the key card)")
+            if v in seen:
+                errs.append(f"{label} {v} is listed twice")
+            seen.add(v)
+            if len(str((e or {}).get("name") or "")) > 30:
+                errs.append(f"{label} {v}: name too long (30 characters max)")
+    return errs
+
+
+def room_layout_names(db) -> tuple:
+    """({building: name}, {floor: name}) - '' where no name was given."""
+    lay = get_room_layout(db)
+    return ({x["value"]: x["name"] for x in lay["buildings"]}, {x["value"]: x["name"] for x in lay["floors"]})
+
+
 EXTRA_PERSON_KEY = "extra_person_charge"
 EXTRA_PERSON_CHARGE_TYPE = "extra_person"
 

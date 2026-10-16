@@ -82,7 +82,18 @@ export const updateOtaConfig = (patch) =>
     body: JSON.stringify(patch),
   }).then(handle);
 
-// v6l: one-time extra-person charge — AC / non-AC price before GST, GST % added on top.
+// v7q: buildings and floors (number + optional name) for Rooms and the desk housekeeping grid.
+export const getRoomLayout = () =>
+  fetch(`${BASE_URL}/settings/room-layout`, { headers: authHeaders() }).then(handle);
+
+export const setRoomLayout = (config) =>
+  fetch(`${BASE_URL}/settings/room-layout`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify({ config }),
+  }).then(handle);
+
+// v6l: extra-person charge (per night since v7n) — AC / non-AC price before GST, GST % added on top.
 export const getExtraPerson = () =>
   fetch(`${BASE_URL}/settings/extra-person`, { headers: authHeaders() }).then(handle);
 

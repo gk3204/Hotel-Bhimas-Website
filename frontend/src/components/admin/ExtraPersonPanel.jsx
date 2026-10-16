@@ -44,7 +44,7 @@ export default function ExtraPersonPanel({ showToast }) {
     <Card className="mb-5">
       <div className="p-5">
         <p className="text-slate-400 text-sm mb-4">
-          A one-time charge for each extra person in a room, added by the desk from the folio
+          A charge for each extra person in a room <b>for every night</b> of the stay, added by the desk from the folio
           (<b>Add extra person</b>). The price follows the room type&apos;s AC setting. Prices are
           <b> before GST</b>; the GST % is added on top and printed on the invoice.
         </p>

@@ -8,6 +8,7 @@ import {
   getRoomHistory,
 } from "../../api/rooms";
 import { getRoomTypes } from "../../api/roomTypes";
+import { getRoomLayout } from "../../api/settings";
 import { useConfirm } from "../../components/ConfirmDialog";
 import { PageShell, SortTh } from "../../components/admin/BackofficeUI";
 import { useTableSort } from "../../utils/tableSort";
@@ -68,15 +69,30 @@ const Rooms = () => {
 
   const loadAll = async () => {
     try {
-      const [r, t] = await Promise.all([getRooms(), getRoomTypes()]);
+      const [r, t, lay] = await Promise.all([getRooms(), getRoomTypes(), getRoomLayout().catch(() => null)]);
       setRooms(r);
       setRoomTypes(t);
+      if (lay) setLayout(lay);
     } catch (err) {
       showToast(err.message || "Failed to load rooms", "error");
     }
   };
 
   const typeName = (id) => roomTypes.find((t) => t.room_type_id === id)?.name || "—";
+  // v7q: Building / Floor are picked from Settings -> Room layout (number + optional name)
+  const [layout, setLayout] = useState({ buildings: [{ value: 1, name: "" }], floors: [{ value: 1, name: "" }] });
+  const optLabel = (x) => `${x.value}${x.name ? ` — ${x.name}` : ""}`;
+  const bName = (v) => layout.buildings.find((x) => x.value === Number(v))?.name || "";
+  const fName = (v) => layout.floors.find((x) => x.value === Number(v))?.name || "";
+  const LayoutSelect = ({ label, items, value, onChange }) => (
+    <div className="flex flex-col">
+      <label className="mb-2 text-sm font-semibold text-slate-300">{label}</label>
+      <select value={value} onChange={onChange} title="Set the list in Settings → Room layout"
+        className="px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B]">
+        {items.map((x) => (<option key={x.value} value={x.value}>{optLabel(x)}</option>))}
+      </select>
+    </div>
+  );
 
   const handleChange = (e) => setFormData({ ...formData, [e.target.name]: e.target.value });
 
@@ -196,8 +212,10 @@ const Rooms = () => {
               </select>
             </div>
 
-            <InputField label="Building" name="building" type="number" value={formData.building} onChange={handleChange} />
-            <InputField label="Floor" name="floor" type="number" value={formData.floor} onChange={handleChange} />
+            <LayoutSelect label="Hotel Building" items={layout.buildings} value={formData.building}
+              onChange={(e) => setFormData({ ...formData, building: e.target.value })} />
+            <LayoutSelect label="Hotel Floor" items={layout.floors} value={formData.floor}
+              onChange={(e) => setFormData({ ...formData, floor: e.target.value })} />
             <div className="flex flex-col">
               <label className="mb-2 text-sm font-semibold text-slate-300">Lock Type</label>
               <select name="lock_type" value={formData.lock_type} onChange={handleChange}
@@ -261,7 +279,7 @@ const Rooms = () => {
                       </div>
                     )}
                   </td>
-                  <td className="px-5 py-3">{r.building} / {r.floor}</td>
+                  <td className="px-5 py-3 whitespace-nowrap">B{r.building}{bName(r.building) ? ` ${bName(r.building)}` : ""} · F{r.floor}{fName(r.floor) ? ` ${fName(r.floor)}` : ""}</td>
                   <td className="px-5 py-3">
                     <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${r.lock_type === "key" ? "bg-slate-600/70 text-slate-200" : "bg-amber-600/70 text-white"}`}>
                       {r.lock_type === "key" ? "Key" : "Card"}
@@ -380,9 +398,9 @@ const Rooms = () => {
                       .map((t) => (<option key={t.room_type_id} value={t.room_type_id}>{t.name}</option>))}
                   </select>
                 </div>
-                <InputField label="Building" type="number" value={editingRoom.building}
+                <LayoutSelect label="Hotel Building" items={layout.buildings} value={editingRoom.building}
                   onChange={(e) => setEditingRoom({ ...editingRoom, building: e.target.value })} />
-                <InputField label="Floor" type="number" value={editingRoom.floor}
+                <LayoutSelect label="Hotel Floor" items={layout.floors} value={editingRoom.floor}
                   onChange={(e) => setEditingRoom({ ...editingRoom, floor: e.target.value })} />
                 <InputField label="Max Cards" type="number" value={editingRoom.max_cards}
                   onChange={(e) => setEditingRoom({ ...editingRoom, max_cards: e.target.value })} />

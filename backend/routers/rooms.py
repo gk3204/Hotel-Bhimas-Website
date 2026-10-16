@@ -127,6 +127,22 @@ def room_history(room_id: int, limit: int = 25, db: Session = Depends(get_db)):
     }
 
 
+def _check_layout(db, building, floor, current=None):
+    """v7q: a room's building / floor must be one of Settings -> Room layout (a room keeping its own
+    current value is always allowed). Enforced only once the owner has SAVED a layout - until then any
+    1-99 is fine, as before, so adding the first room on a new floor never needs a trip to Settings."""
+    from utils import settings as app_settings
+    if not app_settings.get_setting(db, app_settings.ROOM_LAYOUT_KEY):
+        return
+    lay = app_settings.get_room_layout(db)
+    if building is not None and int(building) not in {x["value"] for x in lay["buildings"]} \
+            and not (current and int(building) == current[0]):
+        raise HTTPException(status_code=422, detail=f"Building {building} is not in Settings -> Room layout - add it there first")
+    if floor is not None and int(floor) not in {x["value"] for x in lay["floors"]} \
+            and not (current and int(floor) == current[1]):
+        raise HTTPException(status_code=422, detail=f"Floor {floor} is not in Settings -> Room layout - add it there first")
+
+
 @router.post("/", dependencies=[Depends(require_admin)])
 def create_room(data: RoomCreate, db: Session = Depends(get_db)):
     try:
@@ -134,6 +150,7 @@ def create_room(data: RoomCreate, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail="Room number already exists")
         if not db.query(RoomType).filter(RoomType.room_type_id == data.room_type_id).first():
             raise HTTPException(status_code=400, detail="Room type not found")
+        _check_layout(db, data.building, data.floor)
 
         room = Room(
             room_number=data.room_number,
@@ -190,6 +207,9 @@ def update_room(room_id: int, data: RoomUpdate, db: Session = Depends(get_db)):
         if "room_type_id" in update_data:
             if not db.query(RoomType).filter(RoomType.room_type_id == update_data["room_type_id"]).first():
                 raise HTTPException(status_code=400, detail="Room type not found")
+        if "building" in update_data or "floor" in update_data:
+            _check_layout(db, update_data.get("building", room.building), update_data.get("floor", room.floor),
+                          current=(room.building, room.floor))
         # v4b7: 0 clears the alternate; otherwise it must exist, be active, and differ from
         # the room's own type (also enforced by ck_rooms_alt_differs at the DB level).
         if "alt_room_type_id" in update_data:

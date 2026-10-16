@@ -137,6 +137,39 @@ def set_arrival_rules(rules: dict = Body(..., embed=True),
     return {"rules": clean}
 
 
+# --- Room layout (v7q) ----------------------------------------------------------------------
+# Buildings and floors offered on web Rooms (dropdowns) and used by the desk housekeeping grid.
+# GET for the desk too; PUT admin-only, validated, audited. A value a room still uses cannot go.
+
+@router.get("/room-layout", dependencies=[Depends(require_reception_or_admin)])
+def get_room_layout(db: Session = Depends(get_db)):
+    return app_settings.get_room_layout(db)
+
+
+@router.put("/room-layout")
+def set_room_layout(config: dict = Body(..., embed=True), db: Session = Depends(get_db),
+                    user=Depends(require_admin)):
+    import json
+    from models import Room
+    errs = app_settings.validate_room_layout(config)
+    if errs:
+        raise HTTPException(status_code=422, detail="; ".join(errs))
+    before = app_settings.get_room_layout(db)
+    clean = {k: [{"value": int(e["value"]), "name": str(e.get("name") or "").strip()[:30]} for e in config[k]]
+             for k in ("buildings", "floors")}
+    for k, col, label in (("buildings", Room.building, "Building"), ("floors", Room.floor, "Floor")):
+        keep = {e["value"] for e in clean[k]}
+        for v in before["used"][k]:
+            if v not in keep:
+                rooms = [n for (n,) in db.query(Room.room_number).filter(col == v).order_by(Room.room_number).all()]
+                raise HTTPException(status_code=422,
+                                    detail=f"{label} {v} is used by room(s) {', '.join(rooms[:12])} - move them first")
+    app_settings.set_setting(db, app_settings.ROOM_LAYOUT_KEY, json.dumps(clean), user=user, commit=True)
+    write_audit(db, user, "settings.room_layout_update", "app_settings", None,
+                before={k: before[k] for k in ("buildings", "floors")}, after=clean, client="web", commit=True)
+    return app_settings.get_room_layout(db)
+
+
 # --- Extra person (v6l) ---------------------------------------------------------------------
 # One-time charge per extra person, priced by the room type's AC flag, BEFORE GST. GET is
 # reception-or-admin (the desk shows the price), PUT is admin-only, validated and audited.
