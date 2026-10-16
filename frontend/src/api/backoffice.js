@@ -148,3 +148,8 @@ export const getStaffPerformance = (params) =>
   req("/reports/staff-performance", { params: { ...params, format: "json" } });
 export const exportStaffPerformance = (params, format) =>
   download("/reports/staff-performance", { ...params, format });
+
+// v7s: Dues - agent bills the guest left as "pay later" at check-out
+export const listDues = (params) => req("/dues", { params });
+export const receiveDue = (folioId, body) => req(`/dues/${folioId}/payments`, { method: "POST", body });
+export const exportDues = (params, format) => download("/dues", { ...params, format });

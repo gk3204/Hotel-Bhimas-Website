@@ -590,7 +590,13 @@ def generate_folio_invoice_pdf(invoice_data):
     totals_data.append(["GRAND TOTAL", f"Rs. {invoice_data['grand_total']:,.2f}"])
     if invoice_data["payments_total"]:
         totals_data.append(["Advance / Payments", f"- Rs. {abs(invoice_data['payments_total']):,.2f}"])
-    totals_data.append(["BALANCE DUE", f"Rs. {invoice_data['balance_due']:,.2f}"])
+    # v7s: a pay-later (agent) bill - the unpaid amount is DUE, to be paid after check-out
+    _pl = invoice_data.get("pay_later")
+    if _pl and float(invoice_data["balance_due"] or 0) > 0.005:
+        totals_data.append(["AMOUNT DUE (pay later" + (f" - {_pl['agent']}" if _pl.get("agent") else "") + ")",
+                            f"Rs. {invoice_data['balance_due']:,.2f}"])
+    else:
+        totals_data.append(["BALANCE DUE", f"Rs. {invoice_data['balance_due']:,.2f}"])
     totals_table = Table(totals_data, colWidths=[300, 150])
     totals_table.setStyle(TableStyle([
         ('ALIGN', (1, 0), (1, -1), 'RIGHT'),
@@ -1524,6 +1530,11 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
     Columns whose header reads monetary/numeric are right-aligned."""
     styles = styles or getSampleStyleSheet()
     body = styles["Normal"]
+    # v7s: a very wide table (the check-out summary has 21 columns) - a little smaller and tighter,
+    # so every amount fits on one line
+    dense = bool(avail_width) and len(columns or []) >= 18
+    if dense:
+        font_size = min(font_size or 7, 6.5)
     if font_size:
         body = ParagraphStyle(name=f"MarkerBody{font_size}", parent=body, fontSize=font_size,
                               leading=font_size + 2)
@@ -1539,7 +1550,7 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
     ncols = len(header)
     _money = ("amount", "receipt", "payment", "balance", "rent", "gst", "sgst", "cgst", "net",
               "revenue", "gross", "discount", "advance", "refund", "total", "qty", "price",
-              "commission", "rack", "collected", "₹", "occ", "pax")
+              "commission", "rack", "collected", "₹", "occ", "pax", "due", "amt")   # v7s: due, bill amt
     money_cols = [i for i, h in enumerate(header)
                   if any(k in h.lower() for k in _money)]
 
@@ -1568,6 +1579,13 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
             vals = [header[i]] + [_cell(r[i]) for r in rows if isinstance(r, (list, tuple)) and i < len(r)]
             longest_word = max((len(w) for v in vals for w in str(v).split()), default=4)
             longest_text = max((len(str(v)) for v in vals), default=4)
+            if dense:
+                # v7s: an amount never wraps (the totals row included); text wraps between words
+                _all = vals + ([_cell(totals_row[i])] if totals_row and i < len(totals_row) else [])
+                if i in money_cols:
+                    return max(6, max(len(str(v)) for v in _all[1:] or ["0"]) + 1,
+                               max((len(w) for w in header[i].split()), default=4))
+                return max(6, min(longest_word, 18) + 1)
             # a sentence column (v7p fraud summary) gets room to read; a number column its width
             return max(7, min(longest_word, 16), min(longest_text, 18) if longest_text <= 40 else 40)
         weights = [_w(i) for i in range(ncols)]
@@ -1582,8 +1600,8 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
         ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
         ('TOPPADDING', (0, 0), (-1, -1), 3),
         ('BOTTOMPADDING', (0, 0), (-1, -1), 3),
-        ('LEFTPADDING', (0, 0), (-1, -1), 4),
-        ('RIGHTPADDING', (0, 0), (-1, -1), 4),
+        ('LEFTPADDING', (0, 0), (-1, -1), 2.5 if dense else 4),
+        ('RIGHTPADDING', (0, 0), (-1, -1), 2.5 if dense else 4),
     ]
     for c in money_cols:
         style.append(('ALIGN', (c, 1), (c, -1), 'RIGHT'))

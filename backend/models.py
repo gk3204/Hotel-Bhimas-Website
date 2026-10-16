@@ -465,6 +465,13 @@ class Folio(Base):
     company_id = Column(Integer, ForeignKey("companies.id"), nullable=True, index=True)
     company_total = Column(Numeric(10, 2), default=0)
     company_balance = Column(Numeric(10, 2), default=0)
+    # --- v7s: "pay later" (agent bookings, migration 059) ---
+    # The unpaid balance when the bill closed; NULL = an ordinary bill. What is STILL owed is the
+    # live `balance`. See services/dues.py.
+    due_amount = Column(Numeric(10, 2), nullable=True)
+    due_marked_at = Column(DateTime, nullable=True)          # UTC
+    due_marked_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    due_cleared_at = Column(DateTime, nullable=True)         # UTC
 
 
 class PaymentAllocation(Base):

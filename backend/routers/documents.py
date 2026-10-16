@@ -168,8 +168,14 @@ def list_documents(db: Session, q: str = "", type_: str = "all", dfrom: Optional
         for inv in qq.order_by(Invoice.invoice_date.desc(), Invoice.id.desc()).all():
             b, g = _ctx(inv.booking_id)
             bal = float(inv.balance_due or 0)
+            _fo = db.query(Folio).filter(Folio.id == inv.folio_id).first()
+            if _fo is not None and _fo.due_amount is not None and float(_fo.due_amount or 0) > 0:
+                bal = max(0.0, float(_fo.balance or 0))       # v7s: a pay-later bill - live due
+                _st = "due paid" if bal <= 0.005 else f"DUE {bal:,.2f}"
+            else:
+                _st = "settled" if bal <= 0.005 else f"balance {bal:,.2f}"
             out.append(_row("invoice", inv.invoice_no, inv.invoice_date, b, g, inv.grand_total,
-                            "settled" if bal <= 0.005 else f"balance {bal:,.2f}",
+                            _st,
                             f"/folio/{inv.folio_id}/invoice/pdf"))
 
     # ---- payment receipts / refund vouchers

@@ -6,6 +6,8 @@ import { PageShell } from "../../components/admin/BackofficeUI";
 
 const fmt = (n) =>
   `₹${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+// v7s (owner): "in the cashier summary show it as DUE, not balance" - a pay-later bill's unpaid amount
+const balCell = (x) => (x.due ? `DUE ${fmt(x.due)}` : fmt(x.balance));
 
 const today = () => new Date().toISOString().slice(0, 10);
 const daysAgo = (n) => {
@@ -76,7 +78,7 @@ const REPORTS = {
           // v7n: a Source column; the server sends each section in document-number order
           sec.rows.forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room,
             [x.guest, x.booking_id ? `#${x.booking_id}` : ""].filter(Boolean).join(" · "), x.source || "",
-            x.receipt ? fmt(x.receipt) : "", x.payment ? fmt(x.payment) : "", fmt(x.balance),
+            x.receipt ? fmt(x.receipt) : "", x.payment ? fmt(x.payment) : "", balCell(x),
             x.cr_no, x.remarks || "", x.user || ""]));
         });
         rows.push({ kind: "subtotal", cells: [`Total (${m.label})`, "", "", "", "", "",
@@ -84,11 +86,15 @@ const REPORTS = {
       });
       if ((d.unsettled || []).length) rows.push({ kind: "section", label: "Unsettled Checkout Bills" });
       (d.unsettled || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "", "UNSETTLED", x.user || ""]));
+      // v7s (owner): agent bills the guest pays later - shown as DUE, not balance
+      if ((d.due_bills || []).length) rows.push({ kind: "section", label: `Due Bills - Pay Later (${d.due_bills.length}) - ${fmt(d.due_bills_total)}` });
+      (d.due_bills || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", x.source || "", "", "",
+        `DUE ${fmt(x.due)}`, "", `PAY LATER${x.agent ? ` - ${x.agent}` : ""}${x.due_outstanding ? "" : " (since paid)"}`, x.user || ""]));
       if ((d.nil_checkouts || []).length) rows.push({ kind: "section", label: "Checkout Bills With Nil Amount" });
       (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "", "NIL", x.user || ""]));
       // v7h: every invoice raised in the period
       if ((d.invoices || []).length) rows.push({ kind: "section", label: `Invoices Raised (${d.invoices.length}) - ${fmt(d.invoices_total)}` });
-      (d.invoices || []).forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "",
+      (d.invoices || []).forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room, x.guest || "", x.source || "", "", "", balCell(x), "",
         `INVOICE ${fmt(x.amount)}${x.prepaid ? ` (prepaid ${fmt(x.prepaid)})` : ""}`, x.user || ""]));
       // v7e: rooms in house (end of the day / now)
       if ((d.in_house || []).length) rows.push({ kind: "section", label: `Rooms In House (${d.in_house.length})` });
@@ -107,22 +113,24 @@ const REPORTS = {
     label: "Check-Out Summary",
     path: "checkout-summary",
     dateParam: "day",
-    note: "One row per bill checked out on the day — room rent and food each with the CGST / SGST inside them, laundry, misc, discount, the bill's total CGST / SGST, advance, refund and bill amount.",
+    note: "One row per bill checked out on the day — room rent and food each with the CGST / SGST inside them, laundry, misc, discount, the bill's total CGST / SGST, advance (taken before check-out), balance (paid at check-out), refund, due (agent bills left to pay later) and bill amount.",
     fetch: (p) => api.getCheckoutSummary(p),
     project: (d) => ({
       // v7m (owner): room rent and food each show their CGST / SGST
       // v7o (owner): check-in and check-out date + time
       columns: ["Bill", "Rooms", "Check-in", "Check-out", "Room Rent", "Room CGST", "Room SGST", "Food",
         "Food CGST", "Food SGST", "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance",
-        "Refund", "Bill Amt", "By"],
+        "Balance", "Refund", "Due", "Bill Amt", "By"],
+      // v7s (owner): Balance = paid at check-out; Due = left to pay later (agent bookings)
       rows: d.rows.map((r) => [r.bill_no, r.rooms, r.checked_in_at || "", r.checked_out_at || "",
         fmt(r.room_rent), fmt(r.room_cgst), fmt(r.room_sgst), fmt(r.food), fmt(r.food_cgst), fmt(r.food_sgst),
-        fmt(r.laundry), fmt(r.misc), fmt(r.discount), fmt(r.cgst), fmt(r.sgst), fmt(r.advance), fmt(r.refund),
-        fmt(r.bill_amount), r.checked_out_by || ""]),
+        fmt(r.laundry), fmt(r.misc), fmt(r.discount), fmt(r.cgst), fmt(r.sgst), fmt(r.advance), fmt(r.balance),
+        fmt(r.refund), fmt(r.due), fmt(r.bill_amount), r.checked_out_by || ""]),
       totals: ["TOTAL", "", "", "", fmt(d.totals.room_rent), fmt(d.totals.room_cgst), fmt(d.totals.room_sgst),
         fmt(d.totals.food), fmt(d.totals.food_cgst), fmt(d.totals.food_sgst), fmt(d.totals.laundry),
         fmt(d.totals.misc), fmt(d.totals.discount), fmt(d.totals.cgst), fmt(d.totals.sgst),
-        fmt(d.totals.advance), fmt(d.totals.refund), fmt(d.totals.bill_amount), ""],
+        fmt(d.totals.advance), fmt(d.totals.balance), fmt(d.totals.refund), fmt(d.totals.due),
+        fmt(d.totals.bill_amount), ""],
     }),
   },
   "sales/daily": {

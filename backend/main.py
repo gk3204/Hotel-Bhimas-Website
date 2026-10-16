@@ -14,7 +14,7 @@ from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-da
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
-APP_BUILD = "v7r"
+APP_BUILD = "v7s"
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router
@@ -534,6 +534,8 @@ app.include_router(linen.router)
 app.include_router(documents.router)
 from routers import email_outbox as _email_outbox_router   # v7d
 app.include_router(_email_outbox_router.router)
+from routers import dues as _dues_router   # v7s: pay-later dues (agent bookings)
+app.include_router(_dues_router.router)
 
 
 # -------------------------

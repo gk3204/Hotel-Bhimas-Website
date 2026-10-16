@@ -7,7 +7,7 @@ import {
   FaMoneyBillWave, FaCashRegister, FaChartBar, FaFileInvoice,
   FaShieldAlt, FaClipboardCheck, FaExclamationTriangle, FaHistory,
   FaBuilding, FaTruck, FaBoxes, FaTshirt,
-  FaUserShield, FaUserCog, FaUserCheck, FaKey, FaCog,
+  FaUserShield, FaUserCog, FaUserCheck, FaKey, FaCog, FaHourglassHalf,
 } from "react-icons/fa";
 
 export const NAV_GROUPS = [
@@ -49,6 +49,7 @@ export const NAV_GROUPS = [
     items: [
       { to: "/admin/payments", label: "Payments", icon: FaMoneyBillWave },
       { to: "/admin/cash-shift", label: "Cash / Shift", icon: FaCashRegister },
+      { to: "/admin/dues", label: "Dues (pay later)", icon: FaHourglassHalf },
       { to: "/admin/reports", label: "Reports", icon: FaChartBar },
       { to: "/admin/documents", label: "Documents", icon: FaFileInvoice },
     ],

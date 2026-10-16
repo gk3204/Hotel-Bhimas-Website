@@ -1062,6 +1062,7 @@ _CASHIER_MODE_LABELS = {"cash": "Cash", "card": "C.Card", "upi": "UPI", "bank": 
                         "other": "Other", "online": "Online (website)",
                         "prepaid": "Prepaid before arrival (OTA / agent / website) - MEMO, not in drawer"}
 _CASHIER_SECTIONS = [("checkout", "Guest Check-out Bills"),
+                     ("due", "Due Received (pay-later bills)"),   # v7s
                      ("advance", "Advance Receipts"),
                      ("paidout", "Paid-outs"),
                      ("prepaid", "Prepaid Receipts (issued at check-in)")]
@@ -1214,8 +1215,9 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     """Shared body of the two cashier summaries. `receipts` = paid Payment rows to list as
     check-out bills / advances; `refunds` = Payment rows whose completed refund is a paid-out.
     `checkouts_day` adds the unsettled / nil-amount checkout sections for that calendar day."""
-    from models import Folio
+    from models import Folio, TravelAgent
     from routers.folio import _get_invoice
+    from services import dues as _dues          # v7s
     from utils.booking_source import source_label as _srclabel
     rcache = {}   # booking_id -> room label
     scache = {}   # booking_id -> source label (v7n)
@@ -1233,7 +1235,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
         return scache[b.booking_id]
 
     def _mode(m):
-        return modes.setdefault(m, {"checkout": [], "advance": [], "paidout": [], "prepaid": [],
+        return modes.setdefault(m, {"checkout": [], "due": [], "advance": [], "paidout": [], "prepaid": [],
                                     "receipt": 0.0, "payment": 0.0})
 
     def _ctx(p):
@@ -1251,6 +1253,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             "room": room, "guest": (b.display_guest_name if b else None), "booking_id": p.booking_id,
             "source": _src(b),
             "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
+            "due": _dues.outstanding(folio) if folio else 0.0,     # v7s: shown as DUE, not balance
             # CR No = the card/UPI transaction reference (gateway txn id), blank for manual cash.
             # (client_ref is the desk's offline-outbox dedupe UUID — internal, not a cashier ref.)
             "cr_no": p.payment_id_gateway or "",
@@ -1258,7 +1261,6 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
 
     # v6m.12: the printed time is the hotel's clock (payments are stored UTC).
     _loc = clock.to_local
-    _SETTLE_WINDOW = timedelta(hours=5, minutes=30)
 
     for p in receipts:
         # v6m.13: a website payment has no desk method - call it what it is, not "Other"
@@ -1280,10 +1282,22 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             # "paid after checkout" would file every real settlement as ADVANCE. A payment within
             # _SETTLE_WINDOW before the checkout counts as its settlement - the same 5 h 30 min the
             # old local-vs-UTC comparison allowed by accident, now on purpose.
-            is_checkout = bool(b and b.checked_out_at and at
-                               and at >= b.checked_out_at - _SETTLE_WINDOW)
+            is_checkout = _is_checkout_receipt(p, b)
             mm = _mode(m)
-            if is_checkout:
+            if _dues.is_due_payment(p):
+                # v7s: money received later against a pay-later bill - that bill's own row
+                _df = db.query(Folio).filter(Folio.id == _dues.due_payment_folio_id(p)).first()
+                _dinv = _get_invoice(db, _df.id) if _df else None
+                _ag = (db.query(TravelAgent).filter(TravelAgent.id == b.agent_id).first()
+                       if b is not None and b.agent_id else None)
+                mm["due"].append({**base, "bill_no": f"RCPT-{p.payment_id}",
+                                  "room": (_bill_room_label(db, _df) or base["room"]),
+                                  "due": _dues.outstanding(_df) if _df else 0.0,
+                                  "balance": round(float(_df.balance or 0), 2) if _df else 0.0,
+                                  "receipt": round(amt, 2), "payment": 0.0,
+                                  "remarks": (f"DUE RECEIVED - bill {_dinv.invoice_no if _dinv else _df.id if _df else ''}"
+                                              + (f" - {_ag.name}" if _ag else ""))})
+            elif is_checkout:
                 inv = _get_invoice(db, folio.id) if folio else None
                 mm["checkout"].append({**base, "bill_no": (inv.invoice_no if inv else f"F{folio.id}" if folio else "—"),
                                        "receipt": round(amt, 2), "payment": 0.0,
@@ -1349,7 +1363,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     # v7n (owner): each section in document-number order - RCPT-9 before RCPT-10, RFND, PRE, EXP,
     # the INV/... series - not in the order the money happened to be taken.
     for v in modes.values():
-        for k in ("checkout", "advance", "paidout", "prepaid"):
+        for k in ("checkout", "due", "advance", "paidout", "prepaid"):
             v[k].sort(key=lambda x: doc_number_key(x.get("bill_no")))
     mode_rows = []
     for m in sorted(modes, key=lambda k: (k in _CASHIER_MEMO_MODES, k)):
@@ -1368,7 +1382,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
              "prepaid_memo": round(sum(x["receipt"] for x in mode_rows if x["memo"]), 2)}
 
     # checked out today: unsettled (folio balance != 0) vs nil-amount (settled, no receipt today)
-    unsettled, nil_checkouts = [], []
+    unsettled, nil_checkouts, due_bills = [], [], []
     receipted_bookings = {p.booking_id for p in receipts if float(p.amount or 0)}
     # v7e: BILL by bill, at the moment that bill closed. A room on a per-room stay that leaves on its
     # own has its own bill, closed when THAT room left - it used to wait for the last room, and so
@@ -1385,12 +1399,18 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
                 "date": _out.strftime("%d/%m/%y") if _out else "",
                 "time": _out.strftime("%H:%M") if _out else "",
                 "user": _user_name(db, by)}
-        if bal != 0:
+        if f is not None and _dues.is_due_bill(f):
+            # v7s (owner): a pay-later bill is shown as DUE (with its agent), never as unsettled
+            _ag = db.query(TravelAgent).filter(TravelAgent.id == b.agent_id).first() if b.agent_id else None
+            due_bills.append({**rowc, "due": round(float(f.due_amount or 0), 2),
+                              "due_outstanding": _dues.outstanding(f), "agent": _ag.name if _ag else ""})
+        elif bal != 0:
             unsettled.append(rowc)
         elif b.booking_id not in receipted_bookings:
             nil_checkouts.append(rowc)
 
     unsettled.sort(key=lambda x: doc_number_key(x.get("bill_no")))
+    due_bills.sort(key=lambda x: doc_number_key(x.get("bill_no")))
     nil_checkouts.sort(key=lambda x: doc_number_key(x.get("bill_no")))
 
     # v7e (owner): "Cashier summary should also have rooms that are in house"
@@ -1418,7 +1438,10 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             "guest": (b.display_guest_name if b else None),
             "amount": round(float(inv.grand_total or 0), 2),
             "prepaid": prepaid_amt,
-            "balance": round(float(inv.balance_due or 0), 2),
+            # v7s: a pay-later bill shows what is STILL due (live), not the figure frozen on the invoice
+            "balance": (_dues.outstanding(f) if f is not None and _dues.is_due_bill(f)
+                        else round(float(inv.balance_due or 0), 2)),
+            "due": _dues.outstanding(f) if f else 0.0,
             "source": src,
             "user": _user_name(db, inv.created_by),
         })
@@ -1426,6 +1449,8 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     inv_rows.sort(key=lambda x: doc_number_key(x.get("bill_no")))
     return {"modes": mode_rows, "grand": grand,
             "unsettled": unsettled, "nil_checkouts": nil_checkouts, "in_house": in_house,
+            "due_bills": due_bills,
+            "due_bills_total": round(sum(x["due"] for x in due_bills), 2),
             "invoices": inv_rows,
             "invoices_total": round(sum(x["amount"] for x in inv_rows), 2)}
 
@@ -1435,6 +1460,27 @@ def doc_number_key(no):
     import re
     parts = re.split(r"(\d+)", str(no or ""))
     return tuple((0, int(p)) if p.isdigit() else (1, p) for p in parts if p != "")
+
+
+def _bal_cell(x):
+    """v7s (owner): "in the cashier summary show it as DUE, not balance" - a pay-later bill's unpaid
+    amount prints as DUE."""
+    return f"DUE {x['due']:,.2f}" if x.get("due") else x.get("balance")
+
+
+def _is_checkout_receipt(p, b) -> bool:
+    """A receipt that settled the guest's bill at check-out (vs an advance). The desk takes the
+    settling payment BEFORE it calls checkout (checkout refuses a balance), so a payment within
+    _SETTLE_WINDOW before the checkout counts as its settlement (v6m.12). v7s: a payment taken in the
+    check-in flow (client_ref "ci...") is an advance however short the stay."""
+    if b is None or not b.checked_out_at or not p.created_at:
+        return False
+    if (p.client_ref or "").startswith("ci"):
+        return False
+    return p.created_at >= b.checked_out_at - _SETTLE_WINDOW
+
+
+_SETTLE_WINDOW = timedelta(hours=5, minutes=30)
 
 
 def _cashier_table(data):
@@ -1455,7 +1501,7 @@ def _cashier_table(data):
             for x in sec["rows"]:
                 guest = " · ".join(str(v) for v in (x.get("guest"), f"#{x['booking_id']}" if x.get("booking_id") else None) if v)
                 rows.append([x["bill_no"], x["date"], x["time"], x["room"], guest, x.get("source") or "",
-                             x["receipt"] or "", x["payment"] or "", x["balance"], x["cr_no"],
+                             x["receipt"] or "", x["payment"] or "", _bal_cell(x), x["cr_no"],
                              x["remarks"] or "", x["user"] or ""])
         tr = _sub(f"Total ({md['label']})")
         tr[6], tr[7] = md["receipt"], md["payment"]
@@ -1467,6 +1513,14 @@ def _cashier_table(data):
         for x in data["unsettled"]:
             rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "",
                          x.get("source") or "", "", "", x["balance"], "", "UNSETTLED", x.get("user") or ""])
+    if data.get("due_bills"):
+        # v7s (owner): agent bills the guest will pay later - DUE, not balance
+        rows.append({"section": f"Due Bills - Pay Later ({len(data['due_bills'])}) - Rs {data.get('due_bills_total', 0):,.2f}"})
+        for x in data["due_bills"]:
+            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "",
+                         x.get("source") or "", "", "", f"DUE {x['due']:,.2f}", "",
+                         "PAY LATER" + (f" - {x['agent']}" if x.get("agent") else "")
+                         + ("" if x.get("due_outstanding") else " (since paid)"), x.get("user") or ""])
     if data["nil_checkouts"]:
         rows.append({"section": "Checkout Bills With Nil Amount"})
         for x in data["nil_checkouts"]:
@@ -1477,7 +1531,7 @@ def _cashier_table(data):
         for x in data["invoices"]:
             rem = f"INVOICE Rs {x['amount']:,.2f}" + (f" (prepaid {x['prepaid']:,.2f})" if x.get("prepaid") else "")
             rows.append([x["bill_no"], x["date"], x["time"], x["room"], x.get("guest") or "", x.get("source") or "",
-                         "", "", x["balance"], "", rem, x.get("user") or ""])
+                         "", "", _bal_cell(x), "", rem, x.get("user") or ""])
     if data.get("in_house"):
         rows.append({"section": f"Rooms In House ({len(data['in_house'])})"})
         for x in data["in_house"]:
@@ -1494,6 +1548,7 @@ def checkout_summary_data(db, day):
     room rent, SGST/CGST, food, laundry, misc, discount, advance, refund, and the bill amount."""
     from models import Folio
     from routers.folio import _get_invoice
+    from services import dues as _dues
     rows = []
     # v7e: bill by bill, on the day THAT bill closed (a per-room bill closes with its own room)
     _closed = _checked_out_bills(db, day=day)
@@ -1531,11 +1586,18 @@ def checkout_summary_data(db, day):
             share = round(abs(discount) * g / _gross, 2) if _gross and discount else 0.0
             return _gst_split(sel, discount=share) if sel else {"cgst_total": 0.0, "sgst_total": 0.0}
         _rs, _fs = _part(("room",)), _part(("food", "minibar"))
-        advance = round(sum(float(p.amount or 0) for p in
-                            db.query(Payment).filter(Payment.booking_id == b.booking_id,
-                                                     Payment.status == "paid").all()
-                            if not (b.checked_out_at and p.created_at
-                                    and p.created_at >= b.checked_out_at)), 2) if _n == 0 else 0.0
+        # v7s (owner): "a Balance column - when the advance is less, the guest pays the balance at
+        # check-out; when more advance was taken the balance is 0 and a refund is done". The money
+        # taken before the guest left splits into ADVANCE (at check-in / during the stay) and
+        # BALANCE (paid at check-out) by the cashier summary's own rule (_is_checkout_receipt), so
+        # the two reports agree. Money received later against a pay-later bill is neither.
+        _before = [p for p in db.query(Payment).filter(Payment.booking_id == b.booking_id,
+                                                         Payment.status == "paid").all()
+                   if not (b.checked_out_at and p.created_at and p.created_at >= b.checked_out_at)
+                   and not _dues.is_due_payment(p)] if _n == 0 else []
+        _at_out = [p for p in _before if _is_checkout_receipt(p, b)]
+        advance = round(sum(float(p.amount or 0) for p in _before if p not in _at_out), 2)
+        balance_paid = round(sum(float(p.amount or 0) for p in _at_out), 2)
         refund = round(sum(float(p.refund_amount or 0) for p in
                            db.query(Payment).filter(Payment.booking_id == b.booking_id,
                                                     Payment.refund_status == "completed").all()),
@@ -1563,10 +1625,14 @@ def checkout_summary_data(db, day):
             "room_cgst": _rs["cgst_total"], "room_sgst": _rs["sgst_total"],
             "food_cgst": _fs["cgst_total"], "food_sgst": _fs["sgst_total"],
             "misc": misc, "discount": discount, "total": round(float(f.total or 0), 2),
-            "advance": advance, "refund": refund, "bill_amount": round(float(f.total or 0), 2),
+            "advance": advance, "balance": balance_paid, "refund": refund,
+            # v7s: what this bill left unpaid as "pay later" (agent bookings), and what is still owed
+            "due": round(float(f.due_amount or 0), 2) if _dues.is_due_bill(f) else 0.0,
+            "due_outstanding": _dues.outstanding(f),
+            "bill_amount": round(float(f.total or 0), 2),
         })
     keys = ("room_rent", "sgst", "cgst", "food", "laundry", "misc", "discount", "total",
-            "advance", "refund", "bill_amount", "room_cgst", "room_sgst", "food_cgst", "food_sgst")
+            "advance", "balance", "refund", "due", "bill_amount", "room_cgst", "room_sgst", "food_cgst", "food_sgst")
     totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
     return {"day": str(day), "rows": rows, "totals": totals}
 
@@ -1578,15 +1644,16 @@ def checkout_summary_table(data):
     # v7o (owner): check-in and check-out date + time beside the rooms
     cols = ["Bill", "Rooms", "Check-in", "Check-out", "Room Rent", "Room CGST", "Room SGST", "Food",
             "Food CGST", "Food SGST", "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance",
-            "Refund", "Bill Amt", "By"]
+            "Balance", "Refund", "Due", "Bill Amt", "By"]
+    # v7s (owner): Balance = paid at check-out; Due = left to pay later (agent bookings)
     rows = [[r["bill_no"], r["rooms"], r.get("checked_in_at", ""), r.get("checked_out_at", ""), r["room_rent"],
              r["room_cgst"], r["room_sgst"], r["food"], r["food_cgst"], r["food_sgst"], r["laundry"], r["misc"],
-             r["discount"], r["cgst"], r["sgst"], r["advance"], r["refund"], r["bill_amount"],
-             r.get("checked_out_by", "")] for r in data["rows"]]
+             r["discount"], r["cgst"], r["sgst"], r["advance"], r.get("balance", 0.0), r["refund"],
+             r.get("due", 0.0), r["bill_amount"], r.get("checked_out_by", "")] for r in data["rows"]]
     t = data["totals"]
     totals = ["TOTAL", "", "", "", t["room_rent"], t["room_cgst"], t["room_sgst"], t["food"], t["food_cgst"],
               t["food_sgst"], t["laundry"], t["misc"], t["discount"], t["cgst"], t["sgst"], t["advance"],
-              t["refund"], t["bill_amount"], ""]
+              t.get("balance", 0.0), t["refund"], t.get("due", 0.0), t["bill_amount"], ""]
     return cols, rows, totals
 
 

@@ -599,6 +599,10 @@ class CheckoutRequest(BaseModel):
     # invoice can still be raised afterwards from the folio screen, exactly as before, so this is
     # a convenience and never the only route.
     invoice_now: bool = False
+    # v7s (owner): a travel-agent booking's guest may leave WITHOUT paying the balance - "pay
+    # later". The bill settles, its unpaid balance is recorded as a DUE (services/dues.py) and is
+    # received later on the web. Only for agent bookings; no override is needed.
+    pay_later: bool = False
 
 
 class CardDeferredRequest(BaseModel):

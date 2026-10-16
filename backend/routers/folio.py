@@ -1411,6 +1411,15 @@ def _source_label(db, booking) -> str:
     return source_label(db, booking)
 
 
+def _agent_name(db, booking):
+    """v7s: the travel agent of a booking (for a pay-later invoice), or None."""
+    if booking is None or not getattr(booking, "agent_id", None):
+        return None
+    from models import TravelAgent
+    a = db.query(TravelAgent).filter(TravelAgent.id == booking.agent_id).first()
+    return a.name if a else None
+
+
 def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
     from utils.doc_rooms import folio_rooms_label
     """Everything the PDF/email needs. Charges are frozen once invoiced, so
@@ -1525,6 +1534,10 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
             "rooms": folio_rooms_label(db, folio),     # v7m (owner): the room(s) on this bill
         },
         "issued_at": clock.to_local(invoice.created_at),
+        # v7s: a pay-later (agent) bill - the PDF says the amount is due, and from whom
+        "pay_later": ({"agent": _agent_name(db, booking),
+                       "due_at_checkout": float(folio.due_amount or 0)}
+                      if folio.due_amount is not None and float(folio.due_amount or 0) > 0 else None),
         "prepaid_receipt": _prepaid_receipt(db, folio.booking_id),
         "issued_by_name": (_issuer.full_name or _issuer.username) if _issuer else None,
         "lines": [_line(c) for c in charges if c.type not in ("payment", "discount")],

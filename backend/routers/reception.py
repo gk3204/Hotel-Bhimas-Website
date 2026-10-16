@@ -2131,7 +2131,20 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         else:
             balance = round(sum(float(f.balance or 0) for f in _folios), 2)
         override_used = False
-        if balance != 0:
+        # v7s (owner): "pay later" - an agent booking's guest leaves the balance as a due
+        pay_later = bool(getattr(data, "pay_later", False))
+        if pay_later:
+            if not booking.agent_id:
+                raise HTTPException(status_code=409,
+                                    detail="Pay later (due) is only for travel-agent bookings - settle the balance")
+            if balance <= 0:
+                raise HTTPException(status_code=409,
+                                    detail="Nothing is owed on this bill - untick 'Pay later'")
+            if partial and not folio_resolver.is_per_room(booking):
+                raise HTTPException(status_code=409,
+                                    detail="This stay has ONE bill for all rooms: choose 'Pay later' when the "
+                                           "last room checks out (or settle this room's share now)")
+        if balance != 0 and not pay_later:
             if not data.override:
                 if balance < 0:
                     raise HTTPException(
@@ -2199,6 +2212,12 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
                     _f.status = "settled"
                     _f.settled_at = _depart_ts
                     _settled_folios.append(_f)
+
+        # v7s: the closing bill(s)' unpaid balance becomes the due
+        due_total = 0.0
+        if pay_later:
+            from services import dues as _dues
+            due_total = _dues.mark_due(db, _settled_folios, user)
 
         rooms = []
         for item in leaving:
@@ -2284,6 +2303,7 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         write_audit(db, user, "reception.checkout", "booking", booking.booking_id,
                     before=before,
                     after={"override": override_used, "override_reason": data.override_reason,
+                           "pay_later": pay_later, "due_amount": due_total,
                            "cards_invalidated": len(cards),
                            # v4b4: recorded whether or not the gate is armed, so "how often does
                            # a card actually come back?" is answerable from the audit log.
@@ -2409,7 +2429,8 @@ def _checkout_response(db: Session, booking: Booking, folio: Folio | None, overr
         # v6e: the bills this stay carries, and any invoice raised as part of this checkout.
         "billing_mode": booking.billing_mode,
         "bills": [{"folio_id": f.id, "booking_item_id": f.booking_item_id,
-                   "status": f.status, "balance": float(f.balance or 0)}
+                   "status": f.status, "balance": float(f.balance or 0),
+                   "due_amount": float(f.due_amount or 0)}      # v7s: left to pay later
                   for f in folio_resolver.folios_for_booking(db, booking.booking_id)],
         "invoices_raised": invoices or [],
         "invoice_error": invoice_error,
@@ -2417,6 +2438,9 @@ def _checkout_response(db: Session, booking: Booking, folio: Folio | None, overr
         "folio_id": folio.id if folio else None,
         "folio_status": folio.status if folio else None,
         "balance": float(folio.balance or 0) if folio else None,
+        # v7s: what this stay left unpaid as "pay later" (agent bookings)
+        "due_amount": round(sum(float(f.due_amount or 0)
+                                for f in folio_resolver.folios_for_booking(db, booking.booking_id)), 2),
         "override": override,
         "cards_invalidated": cards_out,
         "cards_erased": cards_erased,
@@ -4143,6 +4167,7 @@ def _build_desk_board(db: Session):
                 "rate_min": round(pre, 2), "rate_max": round(pre, 2), "rate_source": "booking"}
 
     inhouse = []
+    _agent_names = {a.id: a.name for a in db.query(TravelAgent).all()}   # v7s
     for b in _in_b:
         paid, folio_id, folio_balance = _paid_and_folio(b.booking_id)
         valid_from, valid_to = _card_window(b)
@@ -4188,6 +4213,9 @@ def _build_desk_board(db: Session):
             # the same person minutes apart.
             "booking_source": b.booking_source,
             "billing_mode": b.billing_mode,   # v6e
+            # v7s: an agent's guest may leave the balance as "pay later" - the desk offers it only then
+            "agent_id": b.agent_id,
+            "agent_name": _agent_names.get(b.agent_id) if b.agent_id else None,
             # Expected arrival vs what actually happened (FE-1) — both on the row so the
             # in-house board can show a late/early arrival at a glance.
             "check_in_time": str(b.check_in_time) if b.check_in_time else None,
