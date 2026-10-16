@@ -97,6 +97,11 @@ CATALOGUE = {
         "title": "OTA booking checked in without the OTA's confirmation email",
         "meaning": "There is no email from the OTA proving this booking - it may not be real or may be a different rate.",
         "check": "Check the booking on the OTA extranet."},
+    "card_not_returned": {
+        "title": "Cleaning / viewing card recorded LOST (not returned)",
+        "meaning": "The card was never wiped - it still opens the room until it expires. A 'lost' card can be one "
+                   "kept to let someone into the room.",
+        "check": "Ask who had it; check the room until the card's time runs out."},
     "card_not_cut": {
         "title": "Guest let in / moved without cutting a key card",
         "meaning": "A check-in, extension or room change finished without a new key - the old key may still be in use.",
@@ -246,6 +251,10 @@ def _sentence(t, d, c, alert):
     if t == "ota_no_email":
         return (f"the {d.get('channel') or 'OTA'} booking {d.get('ota_booking_id') or ''} was checked in on "
                 f"{d.get('check_in') or ''} without the OTA's confirmation email{bk}.")
+    if t == "card_not_returned":
+        return (f"the {d.get('card_type') or 'room'} card cut at {_when(d.get('issued_at'), alert)} was recorded LOST by "
+                f"{d.get('recorded_by') or 'the desk'} - \"{d.get('reason') or 'no reason'}\"; it still opens the door until "
+                f"{_when(d.get('valid_to'), alert, True)}.")
     if t == "card_not_cut":
         return (f"rooms {', '.join(str(x) for x in d.get('rooms') or []) or '?'} went through {d.get('step') or 'a step'} "
                 f"without a key card being cut ({d.get('reason') or 'no reason given'}){bk}.")

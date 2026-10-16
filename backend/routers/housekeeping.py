@@ -19,11 +19,14 @@ import json
 import logging
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from typing import Optional
+
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import (Booking, BookingItem, CardIssuance, Folio, FolioCharge, HousekeepingStatus,
+from models import (Booking, BookingItem, CardIssuance, Folio, FolioCharge, FraudAlert, HousekeepingStatus,
                     HousekeepingTask, Room, User)
 from schemas import (CleaningCardRequest, HousekeepingConfigUpdate, HousekeepingStatusUpdate,
                      InspectRequest, MinibarRestockRequest, TaskCompleteRequest)
@@ -465,8 +468,37 @@ def _card_station(db, data, user):
         return None
 
 
+class CardReturnRequest(BaseModel):
+    """v7r (owner): a return is recorded only after the desk has really wiped the card. When the card
+    cannot be brought back at all (lost / broken), the desk says so - with a reason - and the card is
+    recorded LOST (not wiped: it still opens the door until it expires) and the owner is alerted."""
+    card_missing: bool = False
+    reason: Optional[str] = Field(None, max_length=200)
+
+
+def _record_card_lost(db, room, card, data, user, kind):
+    """Mark the card lost and raise a high 'card not returned' alert. Caller commits."""
+    reason = (data.reason or "").strip()
+    if len(reason) < 3:
+        raise HTTPException(status_code=422, detail="Say what happened to the card (at least 3 characters)")
+    card.status = "lost"
+    # close the card's overdue alerts FIRST - done after, it would also close the alert raised below
+    resolve_card_alerts(db, card.id, f"{kind.title()} card recorded LOST at {datetime.now():%d-%m %H:%M}: {reason}")
+    db.add(FraudAlert(
+        type="card_not_returned", severity="high", room_id=room.room_id, card_id=card.id,
+        booking_id=card.booking_id,
+        detail=json.dumps({"room_number": room.room_number, "card_type": kind,
+                           "issued_at": str(clock.to_local(card.issued_at)) if card.issued_at else None,
+                           "valid_to": str(card.valid_to) if card.valid_to else None, "reason": reason,
+                           "recorded_by": (user or {}).get("username") or (user or {}).get("sub"),
+                           "dedupe_key": f"card_not_returned:card:{card.id}"}, default=str),
+        status="open"))
+    return reason
+
+
 @router.post("/rooms/{room_id}/cleaning-card/return")
-def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
+def return_cleaning_card(room_id: int, data: Optional[CardReturnRequest] = Body(default=None),
+                         db: Session = Depends(get_db),
                          user=Depends(require_reception_or_admin)):
     """Return (decode/wipe) the room's outstanding cleaning card and auto-finish cleaning:
     the task is marked done and the room is left awaiting inspection (NOT auto-vacant)."""
@@ -482,10 +514,14 @@ def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
         raise HTTPException(status_code=409, detail="No outstanding cleaning card for this room")
     room_was_cleaning = room.status == "cleaning"
 
-    card.status = "erased"
-    card.erased_at = clock.now_utc()          # F-03: an instant, stored UTC
-    card.erased_by = _resolve_user_id(db, user)
-    resolve_card_alerts(db, card.id, f"Cleaning card returned at {datetime.now():%d-%m %H:%M}.")   # v6x
+    lost_reason = None
+    if data is not None and data.card_missing:      # v7r: lost, not wiped - recorded and alerted
+        lost_reason = _record_card_lost(db, room, card, data, user, "cleaning")
+    else:
+        card.status = "erased"
+        card.erased_at = clock.now_utc()          # F-03: an instant, stored UTC
+        card.erased_by = _resolve_user_id(db, user)
+        resolve_card_alerts(db, card.id, f"Cleaning card returned at {datetime.now():%d-%m %H:%M}.")   # v6x
 
     # Auto-finish cleaning -> awaiting inspection. Deliberately leave Room.status == "cleaning"
     # (even if auto-inspect is on) so the housekeeper still records cleaned-by/inspected-by.
@@ -494,8 +530,9 @@ def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
         db.commit()
         write_audit(db, user, "housekeeping.cleaning_card_return", "card", card.id,
                     after={"room_id": room_id, "room_number": room.room_number,
-                           "after_inspection": True}, client="desktop", commit=True)
-        return {"room_id": room_id, "cleaning_card": "used", "task_done": False,
+                           "after_inspection": True, "card_missing": bool(lost_reason), "reason": lost_reason},
+                    client="desktop", commit=True)
+        return {"room_id": room_id, "cleaning_card": "lost" if lost_reason else "used", "task_done": False,
                 "after_inspection": True}
     task = open_checkout_clean_task(db, room_id)
     if task and task.status in ("pending", "in_progress"):
@@ -507,9 +544,10 @@ def return_cleaning_card(room_id: int, db: Session = Depends(get_db),
     set_hk_status(db, room_id, "clean", user=user)
     db.commit()
     write_audit(db, user, "housekeeping.cleaning_card_return", "card", card.id,
-                after={"room_id": room_id, "room_number": room.room_number},
+                after={"room_id": room_id, "room_number": room.room_number,
+                       "card_missing": bool(lost_reason), "reason": lost_reason},
                 client="desktop", commit=True)
-    return {"room_id": room_id, "cleaning_card": "used", "task_done": bool(task)}
+    return {"room_id": room_id, "cleaning_card": "lost" if lost_reason else "used", "task_done": bool(task)}
 
 
 CANCEL_WINDOW_MINUTES = 10
@@ -608,7 +646,8 @@ def encode_viewing_card(room_id: int, data: CleaningCardRequest, db: Session = D
 
 
 @router.post("/rooms/{room_id}/viewing-card/return")
-def return_viewing_card(room_id: int, db: Session = Depends(get_db),
+def return_viewing_card(room_id: int, data: Optional[CardReturnRequest] = Body(default=None),
+                        db: Session = Depends(get_db),
                         user=Depends(require_reception_or_admin)):
     """The viewing card came back and was wiped: mark it erased and close any overdue alert."""
     room = db.query(Room).filter(Room.room_id == room_id).first()
@@ -617,17 +656,23 @@ def return_viewing_card(room_id: int, db: Session = Depends(get_db),
     card = active_viewing_card(db, room_id)
     if not card:
         raise HTTPException(status_code=409, detail="No viewing card is out for this room")
-    card.status = "erased"
-    card.erased_at = clock.now_utc()
-    card.erased_by = _resolve_user_id(db, user)
     late = card.valid_to is not None and datetime.now() > card.valid_to
-    resolve_card_alerts(db, card.id, f"Viewing card returned and wiped "
-                                     f"{'(late) ' if late else ''}at {datetime.now():%d-%m %H:%M}.")
+    lost_reason = None
+    if data is not None and data.card_missing:      # v7r: lost, not wiped - recorded and alerted
+        lost_reason = _record_card_lost(db, room, card, data, user, "viewing")
+    else:
+        card.status = "erased"
+        card.erased_at = clock.now_utc()
+        card.erased_by = _resolve_user_id(db, user)
+        resolve_card_alerts(db, card.id, f"Viewing card returned and wiped "
+                                         f"{'(late) ' if late else ''}at {datetime.now():%d-%m %H:%M}.")
     db.commit()
     write_audit(db, user, "housekeeping.viewing_card_return", "card", card.id,
-                after={"room_id": room_id, "room_number": room.room_number, "late": late},
+                after={"room_id": room_id, "room_number": room.room_number, "late": late,
+                       "card_missing": bool(lost_reason), "reason": lost_reason},
                 client="desktop", commit=True)
-    return {"room_id": room_id, "viewing_card": "none", "returned_card_id": card.id, "late": late}
+    return {"room_id": room_id, "viewing_card": "none", "returned_card_id": card.id, "late": late,
+            "lost": bool(lost_reason)}
 
 
 @router.post("/rooms/{room_id}/viewing-card/cancel")
