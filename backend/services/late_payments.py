@@ -46,16 +46,15 @@ def _rooms_still_free(db, booking) -> bool:
     need = {}
     for it in items:
         need[it.room_type_id] = need.get(it.room_type_id, 0) + int(it.quantity or 1)
-    holds, _unmapped = availability.ota_draft_holds(db, booking.check_in, booking.check_out)
     for rt_id, qty in need.items():
         availability.lock_room_type(db, rt_id)
         rt = db.query(RoomType).filter(RoomType.room_type_id == rt_id).first()
         if rt is None:
             return False
-        free = (int(rt.total_rooms or 0)
-                - int(availability.booked_qty(db, rt_id, booking.check_in, booking.check_out, lock=True))
-                - int(availability.out_of_service_count(db, rt_id))
-                - int(holds.get(rt_id, 0)))
+        # v7v: night by night (and alternate lending, like every other guard)
+        free = int(availability.free_rooms(db, rt_id, booking.check_in, booking.check_out,
+                                           total=int(rt.total_rooms or 0), lock=True,
+                                           exclude_booking_id=booking.booking_id)["available"])
         if free < qty:
             return False
     return True

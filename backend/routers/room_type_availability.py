@@ -153,20 +153,14 @@ def check_room_availability(
     # Rooms consumed by overlapping bookings — including guests who have already
     # CHECKED IN. Shared with the desk via utils/availability so the two surfaces
     # can never disagree about what is sold (backlog v2 FE-7).
-    booked_rooms = int(booked_qty(db, room_type_id, check_in_date, check_out_date))
-
-    # Deactivated + maintenance/blocked rooms of this type can't be sold either.
-    out_of_service = int(out_of_service_count(db, room_type_id))
-
-    # b5: rooms held by unconfirmed OTA confirmation drafts (the same figure the desk subtracts).
-    from utils.availability import ota_draft_holds
-    holds, _unmapped = ota_draft_holds(db, check_in_date, check_out_date)
-    ota_held = int(holds.get(room_type_id, 0))
-
-    # v7b: rooms of this type lent to another type booked into its alternates
-    from utils.availability import lent_out
-    lent = int(lent_out(db, check_in_date, check_out_date, holds=holds).get(room_type_id, 0))
-    available_rooms = room_type.total_rooms - booked_rooms - out_of_service - ota_held - lent
+    # Deactivated + maintenance/blocked rooms of this type can't be sold either; b5 rooms held by
+    # unconfirmed OTA drafts; v7b rooms lent to another type; v7v - night by night, the tightest night.
+    from utils.availability import free_rooms
+    _fr = free_rooms(db, room_type_id, check_in_date, check_out_date, total=room_type.total_rooms)
+    booked_rooms = int(_fr["booked"])
+    out_of_service = int(_fr["inactive"])
+    ota_held = int(_fr["held"])
+    available_rooms = int(_fr["available"])
 
     return {
         "room_type_id": room_type_id,

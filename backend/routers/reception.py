@@ -102,15 +102,17 @@ def desk_availability(
 
     # b5: rooms held by unconfirmed OTA confirmation drafts for these dates.
     holds, unmapped = availability.ota_draft_holds(db, ci, co)
-    _plan = availability.alternate_plan(db, ci, co, holds=holds)   # v7b
+    _cache = {}       # v7v: night-by-night figures shared across the types
     rows = []
     for rt in db.query(RoomType).filter(RoomType.is_active == True).order_by(RoomType.room_type_id).all():  # noqa: E712
         blk = _blocked(db, rt.room_type_id, ci, co)
-        booked = int(_booked_qty(db, rt.room_type_id, ci, co))
-        inactive = int(_inactive_count(db, rt.room_type_id))
-        held = int(holds.get(rt.room_type_id, 0))
-        lent = int(_plan["lent"].get(rt.room_type_id, 0))          # v7b
-        available = 0 if blk else max(0, rt.total_rooms - booked - inactive - held - lent)
+        # v7v: the tightest NIGHT, not every night of the stay added together
+        _fr = availability.free_rooms(db, rt.room_type_id, ci, co, total=rt.total_rooms, cache=_cache)
+        booked = int(_fr["booked"])
+        inactive = int(_fr["inactive"])
+        held = int(_fr["held"])
+        lent = int(_fr["lent"])          # v7b
+        available = 0 if blk else max(0, int(_fr["available"]))
         rows.append({
             "room_type_id": rt.room_type_id,
             "room_type_name": rt.name,
@@ -126,7 +128,7 @@ def desk_availability(
             # v7b: rooms lent to another type's overflow, and extra rooms an OTA confirm could
             # still find through this type's alternates
             "alt_lent": lent,
-            "alt_free": int(_plan["alt_free"].get(rt.room_type_id, 0)),
+            "alt_free": int(_fr["alt_free"]),
             "available": available,
             "blocked": bool(blk),
             "block_reason": blk.reason if blk else None,
@@ -218,20 +220,19 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             # concurrent requests all read the same free count — five simultaneous requests for the
             # last five rooms were all accepted. Released on commit/rollback.
             availability.lock_room_type(db, item.room_type_id)
-            booked = _booked_qty(db, item.room_type_id, data.check_in, data.check_out, lock=True)
-            inactive = _inactive_count(db, item.room_type_id)
             # b5: unconfirmed OTA drafts hold their rooms, except the draft(s) for THIS booking's
             # own OTA id, so confirming a draft is never blocked by its own hold.
-            holds, _unmapped = availability.ota_draft_holds(
-                db, data.check_in, data.check_out,
-                exclude_ota_booking_id=(data.ota_booking_id or None))
-            held = int(holds.get(item.room_type_id, 0))
-            # v7b: rooms of this type already taken by another type booked into its alternates
-            _plan = availability.alternate_plan(db, data.check_in, data.check_out, holds=holds)
-            lent = int(_plan["lent"].get(item.room_type_id, 0))
-            available = rt.total_rooms - int(booked) - int(inactive) - held - lent
+            # v7b: and rooms of this type taken by another type booked into its alternates.
+            # v7v (owner): NIGHT BY NIGHT - the tightest night decides, not every night's bookings
+            # added together (a 3-night OTA stay was refused with 2 rooms free every night).
+            _fr = availability.free_rooms(db, item.room_type_id, data.check_in, data.check_out,
+                                          total=rt.total_rooms, lock=True,
+                                          exclude_ota_booking_id=(data.ota_booking_id or None))
+            held = int(_fr["held"])
+            _plan = {"lenders": _fr["lenders"]}
+            available = int(_fr["available"])
             if item.quantity > available:
-                alt = int(_plan["alt_free"].get(item.room_type_id, 0))
+                alt = int(_fr["alt_free"])
                 fits_alt = alt > 0 and item.quantity <= max(0, available) + alt
                 # v7g (owner): any source may book into an ALTERNATE room type when its own is full -
                 # with the owner's approval code, or an admin login asking for it. (OTA confirms too:
@@ -1115,13 +1116,9 @@ def _assert_early_capacity(db, booking: Booking, date_from: date, date_to: date)
     for rt_id, qty in need.items():
         rt = db.query(RoomType).filter(RoomType.room_type_id == rt_id).first()
         name = rt.name if rt else f"type {rt_id}"
-        booked = int(_booked_qty(db, rt_id, date_from, date_to, lock=True))
-        inactive = int(_inactive_count(db, rt_id))
-        # b5: an unconfirmed OTA draft arriving tonight holds its room too.
-        holds, _u = availability.ota_draft_holds(db, date_from, date_to,
-                                                  exclude_ota_booking_id=booking.ota_booking_id)
-        free = ((rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
-                - int(availability.lent_out(db, date_from, date_to, holds=holds).get(rt_id, 0)))   # v7b
+        # b5 / v7b / v7v: OTA holds, alternate lending, the tightest night
+        free = int(availability.free_rooms(db, rt_id, date_from, date_to, total=(rt.total_rooms if rt else 0),
+                                           lock=True, exclude_ota_booking_id=booking.ota_booking_id)["available"])
         if free < qty:
             raise HTTPException(
                 status_code=409,
@@ -2822,14 +2819,11 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             if _blocked(db, new_type.room_type_id, today, booking.check_out):
                 raise HTTPException(status_code=409,
                                     detail=f"{new_type.name} is blocked for the remaining dates")
-            booked = int(_booked_qty(db, new_type.room_type_id, today, booking.check_out, lock=True,
-                                     exclude_booking_id=booking.booking_id))   # v7f
-            inactive = int(_inactive_count(db, new_type.room_type_id))
-            holds, _u = availability.ota_draft_holds(db, today, booking.check_out,
-                                                      exclude_ota_booking_id=booking.ota_booking_id)
-            if (new_type.total_rooms - booked - inactive - int(holds.get(new_type.room_type_id, 0))
-                    - int(availability.lent_out(db, today, booking.check_out, holds=holds)
-                          .get(new_type.room_type_id, 0))) <= 0:   # v7b
+            # v7f: not this booking itself; v7b alternates; v7v the tightest night
+            if int(availability.free_rooms(db, new_type.room_type_id, today, booking.check_out,
+                                           total=new_type.total_rooms, lock=True,
+                                           exclude_booking_id=booking.booking_id,
+                                           exclude_ota_booking_id=booking.ota_booking_id)["available"]) <= 0:
                 raise HTTPException(status_code=409,
                                     detail=f"No {new_type.name} capacity left for the remaining dates "
                                            f"— a future reservation needs it")
@@ -3114,14 +3108,10 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             if _blocked(db, rt_id, old_co, new_co):
                 raise HTTPException(status_code=409,
                                     detail=f"{name} is blocked for the extra nights")
-            booked = int(availability.booked_qty(db, rt_id, old_co, new_co, lock=True,
-                                                 exclude_booking_id=booking.booking_id))   # v7f: not itself
-            inactive = int(availability.out_of_service_count(db, rt_id))
-            # b5: extending into a night an unconfirmed OTA guest is booked for would strand them.
-            holds, _u = availability.ota_draft_holds(db, old_co, new_co,
-                                                      exclude_ota_booking_id=booking.ota_booking_id)
-            free = ((rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
-                    - int(availability.lent_out(db, old_co, new_co, holds=holds).get(rt_id, 0)))   # v7b
+            # v7f not itself; b5 an unconfirmed OTA guest's night; v7b alternates; v7v night by night
+            free = int(availability.free_rooms(db, rt_id, old_co, new_co, total=(rt.total_rooms if rt else 0),
+                                               lock=True, exclude_booking_id=booking.booking_id,
+                                               exclude_ota_booking_id=booking.ota_booking_id)["available"])
             if free < qty:
                 raise HTTPException(
                     status_code=409,

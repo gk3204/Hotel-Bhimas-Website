@@ -158,16 +158,11 @@ def redate(booking_id: int, data: RedateRequest, db: Session = Depends(get_db),
         need[item.room_type_id] = need.get(item.room_type_id, 0) + int(item.quantity or 1)
     for rt_id, qty in need.items():
         rt = db.query(RoomType).filter(RoomType.room_type_id == rt_id).first()
-        booked = int(availability.booked_qty(db, rt_id, new_ci, new_co, lock=True))
-        # booked_qty counts this booking when its old window overlaps the new one.
-        if b.status == "confirmed" and b.check_in < new_co and b.check_out > new_ci:
-            booked -= qty
-        inactive = int(availability.out_of_service_count(db, rt_id))
-        # b5: unconfirmed OTA drafts hold their rooms (not this booking's own draft).
-        holds, _u = availability.ota_draft_holds(db, new_ci, new_co,
-                                                  exclude_ota_booking_id=b.ota_booking_id)
-        free = ((rt.total_rooms if rt else 0) - booked - inactive - int(holds.get(rt_id, 0))
-                - int(availability.lent_out(db, new_ci, new_co, holds=holds).get(rt_id, 0)))   # v7b
+        # this booking's own old window excluded; b5 OTA holds (not its own draft); v7b alternates;
+        # v7v night by night
+        free = int(availability.free_rooms(db, rt_id, new_ci, new_co, total=(rt.total_rooms if rt else 0),
+                                           lock=True, exclude_booking_id=b.booking_id,
+                                           exclude_ota_booking_id=b.ota_booking_id)["available"])
         if free < qty:
             raise HTTPException(
                 status_code=409,
@@ -322,17 +317,13 @@ def edit_booking_rooms(booking_id: int, data: BookingRoomsEdit, db: Session = De
         need[ln.room_type_id] = need.get(ln.room_type_id, 0) + ln.quantity
     for i in items.values():
         held[i.room_type_id] = held.get(i.room_type_id, 0) + int(i.quantity or 1)
-    counts_self = b.status in availability.RESERVED_STATUSES
-    holds, _u = availability.ota_draft_holds(db, b.check_in, b.check_out,
-                                              exclude_ota_booking_id=b.ota_booking_id)
     for rt_id, qty in need.items():
         availability.lock_room_type(db, rt_id)
-        booked = int(availability.booked_qty(db, rt_id, b.check_in, b.check_out, lock=True))
-        if counts_self:
-            booked -= held.get(rt_id, 0)
-        free = (int(rts[rt_id].total_rooms or 0) - booked
-                - int(availability.out_of_service_count(db, rt_id)) - int(holds.get(rt_id, 0))
-                - int(availability.lent_out(db, b.check_in, b.check_out, holds=holds).get(rt_id, 0)))   # v7b
+        # this booking's current hold excluded; OTA holds; v7b alternates; v7v night by night
+        free = int(availability.free_rooms(db, rt_id, b.check_in, b.check_out,
+                                           total=int(rts[rt_id].total_rooms or 0), lock=True,
+                                           exclude_booking_id=b.booking_id,
+                                           exclude_ota_booking_id=b.ota_booking_id)["available"])
         if free < qty:
             raise HTTPException(status_code=409,
                                 detail=f"Only {max(free, 0)} {rts[rt_id].name} free for "

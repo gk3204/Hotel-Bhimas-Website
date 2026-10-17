@@ -122,15 +122,12 @@ def create_booking(
             # guests already CHECKED IN and rooms in maintenance/blocked, so the website could
             # sell a room the desk knew was taken (utils/availability.py says why that matters).
             # It also subtracts rooms held by unconfirmed OTA drafts, like the desk does.
-            booked_rooms = int(availability.booked_qty(db, room_item.room_type_id,
-                                                       data.check_in, data.check_out, lock=True))
-            out_of_service = int(availability.out_of_service_count(db, room_item.room_type_id))
-            holds, _unmapped = availability.ota_draft_holds(db, data.check_in, data.check_out)
-            ota_held = int(holds.get(room_item.room_type_id, 0))
             # v7b: and rooms lent to another type booked into its alternates
-            lent = int(availability.lent_out(db, data.check_in, data.check_out, holds=holds)
-                       .get(room_item.room_type_id, 0))
-            available_rooms = room_type.total_rooms - booked_rooms - out_of_service - ota_held - lent
+            # v7v: night by night - the tightest night decides
+            _fr = availability.free_rooms(db, room_item.room_type_id, data.check_in, data.check_out,
+                                          total=room_type.total_rooms, lock=True)
+            booked_rooms = int(_fr["booked"])
+            available_rooms = int(_fr["available"])
             requested_rooms = room_item.quantity
 
             if requested_rooms > available_rooms:

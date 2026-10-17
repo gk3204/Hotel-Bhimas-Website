@@ -10,6 +10,8 @@ again — an overbooking hole on both surfaces.
 Both routers now call these helpers, so the two can never drift again.
 """
 
+from datetime import timedelta
+
 from sqlalchemy import func
 
 from models import Booking, BookingItem, Room
@@ -67,6 +69,8 @@ def booked_qty(db, room_type_id, check_in, check_out, lock=False, exclude_bookin
         Booking.check_in < check_out,
         Booking.check_out > check_in,
     )
+    if exclude_booking_id:       # v7v: excluded from the dated count too, not only the still-in one
+        inner = inner.filter(Booking.booking_id != exclude_booking_id)
     if lock:
         inner = inner.with_for_update()
     by_dates = db.query(func.sum(BookingItem.quantity)).filter(
@@ -235,6 +239,60 @@ def alternate_plan(db, check_in, check_out, holds=None, exclude_ota_booking_id=N
     return {"own_free": own_free, "lent": lent, "alt_free": alt_free, "lenders": lenders}
 
 
+def _nights(check_in, check_out):
+    d = check_in
+    while d < check_out:
+        yield d
+        d = d + timedelta(days=1)
+
+
+def free_rooms(db, room_type_id, check_in, check_out, *, total=None, exclude_ota_booking_id=None,
+               exclude_booking_id=None, lock=False, cache=None) -> dict:
+    """v7v (owner, 17 Oct: "6 Four Bed Non-AC rooms but the desk shows 1, and the OTA booking is declined
+    saying availability is not there"): rooms of a type free for EVERY night of [check_in, check_out).
+
+    The helpers above count everything overlapping the WHOLE range, so a 3-night stay added the
+    bookings of all three nights together - 4 guests on the 17th + 2 on the 18th read as 6 rooms
+    taken, though no night had more than 4 (prod draft #1381: "-2 available", every night had 2 free).
+    This evaluates one night at a time and returns the TIGHTEST night:
+      {"available": rooms free on the tightest night (may be negative), "booked", "held", "lent",
+       "inactive": that night's figures, "alt_free": extra rooms through alternate types free on every
+       night, "lenders": the alternate lenders, "night": the tightest night}.
+    `cache` (a dict) shares the per-night OTA holds / alternate plan across room types in one request."""
+    from models import RoomType
+    if total is None:
+        rt = db.query(RoomType).filter(RoomType.room_type_id == room_type_id).first()
+        total = int(rt.total_rooms or 0) if rt else 0
+    inactive = int(out_of_service_count(db, room_type_id))
+    cache = {} if cache is None else cache
+    worst, with_alt_min, lenders = None, None, {}
+    for d in _nights(check_in, check_out):
+        e = d + timedelta(days=1)
+        key = (d, exclude_ota_booking_id)
+        if key not in cache:
+            holds, _u = ota_draft_holds(db, d, e, exclude_ota_booking_id=exclude_ota_booking_id)
+            cache[key] = (holds, alternate_plan(db, d, e, holds=holds))
+        holds, plan = cache[key]
+        booked = int(booked_qty(db, room_type_id, d, e, lock=lock, exclude_booking_id=exclude_booking_id))
+        held = int(holds.get(room_type_id, 0))
+        lent = int(plan["lent"].get(room_type_id, 0))
+        avail = int(total) - booked - inactive - held - lent
+        alt = int(plan["alt_free"].get(room_type_id, 0))
+        lenders = plan.get("lenders") or lenders
+        if worst is None or avail < worst["available"]:
+            worst = {"available": avail, "booked": booked, "held": held, "lent": lent, "inactive": inactive,
+                     "night": d}
+        wa = max(0, avail) + alt
+        with_alt_min = wa if with_alt_min is None else min(with_alt_min, wa)
+    if worst is None:            # an empty range consumes nothing
+        worst = {"available": int(total) - inactive, "booked": 0, "held": 0, "lent": 0, "inactive": inactive,
+                 "night": check_in}
+        with_alt_min = max(0, worst["available"])
+    worst["alt_free"] = max(0, (with_alt_min or 0) - max(0, worst["available"]))
+    worst["lenders"] = lenders
+    return worst
+
+
 def lent_out(db, check_in, check_out, holds=None, exclude_ota_booking_id=None) -> dict:
     """{type: rooms of that type taken by other types booked into their alternates}."""
     return alternate_plan(db, check_in, check_out, holds=holds,
@@ -246,15 +304,13 @@ def alternate_shortfall(db, room_type_id, check_in, check_out, quantity, exclude
     {"own": rooms of the type itself still free, "alt": extra rooms through alternates,
      "fits_own": bool, "fits_with_alt": bool, "lender_names": [type names that would host it]}"""
     from models import RoomType
-    holds, _u = ota_draft_holds(db, check_in, check_out, exclude_ota_booking_id=exclude_ota_booking_id)
-    plan = alternate_plan(db, check_in, check_out, holds=holds)
     rt = db.query(RoomType).filter(RoomType.room_type_id == room_type_id).first()
-    own = (int(rt.total_rooms or 0) if rt else 0) - int(booked_qty(db, room_type_id, check_in, check_out)) \
-        - int(out_of_service_count(db, room_type_id)) - int(holds.get(room_type_id, 0)) \
-        - int(plan["lent"].get(room_type_id, 0))
-    alt = int(plan["alt_free"].get(room_type_id, 0))
+    # v7v: night by night (free_rooms), not the whole range added together
+    fr = free_rooms(db, room_type_id, check_in, check_out, exclude_ota_booking_id=exclude_ota_booking_id)
+    own = fr["available"]
+    alt = int(fr["alt_free"])
     names = []
-    for x, _n in plan["lenders"].get(room_type_id, []):
+    for x, _n in (fr.get("lenders") or {}).get(room_type_id, []):
         t = db.query(RoomType).filter(RoomType.room_type_id == x).first()
         if t is not None:
             names.append(t.name)
