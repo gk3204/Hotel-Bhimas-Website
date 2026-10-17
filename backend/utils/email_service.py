@@ -333,9 +333,24 @@ def send_enquiry_email(name: str, email: str, phone: str, message: str):
         raise
 
 
+def _pdf_attachments(paths):
+    """v7t: Mailjet attachments for the PDFs at `paths` (missing / empty files are skipped)."""
+    out = []
+    for p in paths or []:
+        try:
+            if p and os.path.exists(p) and os.path.getsize(p) > 0:
+                with open(p, "rb") as f:
+                    out.append({"ContentType": "application/pdf", "Filename": os.path.basename(p),
+                                "Base64Content": base64.b64encode(f.read()).decode()})
+        except Exception as e:
+            logger.warning(f"attachment {p} skipped: {e}")
+    return out
+
+
 def send_admin_cancellation_email(guest_email: str, guest_name: str, booking_ref: str, 
                                    check_in, check_out, refund_amount: float, 
-                                   refund_id: str, reason: str, admin_notes: str = None):
+                                   refund_id: str, reason: str, admin_notes: str = None,
+                                   attachments=None):
     """Send admin cancellation & refund notification email via Mailjet"""
 
     if not MAILJET_API_KEY or not MAILJET_API_SECRET:
@@ -554,7 +569,9 @@ Hotel Bhimas
                         "X-Entity-Ref-ID": str(booking_ref),
                     },
                     "TrackOpen": 1,
-                    "TrackClick": 1
+                    "TrackClick": 1,
+                    # v7t (owner): the refund voucher(s), as PDFs
+                    "Attachments": _pdf_attachments(attachments),
                 },
                 {
                     "From": {"Email": MAIL_FROM, "Name": "Hotel Bhimas Bookings"},

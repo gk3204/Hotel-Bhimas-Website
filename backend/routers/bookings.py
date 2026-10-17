@@ -24,6 +24,9 @@ class AdminCancelRequest(BaseModel):
     reason: str  # "Double booking error", "Guest request", "Technical issue", "Other"
     refund_amount: float  # Amount to refund. v7d: 0 = cancel WITHOUT a refund
     admin_notes: str | None = None  # Optional admin notes
+    # v7t (owner): money taken at the DESK is refunded by hand - how it went back, and its reference
+    refund_mode: str | None = None          # cash | upi | bank (needed only for a desk payment)
+    refund_reference: str | None = None
 
 router = APIRouter(
     prefix="/bookings",
@@ -608,6 +611,15 @@ def bookings_by_status(status: str, db: Session = Depends(get_db)):
 
     return bookings
 
+@router.get("/{booking_id}/refundable", dependencies=[Depends(require_admin)])
+def booking_refundable(booking_id: int, db: Session = Depends(get_db)):
+    """v7t: what the cancel dialog can refund - the paid payments not yet refunded, online vs desk."""
+    from services.cancel_refunds import refund_summary
+    if not db.query(Booking).filter(Booking.booking_id == booking_id).first():
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return refund_summary(db, booking_id)
+
+
 @router.post("/{booking_id}/admin-cancel", dependencies=[Depends(require_admin)])
 def admin_cancel_booking(
     booking_id: int,
@@ -644,26 +656,20 @@ def admin_cancel_booking(
             raise HTTPException(status_code=400, detail="Refund amount cannot be negative")
         no_refund = float(request.refund_amount or 0) <= 0
         refund_id = None
+        refunded = []
         if not no_refund:
-            # 3️⃣ Fetch payment record
-            payment = db.query(Payment).filter(
-                Payment.booking_id == booking_id,
-                Payment.status == "paid"
-            ).first()
-            if not payment:
+            # v7t (owner): every paid payment, online ones at the gateway and desk ones recorded by
+            # hand - each gets its refund voucher RFND-n (services/cancel_refunds.py)
+            from services.cancel_refunds import refund_for_cancellation
+            if request.refund_mode is not None and request.refund_mode not in ("cash", "upi", "bank"):
+                raise HTTPException(status_code=422, detail="Refund mode must be cash, upi or bank")
+            if not db.query(Payment).filter(Payment.booking_id == booking_id, Payment.status == "paid").first():
                 raise HTTPException(status_code=404, detail="Payment record not found")
-
-            # 4️⃣ Process refund via Razorpay
-            success, refund_id, refund_msg = process_gateway_refund(
-                db, payment.payment_id, request.refund_amount, request.reason)
-            if not success:
-                raise HTTPException(status_code=400, detail=f"Refund failed: {refund_msg}")
-            # v7e: who paid the refund out (the voucher and the cashier summary name them)
-            try:
-                from utils.audit import _resolve_user_id
-                payment.refunded_by = _resolve_user_id(db, user)
-            except Exception:
-                pass
+            refunded = refund_for_cancellation(db, booking, request.refund_amount, request.reason, user,
+                                               mode=request.refund_mode,
+                                               reference=(request.refund_reference or "").strip()[:100] or None)
+            refund_id = ", ".join(p.refund_id for p in refunded if p.refund_id) or None
+            booking = db.query(Booking).with_for_update().filter(Booking.booking_id == booking_id).first()
         
         # 5️⃣ Update booking status
         booking.status = "admin_cancelled"
@@ -680,13 +686,22 @@ def admin_cancel_booking(
             from utils.audit import write_audit
             write_audit(db, user, "booking.admin_cancel", "booking", booking_id,
                         after={"reason": request.reason, "refund_amount": float(request.refund_amount or 0),
-                               "no_refund": no_refund, "refund_id": refund_id}, client="web", commit=True)
+                               "no_refund": no_refund, "refund_id": refund_id,
+                               "refund_vouchers": [f"RFND-{p.payment_id}" for p in refunded],
+                               "refund_mode": request.refund_mode}, client="web", commit=True)
         except Exception as e:
             logger.warning(f"admin cancel audit failed for {booking_id}: {e}")
+
+        # v7t (owner): the refund voucher(s) go to the guest - WhatsApp now, and attached to the email
+        voucher_paths = []
+        if refunded:
+            from services.cancel_refunds import send_refund_vouchers
+            voucher_paths = send_refund_vouchers(db, booking, refunded)
 
         # 6️⃣ Send notification email to guest
         try:
             send_admin_cancellation_email(
+                attachments=voucher_paths,
                 guest_email=booking.guest.email,
                 guest_name=booking.display_guest_name,
                 booking_ref=booking_id,
@@ -708,6 +723,9 @@ def admin_cancel_booking(
             "refund_id": refund_id,
             "refund_amount": 0.0 if no_refund else request.refund_amount,
             "refund_status": "none" if no_refund else "completed",
+            "refund_vouchers": [{"receipt_no": f"RFND-{p.payment_id}", "payment_id": p.payment_id,
+                                 "amount": float(p.refund_amount or 0), "mode": p.refund_mode or p.gateway,
+                                 "refund_id": p.refund_id} for p in refunded],
             "message": ("Booking cancelled - no refund" if no_refund
                         else "Booking cancelled and refund processed successfully")
         }

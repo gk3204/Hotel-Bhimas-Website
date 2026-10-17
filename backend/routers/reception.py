@@ -1228,8 +1228,12 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # further down, so hand it to the evaluation: that is what lets "room 83 only" price room 83's
         # own rate rather than an average of the stay.
         _room_to_item = {rid: a.booking_item_id for a in data.assignments for rid in a.room_ids}
+        # v7t: the fee is for the rooms ARRIVING NOW. With no rooms named it used to price every room of
+        # the booking - so a group arriving car by car before the standard time paid every room's early
+        # fee at EACH arrival (3 rooms, 3 cars = 9 fees). The desk's default is now this request's rooms.
+        _early_ids = list(data.early_room_ids or []) or [rid for a in data.assignments for rid in a.room_ids] or None
         arrival = arrival_evaluation(db, booking, now, applied=data.arrival_fee_applied,
-                                     room_ids=data.early_room_ids, room_to_item=_room_to_item)
+                                     room_ids=_early_ids, room_to_item=_room_to_item)
         if arrival["lapsed"]:
             raise HTTPException(status_code=400, detail=arrival["lapsed"])
         if arrival["days_early"] > 1:
@@ -1840,7 +1844,7 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 exp = arrival["expected_at"]
                 # Re-resolve AFTER the split: every charged room now has its own booking-item row, so
                 # each fee line can carry that room's id and its own room type's GST slab.
-                selection = _fee_selection(db, booking, data.early_room_ids)
+                selection = _fee_selection(db, booking, _early_ids)
                 charged_items = [item for item, _rid in selection]
                 sel_rooms = [rooms_by_id.get(rid) if rid else None for _item, rid in selection]
                 basis = "override" if fee_changed else arrival["basis"]
@@ -2031,9 +2035,22 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
             except Exception:
                 pass
 
+        # v7t (owner): a website stay - the advance receipt raised the day they paid goes to the guest now
+        _advance = []
+        try:
+            from services.prepaid_receipts import send_website_advance_receipts
+            _advance = send_website_advance_receipts(db, booking)
+        except Exception as e:
+            logger.warning(f"website advance receipts for booking {booking.booking_id} failed: {e}")
+            try:
+                db.rollback()
+            except Exception:
+                pass
+
         db.refresh(booking)
         resp = _checkin_response(db, booking, folio, already=False)
         resp["prepaid_receipt"] = _prepaid
+        resp["advance_receipts"] = _advance
         resp["vip"] = checkin_gate["vip"]
         resp["blacklist_warning"] = (checkin_gate["reason"] or "Guest is on the watchlist") \
             if checkin_gate["blacklist"] else None

@@ -1090,7 +1090,8 @@ def cashier_summary_data(db, day, day_to=None):
             .order_by(Payment.created_at).all())
     from models import PrepaidReceipt, Expense, Invoice
     prepaid = (db.query(PrepaidReceipt)
-               .filter(_bd(PrepaidReceipt.issued_at) >= day, _bd(PrepaidReceipt.issued_at) <= day_to)
+               .filter(_bd(PrepaidReceipt.issued_at) >= day, _bd(PrepaidReceipt.issued_at) <= day_to,
+                       PrepaidReceipt.kind != "website")       # v7t: already listed the day it was paid
                .order_by(PrepaidReceipt.issued_at).all())
     expenses = (db.query(Expense).filter(_bd(Expense.created_at) >= day, _bd(Expense.created_at) <= day_to)
                 .order_by(Expense.created_at).all())
@@ -1132,7 +1133,8 @@ def cashier_summary_for_shift(db, shift):
     from models import PrepaidReceipt
     end = shift.closed_at or clock.now_utc()
     prepaid = (db.query(PrepaidReceipt)
-               .filter(PrepaidReceipt.issued_at >= shift.opened_at, PrepaidReceipt.issued_at < end)
+               .filter(PrepaidReceipt.issued_at >= shift.opened_at, PrepaidReceipt.issued_at < end,
+                       PrepaidReceipt.kind != "website")       # v7t: already listed the day it was paid
                .order_by(PrepaidReceipt.issued_at).all())
     # v7d (owner): the shift report lists the bills checked out during the shift too - unsettled,
     # and settled with no receipt (nil amount) - with who checked them out.
@@ -1305,7 +1307,10 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             else:
                 # Match the printed receipt document number (routers/payments.receipt_payload).
                 mm["advance"].append({**base, "bill_no": f"RCPT-{p.payment_id}",
-                                      "receipt": round(amt, 2), "payment": 0.0, "remarks": "ADVANCE"})
+                                      "receipt": round(amt, 2), "payment": 0.0,
+                                      # v7t (owner): the website advance receipt, on the day it was paid
+                                      "remarks": ("WEBSITE ADVANCE" + (f" ({p.gateway.title()})" if p.gateway else "")
+                                                  if _online_payment(p) else "ADVANCE")})
             mm["receipt"] += amt
 
     for p in refunds:
@@ -1317,10 +1322,14 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
                 base["user"] = _user_name(db, p.refunded_by)
             mm = _mode(p.refund_mode or p.method or ("online" if _online_payment(p) else "other"))
             # Match the printed refund-voucher number; CR No = the refund's own payout reference.
+            _bk = db.query(Booking).filter(Booking.booking_id == p.booking_id).first() if p.booking_id else None
+            _cancelled = _bk is not None and _bk.status in ("cancelled", "admin_cancelled")
             mm["paidout"].append({**base, "bill_no": f"RFND-{p.payment_id}",
-                                  "cr_no": p.refund_reference or "",
+                                  "cr_no": p.refund_reference or p.refund_id or "",
                                   "receipt": 0.0, "payment": round(rf, 2),
-                                  "remarks": (p.refund_reason or "REFUND PAIDOUT")})
+                                  # v7t (owner): a cancelled booking's refund, named as one
+                                  "remarks": (("CANCELLED BOOKING - REFUND" + (f": {p.refund_reason}" if p.refund_reason else ""))[:120]
+                                              if _cancelled else (p.refund_reason or "REFUND PAIDOUT"))})
             mm["payment"] += rf
 
     # v7e: petty-cash expenses are cash paid OUT of the drawer - paid-outs, like the legacy summary.
@@ -1471,8 +1480,9 @@ def _bal_cell(x):
 def _is_checkout_receipt(p, b) -> bool:
     """A receipt that settled the guest's bill at check-out (vs an advance). The desk takes the
     settling payment BEFORE it calls checkout (checkout refuses a balance), so a payment within
-    _SETTLE_WINDOW before the checkout counts as its settlement (v6m.12). v7s: a payment taken in the
-    check-in flow (client_ref "ci...") is an advance however short the stay."""
+    _SETTLE_WINDOW before the ACTUAL check-out moment counts as its settlement (v6m.12). v7s: a
+    payment taken in the check-in flow (client_ref "ci...") is an advance however short the stay.
+    v7t (owner, 17 Oct): the window is ONE hour (was 5 h 30 min)."""
     if b is None or not b.checked_out_at or not p.created_at:
         return False
     if (p.client_ref or "").startswith("ci"):
@@ -1480,7 +1490,7 @@ def _is_checkout_receipt(p, b) -> bool:
     return p.created_at >= b.checked_out_at - _SETTLE_WINDOW
 
 
-_SETTLE_WINDOW = timedelta(hours=5, minutes=30)
+_SETTLE_WINDOW = timedelta(hours=1)        # v7t (owner): 1 h before the actual check-out
 
 
 def _cashier_table(data):

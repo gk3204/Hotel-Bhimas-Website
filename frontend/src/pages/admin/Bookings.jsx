@@ -7,7 +7,7 @@ import {
   getBookingGuests,
   getGuestScanObjectUrl,
 } from "../../api/bookings";
-import { adminCancelBooking, markNoShow, reinstateBooking, redateBooking, editBookingDetails, editBookingRooms, resendBookingConfirmation } from "../../api/admin";
+import { adminCancelBooking, getRefundable, markNoShow, reinstateBooking, redateBooking, editBookingDetails, editBookingRooms, resendBookingConfirmation } from "../../api/admin";
 import { getRoomTypes } from "../../api/roomTypes";
 import { jwtDecode } from "jwt-decode";
 import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard, FaUserSlash, FaUndo, FaCalendarAlt, FaEdit, FaPlus, FaTimes } from "react-icons/fa";
@@ -48,6 +48,11 @@ const Bookings = () => {
   const [adminCancelRefundType, setAdminCancelRefundType] = useState("full");
   const [adminCancelNotes, setAdminCancelNotes] = useState("");
   const [adminCancelLoading, setAdminCancelLoading] = useState(false);
+  // v7t: what was actually paid (website / desk), and how a desk refund goes back
+  const [refundInfo, setRefundInfo] = useState(null);
+  const [refundCustom, setRefundCustom] = useState("");
+  const [refundMode, setRefundMode] = useState("cash");
+  const [refundRef, setRefundRef] = useState("");
   // v5m: admin re-date dialog + no-show / reinstate actions
   const [redate, setRedate] = useState(null);   // { booking, check_in, check_out, check_in_time, reason }
   // v6m: admin edit dialog - { booking, tab, details:{...}, lines:[...], reason, preview }
@@ -127,12 +132,30 @@ const Bookings = () => {
       // Fetch full booking details including charges for refund calculation
       const data = await getBookingById(bookingId);
       setSelectedBooking(data);
+      // v7t: refund what was PAID (not the booking total) - and know whether any of it was desk money
+      const ri = await getRefundable(bookingId).catch(() => null);
+      setRefundInfo(ri);
+      setRefundCustom("");
+      setRefundMode("cash");
+      setRefundRef("");
+      setAdminCancelRefundType(ri && ri.refundable > 0 ? "full" : "none");
       setAdminCancelBookingId(bookingId);
     } catch (err) {
       showToast("Failed to load booking details for cancellation", "error");
     } finally {
       setAdminCancelLoading(false);
     }
+  };
+
+  // v7t: the refund for each choice, from what was actually paid
+  const convFee = () => parseFloat(selectedBooking?.charges?.convenience_fee || 0) +
+    parseFloat(selectedBooking?.charges?.convenience_gst || 0);
+  const refundFor = (type) => {
+    const paid = refundInfo ? refundInfo.refundable : 0;
+    if (type === "full") return Math.round(paid * 100) / 100;
+    if (type === "convenience") return Math.max(0, Math.round((paid - convFee()) * 100) / 100);
+    if (type === "custom") return parseFloat(refundCustom) || 0;
+    return 0;
   };
 
   const processAdminCancellation = async () => {
@@ -146,31 +169,32 @@ const Bookings = () => {
       
       // v7d (owner): cancel WITHOUT a refund - nothing goes to the gateway
       const noRefund = adminCancelRefundType === "none";
-      if (!noRefund && (!selectedBooking || !selectedBooking.charges)) {
-        showToast("Booking details not loaded. Please refresh and try again.", "error");
+      // v7t: the amount comes from what was PAID (refundable), not the booking total
+      const refundAmount = noRefund ? 0 : refundFor(adminCancelRefundType);
+      if (!noRefund && !(refundAmount > 0)) {
+        showToast("Enter the amount to refund", "error");
         setAdminCancelLoading(false);
         return;
       }
-
-      // Calculate refund amount based on refund type
-      let refundAmount = noRefund ? 0 : parseFloat(selectedBooking.charges.payable_amount);
-      if (adminCancelRefundType === "convenience") {
-        // Return room total excluding convenience fee + its GST
-        const convenienceFeeTotal = 
-          parseFloat(selectedBooking.charges?.convenience_fee || 0) + 
-          parseFloat(selectedBooking.charges?.convenience_gst || 0);
-        refundAmount = refundAmount - convenienceFeeTotal;
-        console.log("Refund calculation:", { refundAmount, convenienceFeeTotal, payable: selectedBooking.charges.payable_amount });
+      if (!noRefund && refundInfo && refundAmount > refundInfo.refundable + 0.005) {
+        showToast(`Only ₹${refundInfo.refundable.toFixed(2)} was paid on this booking`, "error");
+        setAdminCancelLoading(false);
+        return;
       }
+      const needsMode = !noRefund && refundInfo && refundAmount > refundInfo.online + 0.005;
 
       const response = await adminCancelBooking(
         adminCancelBookingId,
         adminCancelReason,
         refundAmount,
-        adminCancelNotes
+        adminCancelNotes,
+        needsMode ? refundMode : null,
+        needsMode ? refundRef.trim() : null
       );
 
-      showToast(noRefund ? "✅ Booking cancelled - no refund" : `✅ Booking cancelled. Refund ID: ${response.refund_id}`);
+      const vouchers = (response.refund_vouchers || []).map((v) => v.receipt_no).join(", ");
+      showToast(noRefund ? "✅ Booking cancelled - no refund"
+        : `✅ Booking cancelled. Refund voucher ${vouchers} sent to the guest (email + WhatsApp).`);
       setAdminCancelBookingId(null);
       setAdminCancelReason("");
       setAdminCancelRefundType("full");
@@ -1047,12 +1071,8 @@ const Bookings = () => {
                         className="mr-3"
                       />
                       <span className="text-sm">
-                        Full Refund
-                        {selectedBooking && (
-                          <span className="ml-2 text-[#E5C07B]">
-                            ₹{selectedBooking.charges.payable_amount.toFixed(2)}
-                          </span>
-                        )}
+                        Full Refund (everything paid)
+                        <span className="ml-2 text-[#E5C07B]">₹{refundFor("full").toFixed(2)}</span>
                       </span>
                     </label>
                     <label className="flex items-center cursor-pointer">
@@ -1066,14 +1086,19 @@ const Bookings = () => {
                       />
                       <span className="text-sm">
                         Full - Convenience fee
-                        {selectedBooking && (
-                          <span className="ml-2 text-[#E5C07B]">
-                            ₹{(selectedBooking.charges.payable_amount - 
-                              (parseFloat(selectedBooking.charges?.convenience_fee || 0) + 
-                               parseFloat(selectedBooking.charges?.convenience_gst || 0))).toFixed(2)}
-                          </span>
-                        )}
+                        <span className="ml-2 text-[#E5C07B]">₹{refundFor("convenience").toFixed(2)}</span>
                       </span>
+                    </label>
+                    {/* v7t: part of what was paid (e.g. a cancellation charge kept) */}
+                    <label className="flex items-center cursor-pointer">
+                      <input type="radio" name="refund" value="custom" checked={adminCancelRefundType === "custom"}
+                        onChange={(e) => setAdminCancelRefundType(e.target.value)} className="mr-3" />
+                      <span className="text-sm mr-2">Other amount</span>
+                      {adminCancelRefundType === "custom" && (
+                        <input type="number" min="0" step="0.01" value={refundCustom}
+                          onChange={(e) => setRefundCustom(e.target.value)}
+                          className="w-32 px-2 py-1 bg-slate-700 border border-slate-600 rounded text-white" />
+                      )}
                     </label>
                     {/* v7d (owner): cancel without refunding anything */}
                     <label className="flex items-center cursor-pointer">
@@ -1092,6 +1117,36 @@ const Bookings = () => {
                     </label>
                   </div>
                 </div>
+
+                {/* v7t: what was paid, and how a DESK payment's refund goes back */}
+                {refundInfo && (
+                  <p className="text-xs text-slate-400 -mt-2">
+                    Paid on this booking: ₹{refundInfo.refundable.toFixed(2)}
+                    {refundInfo.online > 0 && ` · website ₹${refundInfo.online.toFixed(2)} (refunded to the guest's card / UPI automatically)`}
+                    {refundInfo.desk > 0 && ` · at the desk ₹${refundInfo.desk.toFixed(2)}`}
+                  </p>
+                )}
+                {refundInfo && adminCancelRefundType !== "none" && refundFor(adminCancelRefundType) > refundInfo.online + 0.005 && (
+                  <div className="rounded-lg border border-amber-500/40 bg-amber-500/10 p-3 space-y-2">
+                    <p className="text-sm text-amber-200">
+                      ₹{(refundFor(adminCancelRefundType) - refundInfo.online).toFixed(2)} was paid at the desk - how is it going back?
+                    </p>
+                    <div className="flex gap-2">
+                      <select value={refundMode} onChange={(e) => setRefundMode(e.target.value)}
+                        className="px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white">
+                        <option value="cash">Cash</option>
+                        <option value="upi">UPI</option>
+                        <option value="bank">Bank transfer</option>
+                      </select>
+                      <input value={refundRef} onChange={(e) => setRefundRef(e.target.value)} placeholder="UPI / bank reference"
+                        className="flex-1 px-3 py-2 bg-slate-700 border border-slate-600 rounded-lg text-white" />
+                    </div>
+                  </div>
+                )}
+                <p className="text-xs text-slate-400">
+                  A refund voucher (RFND) with the guest's details is raised for each refund, sent to the guest by
+                  email and WhatsApp, and listed as a Paid-out in today's cashier summary.
+                </p>
 
                 {/* Admin Notes */}
                 <div>

@@ -57,7 +57,13 @@ export async function twofaDisable(code) {
     method: "POST", headers: authHeader(), body: JSON.stringify({ code }) }));
 }
 // ADMIN CANCEL BOOKING with refund
-export async function adminCancelBooking(bookingId, reason, refundAmount, adminNotes = null) {
+// v7t: what can be refunded on cancellation - paid payments not yet refunded, website vs desk
+export async function getRefundable(bookingId) {
+  return detailOrThrow(await fetch(`${BASE_URL}/bookings/${bookingId}/refundable`, { headers: authHeader() }));
+}
+
+export async function adminCancelBooking(bookingId, reason, refundAmount, adminNotes = null,
+                                         refundMode = null, refundReference = null) {
   try {
     const token = localStorage.getItem("adminToken");
     
@@ -68,7 +74,10 @@ export async function adminCancelBooking(bookingId, reason, refundAmount, adminN
     const requestBody = {
       reason,
       refund_amount: refundAmount,
-      admin_notes: adminNotes || null
+      admin_notes: adminNotes || null,
+      // v7t: a desk payment is refunded by hand - how, and its reference
+      refund_mode: refundMode || null,
+      refund_reference: refundReference || null,
     };
 
     console.log("📤 Sending admin cancel request:", requestBody);

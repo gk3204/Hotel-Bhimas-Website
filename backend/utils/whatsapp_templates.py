@@ -90,6 +90,30 @@ TEMPLATES = {
             "Hi {guest_name}, we've received your payment of Rs. {amount}. Your receipt is attached."
         ),
     },
+    # v7t (owner): the refund voucher of a cancelled booking. Text form + document form, like the
+    # payment receipt. NEW - both need Meta approval; until then the send falls back (doc -> text ->
+    # nothing on WhatsApp) and the guest still gets the voucher attached to the cancellation email.
+    "refund_voucher": {
+        "meta_name": "refund_voucher",
+        "category": "utility",
+        "lang": "en",
+        "param_order": ["guest_name", "amount", "booking_ref"],
+        "respect_optout": False,
+        "body_preview": (
+            "Hi {guest_name}, your booking {booking_ref} at Hotel Bhimas is cancelled and Rs. {amount} "
+            "has been refunded to you."
+        ),
+    },
+    "refund_voucher_doc": {
+        "meta_name": "refund_voucher_doc",
+        "category": "utility",
+        "lang": "en",
+        "param_order": ["guest_name", "amount"],
+        "respect_optout": False,
+        "body_preview": (
+            "Hi {guest_name}, Rs. {amount} has been refunded to you. Your refund voucher is attached."
+        ),
+    },
     # The final GST invoice, sent once the guest is checked out (reception.py::check_out already
     # creates it via ensure_invoice). respect_optout is FALSE on purpose: a tax invoice is a
     # statutory document the guest is entitled to, not a marketing message.

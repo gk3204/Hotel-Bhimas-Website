@@ -52,6 +52,10 @@ def _what_was_prepaid(db, booking):
         return (kind, channel[:60], round(prepaid, 2),
                 (round(float(net), 2) if net is not None and kind == "ota" else None),
                 (getattr(booking, "ota_booking_id", None) or None), None)
+    # v7t (owner, 17 Oct): a website stay's money already has its ADVANCE receipt (RCPT-n), raised -
+    # and listed in the cashier summary - on the day it was paid. Check-in sends THAT receipt to the
+    # guest (send_website_advance_receipts) instead of issuing a second, PRE, document.
+    return None
     pays = _website_payments(db, booking)
     amount = round(sum(float(p.amount or 0) for p in pays), 2)
     if amount > 0:
@@ -86,6 +90,45 @@ def issue_prepaid_receipt(db, booking, user_id=None):
         return db.query(PrepaidReceipt).filter(PrepaidReceipt.booking_id == booking.booking_id).first()
     db.refresh(pr)
     return pr
+
+
+def send_website_advance_receipts(db, booking):
+    """v7t (owner): at check-in, the guest gets the advance receipt(s) of what they paid on the
+    website (RCPT-n, dated the day they paid) - WhatsApp with the PDF, else the text / email fallback.
+    Idempotent per receipt. Returns [{payment_id, receipt_no, amount}]. Never raises."""
+    out = []
+    try:
+        pays = _website_payments(db, booking)
+    except Exception as e:
+        logger.warning(f"website advance receipts for booking {getattr(booking, 'booking_id', '?')}: {e}")
+        return out
+    if not pays:
+        return out
+    from routers.payments import receipt_payload
+    from utils.pdf_generator import generate_payment_receipt_pdf
+    from services import notify as notify_service
+    guest = booking.guest
+    name = booking.display_guest_name or (guest.name if guest else "Guest")
+    for p in pays:
+        amt = f"{float(p.amount or 0):.2f}"
+        out.append({"payment_id": p.payment_id, "receipt_no": f"RCPT-{p.payment_id}", "amount": float(p.amount or 0)})
+        try:
+            path = None
+            try:
+                path = generate_payment_receipt_pdf(receipt_payload(db, p, "payment"))
+            except Exception as e:
+                logger.warning(f"advance receipt PDF for payment {p.payment_id} failed: {e}")
+            notify_service.notify_guest_document(
+                db, guest, doc_template="payment_receipt_doc", text_template="payment_receipt",
+                doc_params={"guest_name": name, "amount": amt},
+                text_params={"guest_name": name, "amount": amt, "method": "website",
+                             "booking_ref": str(booking.booking_id)},
+                pdf_path=path, filename=f"advance-receipt-RCPT-{p.payment_id}.pdf",
+                caption=f"Advance receipt for Rs. {amt} - Hotel Bhimas", booking_id=booking.booking_id,
+                client_ref=f"advance_receipt:{p.payment_id}")
+        except Exception as e:
+            logger.warning(f"advance receipt send for payment {p.payment_id} failed: {e}")
+    return out
 
 
 def mode_label(pr) -> str:

@@ -1933,6 +1933,17 @@ def receipt_payload(db, payment, kind="payment") -> dict:
         "source": _src_label(db, booking),
         # v7m (owner): the room(s) the money was for
         "rooms": payment_rooms_label(db, payment),
+        # v7t (owner): "with guest details etc" - the stay, and whether the booking was cancelled
+        "guest_email": guest.email if guest else None,
+        "stay": (f"{booking.check_in:%d-%m-%Y} to {booking.check_out:%d-%m-%Y}"
+                 if booking and booking.check_in and booking.check_out else None),
+        "cancelled_at": (clock.to_local(booking.admin_cancelled_at or booking.cancelled_at)
+                         if booking and booking.status in ("cancelled", "admin_cancelled")
+                         and (booking.admin_cancelled_at or booking.cancelled_at) else None),
+        "booking_status": booking.status if booking else None,
+        # v7t (owner): a website payment is the guest's ADVANCE, receipted on the day it was paid
+        "website_advance": (payment.gateway or "") in ("razorpay", "phonepe") and not payment.collected_by
+                           and not getattr(payment, "collect_method", None),
     }
 
 

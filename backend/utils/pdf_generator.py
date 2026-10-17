@@ -965,7 +965,9 @@ def generate_payment_receipt_pdf(receipt_data):
         textColor=colors.HexColor("#B8860B"), fontSize=16, alignment=1, spaceAfter=16,
     )
     elements.append(Paragraph("REFUND VOUCHER" if is_refund
-                              else "PREPAID RECEIPT" if is_prepaid else "PAYMENT RECEIPT", title_style))
+                              else "PREPAID RECEIPT" if is_prepaid
+                              else "ADVANCE RECEIPT (website payment)" if receipt_data.get("website_advance")
+                              else "PAYMENT RECEIPT", title_style))
 
     def _dt(value):
         return value.strftime("%d-%m-%Y %H:%M") if value else "N/A"
@@ -981,11 +983,17 @@ def generate_payment_receipt_pdf(receipt_data):
         ["Phone", receipt_data.get("guest_phone") or "N/A",
          ("Refunded by" if is_refund else "Issued by" if is_prepaid else "Collected by"),
          (receipt_data.get("refunded_by_name") if is_refund else receipt_data.get("collected_by_name"))
-         or "Front desk"],
+         or ("Paid online (website)" if receipt_data.get("website_advance") else "Front desk")],
         # v6m.13 (owner, item 6): where the stay came from, on every receipt
         # v7m (owner): ...and which room
         ["Source", receipt_data.get("source") or "N/A", "Room(s)", receipt_data.get("rooms") or "N/A"],
     ]
+    if receipt_data.get("stay") or receipt_data.get("guest_email"):
+        # v7t (owner): the guest's details - the stay booked, the email on file
+        meta_data += [["Stay", receipt_data.get("stay") or "N/A", "Email", receipt_data.get("guest_email") or "N/A"]]
+    if is_refund and receipt_data.get("booking_status") in ("cancelled", "admin_cancelled"):
+        _ca = receipt_data.get("cancelled_at")
+        meta_data += [["Booking", "CANCELLED" + (f" on {_ca:%d-%m-%Y %H:%M}" if _ca else ""), "", ""]]
     if is_refund:
         meta_data += [
             ["Original payment", f"#{receipt_data['payment_id']} — {method_label} "
@@ -1006,7 +1014,11 @@ def generate_payment_receipt_pdf(receipt_data):
         meta_data += [
             ["Mode", method_label, "Reference", receipt_data.get("reference") or "N/A"],
         ]
-    meta_table = Table(meta_data, colWidths=[80, 190, 80, 130])
+    # v7t: a long value (a cancellation reason, a stay, an email) wraps inside its cell
+    _cell_style = ParagraphStyle(name="ReceiptCell", parent=styles["Normal"], fontSize=9, leading=11)
+    meta_data = [[Paragraph(str(c), _cell_style) if isinstance(c, str) and len(c) > 22 else c for c in row]
+                 for row in meta_data]
+    meta_table = Table(meta_data, colWidths=[85, 185, 80, 130])
     meta_table.setStyle(TableStyle([
         ('BACKGROUND', (0, 0), (0, -1), colors.HexColor("#f5f5f5")),
         ('BACKGROUND', (2, 0), (2, -1), colors.HexColor("#f5f5f5")),

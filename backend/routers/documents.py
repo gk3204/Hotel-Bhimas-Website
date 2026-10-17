@@ -17,7 +17,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
-from sqlalchemy import or_
+from sqlalchemy import func, or_
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
@@ -188,10 +188,21 @@ def list_documents(db: Session, q: str = "", type_: str = "all", dfrom: Optional
                 out.append(_row("receipt", f"RCPT-{p.payment_id}", p.created_at, b, g, p.amount,
                                 (p.method or p.gateway or "").upper(),
                                 f"/payments/{p.payment_id}/receipt/pdf?kind=payment"))
-            if "refund" in want and p.refund_status == "completed" and float(p.refund_amount or 0) > 0:
-                out.append(_row("refund", f"RFND-{p.payment_id}", p.created_at, b, g, p.refund_amount,
-                                (p.refund_mode or "").upper() or "REFUND",
-                                f"/payments/{p.payment_id}/receipt/pdf?kind=refund"))
+    # v7t: refund vouchers by the day the refund was PAID (a cancellation refund is usually days after
+    # the payment) - a cancelled booking's says so
+    if "refund" in want:
+        _ron = func.coalesce(Payment.refunded_at, Payment.created_at)
+        rq = db.query(Payment).filter(Payment.refund_status == "completed", *_dt_window(_ron))
+        rq = rq.filter(*_booking_filter(Payment.booking_id, None, ("RCPT", "RFND"), Payment.payment_id))
+        for p in rq.order_by(_ron.desc()).all():
+            if float(p.refund_amount or 0) <= 0:
+                continue
+            b, g = _ctx(p.booking_id)
+            _st = (p.refund_mode or p.gateway or "").upper() or "REFUND"
+            if b is not None and b.status in ("cancelled", "admin_cancelled"):
+                _st = f"CANCELLED - {_st}"
+            out.append(_row("refund", f"RFND-{p.payment_id}", p.refunded_at or p.created_at, b, g, p.refund_amount,
+                            _st, f"/payments/{p.payment_id}/receipt/pdf?kind=refund"))
 
     # ---- registration slips (checked-in / checked-out stays)
     # v7m/v7o: named by the slip's own number (REG-n) when it has been printed; a stay whose slip has
