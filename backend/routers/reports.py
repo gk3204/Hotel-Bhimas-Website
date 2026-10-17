@@ -1263,6 +1263,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
 
     # v6m.12: the printed time is the hotel's clock (payments are stored UTC).
     _loc = clock.to_local
+    _win_cache = {}      # v7u: booking_id -> its check-out windows
 
     for p in receipts:
         # v6m.13: a website payment has no desk method - call it what it is, not "Other"
@@ -1284,7 +1285,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             # "paid after checkout" would file every real settlement as ADVANCE. A payment within
             # _SETTLE_WINDOW before the checkout counts as its settlement - the same 5 h 30 min the
             # old local-vs-UTC comparison allowed by accident, now on purpose.
-            is_checkout = _is_checkout_receipt(p, b)
+            is_checkout = _is_checkout_receipt(p, b, db, _win_cache)
             mm = _mode(m)
             if _dues.is_due_payment(p):
                 # v7s: money received later against a pay-later bill - that bill's own row
@@ -1477,7 +1478,59 @@ def _bal_cell(x):
     return f"DUE {x['due']:,.2f}" if x.get("due") else x.get("balance")
 
 
-def _is_checkout_receipt(p, b) -> bool:
+_EXTENSION_PAY_GRACE = timedelta(minutes=30)   # v7u: the payment taken with an extension
+
+
+def _checkout_windows(db, b):
+    """v7u (owner, 17 Oct): "balance is payment in the 1 h before check-out - if the stay is extended by
+    hours or by days, that should be handled". [(start_utc, end_utc)]: the hour before EVERY check-out
+    moment the stay had - the original and each extended one (from the extension records) - plus the
+    half hour after each extension was made (the guest pays the balance + the extension then), plus
+    the hour before the actual check-out (and anything after it, as before)."""
+    import json as _json
+    from models import AuditLog
+    wins = []
+    if b.checked_out_at:
+        wins.append((b.checked_out_at - _SETTLE_WINDOW, datetime.max))
+    if db is None:
+        return wins
+    rows = (db.query(AuditLog).filter(AuditLog.entity_type == "booking", AuditLog.entity_id == str(b.booking_id),
+                                      AuditLog.action.in_(("reception.extend", "reception.extend_hours")))
+            .order_by(AuditLog.log_id).all())
+    for a in rows:
+        try:
+            before = _json.loads(a.before) if a.before else {}
+        except Exception:
+            before = {}
+        old = None
+        if before.get("checkout_at"):
+            try:
+                old = clock.to_utc(datetime.fromisoformat(str(before["checkout_at"])[:19]))
+            except Exception:
+                old = None
+        if old is None and before.get("check_out"):
+            # an older day-extension record has only the date: the stay's check-out time of day
+            try:
+                from routers.reception import _checkout_mode, _checkout_hour
+                from services import ota_service
+                d = date.fromisoformat(str(before["check_out"])[:10])
+                if ota_service.is_ota_source(b.booking_source):
+                    tod = datetime.min.replace(hour=12).time()
+                elif _checkout_mode() == "fixed":
+                    tod = datetime.min.replace(hour=_checkout_hour()).time()
+                else:
+                    tod = (b.checked_in_at or datetime.combine(d, datetime.min.replace(hour=12).time())).time()
+                old = clock.to_utc(datetime.combine(d, tod))
+            except Exception:
+                old = None
+        if old is not None:
+            wins.append((old - _SETTLE_WINDOW, old))
+        if a.created_at is not None:
+            wins.append((a.created_at, a.created_at + _EXTENSION_PAY_GRACE))
+    return wins
+
+
+def _is_checkout_receipt(p, b, db=None, _cache=None) -> bool:
     """A receipt that settled the guest's bill at check-out (vs an advance). The desk takes the
     settling payment BEFORE it calls checkout (checkout refuses a balance), so a payment within
     _SETTLE_WINDOW before the ACTUAL check-out moment counts as its settlement (v6m.12). v7s: a
@@ -1487,7 +1540,14 @@ def _is_checkout_receipt(p, b) -> bool:
         return False
     if (p.client_ref or "").startswith("ci"):
         return False
-    return p.created_at >= b.checked_out_at - _SETTLE_WINDOW
+    # v7u: the hour before ANY check-out moment the stay had (extensions), not only the last one
+    if _cache is not None:
+        if b.booking_id not in _cache:
+            _cache[b.booking_id] = _checkout_windows(db, b)
+        wins = _cache[b.booking_id]
+    else:
+        wins = _checkout_windows(db, b)
+    return any(s <= p.created_at <= e for s, e in wins)
 
 
 _SETTLE_WINDOW = timedelta(hours=1)        # v7t (owner): 1 h before the actual check-out
@@ -1559,6 +1619,7 @@ def checkout_summary_data(db, day):
     from models import Folio
     from routers.folio import _get_invoice
     from services import dues as _dues
+    _win_cache = {}      # v7u
     rows = []
     # v7e: bill by bill, on the day THAT bill closed (a per-room bill closes with its own room)
     _closed = _checked_out_bills(db, day=day)
@@ -1605,7 +1666,7 @@ def checkout_summary_data(db, day):
                                                          Payment.status == "paid").all()
                    if not (b.checked_out_at and p.created_at and p.created_at >= b.checked_out_at)
                    and not _dues.is_due_payment(p)] if _n == 0 else []
-        _at_out = [p for p in _before if _is_checkout_receipt(p, b)]
+        _at_out = [p for p in _before if _is_checkout_receipt(p, b, db, _win_cache)]
         advance = round(sum(float(p.amount or 0) for p in _before if p not in _at_out), 2)
         balance_paid = round(sum(float(p.amount or 0) for p in _at_out), 2)
         refund = round(sum(float(p.refund_amount or 0) for p in

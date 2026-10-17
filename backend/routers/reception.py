@@ -3056,6 +3056,12 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
 
         old_co = booking.check_out
         new_co = data.new_check_out
+        # v7u: the check-out moment this extension replaces (the check-out summary counts a payment in
+        # the hour before it as Balance - owner, 17 Oct)
+        try:
+            _moment_before = booking_checkout_moment(booking)
+        except Exception:
+            _moment_before = None
 
         # v6e: the extra nights are posted by room_posting, which puts each room's night on that
         # room's own bill when the stay bills per room. This folio is the one the reply quotes a
@@ -3284,7 +3290,8 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
 
         write_audit(db, user, "reception.extend", "booking", booking.booking_id,
                     before={"check_out": str(old_co), "grand_total": grand_before,
-                            "folio_balance": balance_before},
+                            "folio_balance": balance_before,
+                            "checkout_at": _moment_before.isoformat() if _moment_before else None},
                     after={"check_out": str(new_co), "extra_nights": (new_co - old_co).days,
                            "quoted_amount": quoted, "applied_amount": applied,
                            "comped": comped, "reason": data.reason,
