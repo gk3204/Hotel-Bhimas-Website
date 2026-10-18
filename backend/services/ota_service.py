@@ -790,6 +790,33 @@ def _room_count(text: str) -> int | None:
     return n if 1 <= n <= 10 else None
 
 
+# v8a: a "(Room n)" heading that is NOT alone on its line (the flattened text voucher). The name
+# cannot contain ")" so it starts after the "(G-C)" of the table header.
+_FLAT_ROOM_HEADING = re.compile(r"(?<![A-Za-z0-9])([A-Za-z0-9][A-Za-z0-9 /&'\-]{2,60}?)[ \t]*\(\s*Room\s+(\d+)\s*\)",
+                                re.IGNORECASE)
+# "1 x Double Deluxe Ac" - the type ends at the line end or a run of spaces (the flattened voucher
+# carries "2 Adults + 1 Child" on the same line after it).
+_X_TYPE_LINE = re.compile(r"\b\d{1,2}[ \t]*[xX][ \t]+([A-Za-z0-9][A-Za-z0-9 /()&'\-]*?[A-Za-z0-9)])"
+                          r"(?=[ \t]{2,}|[ \t]*\r|[ \t]*\n|[ \t]*$)", re.MULTILINE)
+
+
+def _voucher_type_names(text: str) -> list:
+    """The room-type names a Go-MMT voucher lists as "N x <type>" (v8a), longest first."""
+    names = {re.sub(r"\s+", " ", m.group(1)).strip() for m in _X_TYPE_LINE.finditer(text or "")}
+    return sorted((n for n in names if _clean_room_hint(n)), key=len, reverse=True)
+
+
+def _trim_flat_heading(raw: str, known: list) -> str:
+    """A flattened heading can carry text from before it on the same line. Prefer the voucher's own
+    "N x <type>" name it ends with; else what follows the last run of spaces (v8a)."""
+    r = re.sub(r"[ \t]+", " ", raw or "").strip()
+    for n in known:
+        if r.lower().endswith(n.lower()):
+            return n
+    parts = re.split(r"[ \t]{2,}", (raw or "").strip())
+    return parts[-1].strip() if parts else r
+
+
 def _room_breakup(text: str) -> list | None:
     """The voucher's own per-room breakdown, as [{"hint": <type name>, "rooms": n}, ...] (F-18).
 
@@ -814,10 +841,18 @@ def _room_breakup(text: str) -> list | None:
                          re.IGNORECASE | re.MULTILINE)
     matches = list(heading.finditer(text))
     if not matches:
+        # v8a: Goibibo also sends the voucher as flattened TEXT, where the heading shares its line
+        # with the table header and the first night: "(G-C)    Double Deluxe Ac (Room 1)     October
+        # 16, 2026  2,300.0 ...". The anchored pattern never matched it, so GH72036279902620 had no
+        # rate and no room type ("Only Inclusions") and was billed at the rate card - Rs 3,990
+        # against a voucher of Rs 4,830. 75 production Goibibo vouchers have this shape.
+        matches = list(_FLAT_ROOM_HEADING.finditer(text))
+    if not matches:
         return None
+    known = _voucher_type_names(text)
     lines, seen = [], {}
     for k, m in enumerate(matches):
-        raw_name = m.group(1)
+        raw_name = _trim_flat_heading(m.group(1), known)
         name = _clean_room_hint(raw_name) or raw_name.strip()
         if not name:
             continue
@@ -908,9 +943,21 @@ def _parse_go_mmt(text: str) -> dict:
     room = _first([r"\d+\s*[xX]\s*([A-Za-z0-9][A-Za-z0-9 /()&\-]*?room)\b",
                    # "1 x Four Bed Non-Ac" / "2 x Double Deluxe Ac" — the room type is the rest of that line
                    r"\d+[ \t]*[xX][ \t]+([A-Za-z][A-Za-z0-9 /()&\-]{2,60}?)[ \t]*(?:\r|\n|$)"], text)
+    # v8a: the flattened voucher puts the party on the same line - "1 x Four Bed Non-Ac      4 Adults".
+    # The type ends at the first run of spaces.
+    if room:
+        room = re.split(r"[ \t]{2,}", room.strip())[0]
     cleaned = _clean_room_hint(room)
-    if cleaned:
-        out["room_type_hint"] = cleaned
+    if not cleaned:
+        # v8a: the flattened text voucher - "1 x Double Deluxe Ac               2 Adults + 1 Child"
+        names = [re.sub(r"\s+", " ", m.group(1)).strip() for m in _X_TYPE_LINE.finditer(text)]
+        cleaned = next((c for c in (_clean_room_hint(n) for n in names) if c), None)
+    lines = out.get("room_lines") or []
+    if not cleaned and lines:
+        cleaned = _clean_room_hint(lines[0].get("hint"))
+    # v8a: never the common parser's guess - on a Go-MMT voucher its "room ..." label reads "Room
+    # Only  Inclusions" (the meal plan and the next heading), which matches no room type.
+    out["room_type_hint"] = cleaned or _clean_room_hint(out.get("room_type_hint"))
 
     # Amount = "Property Gross Charges" (what the hotel invoices the guest), else the room grand
     # total. Currency may be ₹ / Rs / INR depending on how the HTML was flattened.
@@ -921,7 +968,38 @@ def _parse_go_mmt(text: str) -> dict:
         out["amount"] = gross
     out.update(_occupancy(text))
     out.update(_commission_net(text))
+    _fill_go_mmt_rate(out, text)
     return out
+
+
+def _fill_go_mmt_rate(out: dict, text: str) -> None:
+    """v8a: the nightly rate of a ONE-type voucher whose room-wise table could not be read, from the
+    voucher's own "Room Charges" total (before tax) over nights x rooms. A Go-MMT voucher always
+    states that total ("1. Room Charges Rs 4,600.0"; the table's GRAND TOTAL row starts with it too),
+    so an OTA booking is billed at what the guest was sold, never at today's rate card. A voucher of
+    several types is left alone: one total cannot be split between them."""
+    lines = out.get("room_lines") or []
+    if any(isinstance(ln, dict) and ln.get("rate") for ln in lines):
+        return
+    hint = out.get("room_type_hint")
+    if len(lines) > 1 or not hint:
+        return
+    if not (out.get("check_in") and out.get("check_out")):
+        return
+    nights = (out["check_out"] - out["check_in"]).days
+    rooms = int(out.get("rooms") or 1)
+    if nights <= 0:
+        return
+    rc = _num(_first([r"\b1\.\s*room\s+charges[\s:*|]*(?:₹|rs\.?|inr)?\s*([\d,]+\.?\d*)",
+                      r"grand\s+total[\s:*|]*(?:₹|rs\.?|inr)?\s*([\d,]+\.?\d*)"], text))
+    if not rc or rc <= 0:
+        return
+    rate = round(rc / (nights * rooms), 2)
+    # A sanity check against the gross: the room charges are never above it, nor below half of it.
+    gross = out.get("amount")
+    if gross and not (gross * 0.5 <= rc <= gross + 0.5):
+        return
+    out["room_lines"] = [{"hint": (lines[0].get("hint") if lines else None) or hint, "rooms": rooms, "rate": rate}]
 
 
 def parse_makemytrip(text: str) -> dict:
@@ -1143,7 +1221,55 @@ def _upsert_draft(db, fields: dict) -> tuple[OtaDraftBooking, bool]:
     d.message_id = msg_id
     d.raw_source = fields.get("raw_source")
     db.flush()
+    if d.status in ("pending", "flagged"):
+        try:
+            ensure_voucher_rate(db, d)
+        except Exception:   # a rate is a convenience here; the draft must still be saved
+            logger.exception("OTA draft %s: voucher rate not derived", d.id)
     return d, created
+
+
+def ensure_voucher_rate(db, d) -> float | None:
+    """v8a (owner): a ONE-type voucher whose rate the parser could not read is still billed at what
+    the guest was SOLD at - the voucher's own total, never today's rate card.
+
+    The nightly rate is derived from the voucher's gross (GST-inclusive) through the chosen type's GST,
+    so the booking's total comes out at the voucher's to the rupee, and stored as the draft's room line
+    with `rate_from: "voucher total"` - so the web form, the desk form, the manual confirm and the auto
+    confirm all take it exactly as they take a rate read from the voucher's own table. Production
+    GH72036279902620 (sold at Rs 2,300 a night) was confirmed at the Rs 1,900 rate card: Rs 3,990
+    against a voucher of Rs 4,830.
+
+    Left alone (rate card + the variance guard, which asks) when it cannot be sure: a voucher of
+    several types (one total cannot be split), a room line that disagrees with the room count, no
+    mapped type, or a derived rate far outside that type's rate card - which is what a misread room
+    count looks like. Returns the rate it stored, else None.
+    """
+    if getattr(d, "kind", "confirmation") != "confirmation" or not (d.amount and d.check_in and d.check_out):
+        return None
+    lines = _load_room_lines(d) or []
+    if any(isinstance(ln, dict) and ln.get("rate") for ln in lines) or len(lines) > 1:
+        return None
+    n = int(d.rooms or 1)
+    if lines and int((lines[0] or {}).get("rooms") or 1) != n:
+        return None
+    nights = (d.check_out - d.check_in).days
+    gross = float(d.amount)
+    if nights <= 0 or n <= 0 or gross <= 0:
+        return None
+    mapped = draft_room_type_lines(db, d)
+    if len(mapped) != 1 or not mapped[0][0]:
+        return None
+    rt = db.query(RoomType).filter(RoomType.room_type_id == mapped[0][0]).first()
+    if rt is None:
+        return None
+    rate = round(gross / (1 + float(rt.gst_percent or 0) / 100) / (nights * n), 2)
+    card = float(rt.price_per_night or 0)
+    if card > 0 and not (0.4 * card <= rate <= 2.5 * card):
+        return None
+    hint = ((lines[0] or {}).get("hint") if lines else None) or _clean_room_hint(d.room_type_hint) or rt.name
+    d.room_lines = json.dumps([{"hint": hint, "rooms": n, "rate": rate, "rate_from": "voucher total"}])
+    return rate
 
 
 # The bed-size words carry the strongest room-type signal; weighted ×3 when matching the OTA room
@@ -1773,6 +1899,53 @@ def repair_yatra_drafts(db, dry_run=False) -> dict:
             out.setdefault("phones", []).append(d.id)
             if not dry_run:
                 d.phone = got["phone"]
+
+    # v8a: Go-MMT vouchers saved before the flattened-text fix - the hint "Only Inclusions" and no
+    # rate. Re-read the stored mail; it is complete for every draft since v6m (older ones were cut at
+    # 4000 characters, before the rate table, and get their rate from the voucher total below).
+    for d in (db.query(OtaDraftBooking)
+              .filter(OtaDraftBooking.channel_code.in_(("makemytrip", "goibibo")),
+                      OtaDraftBooking.kind == "confirmation",
+                      OtaDraftBooking.status.in_(("pending", "flagged")),
+                      OtaDraftBooking.raw_source.isnot(None))
+              .all()):
+        try:
+            got = _PARSERS[d.channel_code](d.raw_source)
+        except Exception:
+            continue
+        new_hint = got.get("room_type_hint")
+        old = d.room_type_hint or ""
+        if new_hint and new_hint != old and (not _clean_room_hint(old) or re.search(r"(?i)\badults?\b|[ \t]{2,}", old)):
+            out.setdefault("hints", []).append({"draft_id": d.id, "from": old, "to": new_hint})
+            if not dry_run:
+                d.room_type_hint = new_hint
+        have = _load_room_lines(d) or []
+        gl = got.get("room_lines") or []
+        if (gl and any(isinstance(ln, dict) and ln.get("rate") for ln in gl)
+                and not any(isinstance(ln, dict) and ln.get("rate") for ln in have)
+                and len(gl) >= len(have)
+                # a mail stored cut short can list only SOME of the rooms - never shrink the booking
+                and (not d.rooms or sum(int(ln.get("rooms") or 1) for ln in gl) == int(d.rooms))):
+            out["rates"].append({"draft_id": d.id, "lines": gl})
+            if not dry_run:
+                d.room_lines = json.dumps(gl)
+                if got.get("rooms") and not d.rooms:
+                    d.rooms = int(got["rooms"])
+
+    # ...and any one-type voucher still without a rate takes it from the voucher total.
+    if not dry_run:
+        for d in (db.query(OtaDraftBooking)
+                  .filter(OtaDraftBooking.kind == "confirmation",
+                          OtaDraftBooking.status.in_(("pending", "flagged")),
+                          OtaDraftBooking.amount.isnot(None))
+                  .all()):
+            try:
+                r = ensure_voucher_rate(db, d)
+            except Exception:
+                logger.exception("OTA repair: draft %s voucher rate", d.id)
+                continue
+            if r is not None:
+                out.setdefault("rates_from_total", []).append({"draft_id": d.id, "rate": r})
     if not dry_run:
         db.flush()
     return out
