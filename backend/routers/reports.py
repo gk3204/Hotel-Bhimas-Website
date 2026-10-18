@@ -33,7 +33,7 @@ from models import (Booking, BookingItem, CardIssuance, CashShift, FolioCharge,
 from schemas import OverstayConfigUpdate, ReportsConfigUpdate
 from utils import ordering
 from utils.audit import write_audit
-from utils.auth_utils import require_admin
+from utils.auth_utils import require_report_access, require_admin
 from utils.settings import get_reports_config
 from utils import settings as app_settings   # v7p
 from services import ota_service
@@ -479,12 +479,23 @@ def arrivals_departures_data(db, dfrom, dto):
     return {"from": str(dfrom), "to": str(dto), "rows": rows, "totals": totals}
 
 
-def in_house_data(db):
-    """Current in-house (checked_in) bookings: guest, rooms, nights, folio balance."""
+def in_house_data(db, dfrom=None, dto=None):
+    """Current in-house (checked_in) bookings: guest, rooms, nights, folio balance.
+    v8a (owner, "all reports by date range"): with `dfrom`/`dto`, every stay that was in house at any time
+    in that range - checked in before it ended and not checked out before it began."""
     from models import Folio
     rows = []
-    bookings = (db.query(Booking).filter(Booking.status == "checked_in")
-                .order_by(Booking.check_out).all())
+    if dfrom is not None and dto is not None:
+        _s, _e = clock.business_day_bounds(dfrom, dto)
+        bookings = (db.query(Booking)
+                    .filter(Booking.status.in_(("checked_in", "checked_out")),
+                            Booking.checked_in_at.isnot(None),
+                            Booking.checked_in_at < clock.to_local(_e),          # checked_in_at: hotel clock
+                            (Booking.checked_out_at.is_(None)) | (Booking.checked_out_at >= _s))   # UTC
+                    .order_by(Booking.checked_in_at).all())
+    else:
+        bookings = (db.query(Booking).filter(Booking.status == "checked_in")
+                    .order_by(Booking.check_out).all())
     for b in bookings:
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first()
         items = db.query(BookingItem).filter(BookingItem.booking_id == b.booking_id).all()
@@ -507,6 +518,7 @@ def in_house_data(db):
             "rooms": ", ".join(ordering.room_labels(room_labels)) if room_labels else "—",
             "check_in": str(b.check_in), "check_out": str(b.check_out), "nights": nights,
             "balance": float(folio.balance or 0) if folio else None,
+            "status": b.status,                                                    # v8a: in house / left
         })
     return {"count": len(rows), "rows": rows}
 
@@ -918,13 +930,23 @@ def fraud_summary_table(data):
     cols = ["When", "Room", "Guest / booking", "What happened", "Staff", "Status"]
     rows = []
     for k in data["kinds"]:
+        # v8a (owner): "display the reason properly, not clumsy" - a short band, then why it matters and what
+        # to check on their own lines, then one row per alert without repeating the room in the sentence
         rows.append({"section": f"{k['title']} - {k['count']} alert{'s' if k['count'] != 1 else ''}"
-                                f" ({k['open']} not reviewed). {k['meaning']} Check: {k['check']}"})
+                                f" ({k['open']} not reviewed)"})
+        if k.get("meaning") or k.get("check"):
+            rows.append(["", "", "", "\n".join(x for x in (
+                f"Why it matters: {k['meaning']}" if k.get("meaning") else "",
+                f"What to check: {k['check']}" if k.get("check") else "") if x), "", ""])
         for r in data["rows"]:
             if r["type"] != k["type"]:
                 continue
             gb = " · ".join(x for x in (r.get("guest"), f"#{r['booking_id']}" if r.get("booking_id") else None) if x)
-            rows.append([r["when"], r.get("room") or "—", gb or "—", r["what_happened"],
+            what = r["what_happened"] or ""
+            _pre = f"Room {r.get('room')}: "
+            if r.get("room") and what.startswith(_pre):
+                what = what[len(_pre)].upper() + what[len(_pre) + 1:]
+            rows.append([r["when"], r.get("room") or "—", gb or "—", what,
                          r.get("staff") or "—", r["status_text"]])
     return cols, rows
 
@@ -1613,7 +1635,7 @@ def _cashier_table(data):
     return cols, rows, totals
 
 
-def checkout_summary_data(db, day):
+def checkout_summary_data(db, day, day_to=None):
     """Per-bill check-out summary for one day (adapted): one row per booking checked out that day —
     room rent, SGST/CGST, food, laundry, misc, discount, advance, refund, and the bill amount."""
     from models import Folio
@@ -1622,7 +1644,11 @@ def checkout_summary_data(db, day):
     _win_cache = {}      # v7u
     rows = []
     # v7e: bill by bill, on the day THAT bill closed (a per-room bill closes with its own room)
-    _closed = _checked_out_bills(db, day=day)
+    # v8a (owner): "all reports by date range" - one day, or every bill closed in [day, day_to]
+    if day_to and day_to != day:
+        _closed = _checked_out_bills(db, window=clock.business_day_bounds(day, day_to))
+    else:
+        _closed = _checked_out_bills(db, day=day)
     # v6e: ONE ROW PER BILL. A per-room stay issues a bill per room, each with its own invoice
     # number, and this report is read as the day's list of bills. `advance` and `refund` belong to
     # the BOOKING, so they are shown against its first bill only — a card payment split across
@@ -1705,7 +1731,7 @@ def checkout_summary_data(db, day):
     keys = ("room_rent", "sgst", "cgst", "food", "laundry", "misc", "discount", "total",
             "advance", "balance", "refund", "due", "bill_amount", "room_cgst", "room_sgst", "food_cgst", "food_sgst")
     totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
-    return {"day": str(day), "rows": rows, "totals": totals}
+    return {"day": str(day), "day_to": str(day_to or day), "rows": rows, "totals": totals}
 
 
 def checkout_summary_table(data):
@@ -1871,20 +1897,58 @@ def room_detail_data(db, dfrom, dto):
         started = clock.to_local(task.started_at) if task and task.started_at else None
         start_from_card = started is None and card_cut is not None
         ci_utc = clock.to_utc(ci_local) if ci_local else co - timedelta(days=30)
-        frauds = (db.query(FraudAlert)
-                  .filter(or_(FraudAlert.booking_id == b.booking_id,
-                              (FraudAlert.room_id == it.room_id)
-                              & (FraudAlert.detected_at >= ci_utc) & (FraudAlert.detected_at <= win_end)))
+        # v8a (owner, 18 Oct: "I see many frauds"): only THIS stay's alerts - this booking's, or the room's
+        # own alerts (no booking) about something that happened during the stay or its cleaning; never
+        # another booking's, and never one already dismissed. Scoping by DETECTION time had pinned weeks-old
+        # alerts (re-raised by the 14 Oct sweep) onto whoever was in the room that day.
+        from utils.fraud_explain import explain as _explain, event_time as _event_time
+        _cands = (db.query(FraudAlert)
+                  .filter(FraudAlert.status != "dismissed",
+                          or_(FraudAlert.booking_id == b.booking_id,
+                              (FraudAlert.room_id == it.room_id) & FraudAlert.booking_id.is_(None)
+                              & (FraudAlert.detected_at >= ci_utc - timedelta(minutes=5))
+                              & (FraudAlert.detected_at <= win_end + timedelta(hours=12))))
                   .order_by(FraudAlert.detected_at).all())
-        # v7p (owner): readable - what happened, not "type(severity)"
-        from utils.fraud_explain import explain as _explain
+        _lo = (ci_local or clock.to_local(co)) - timedelta(minutes=5)
+        _hi = clock.to_local((end_utc or co) + timedelta(hours=2))   # v8a: up to 2 h after the room was ready
+        frauds = []
+        for a in _cands:
+            if a.booking_id == b.booking_id:
+                frauds.append(a)
+                continue
+            _ev = _event_time(a)
+            if _ev is None or _lo <= _ev <= _hi:
+                frauds.append(a)
+        # v7p (owner): readable - what happened, not "type(severity)"; v8a: one per line
         _ex = [_explain(db, a, _fx_cache) for a in frauds]
-        fr = " | ".join(f"{e['title']}: {e['short']}" for e in _ex)
+        fraud_list = [{"title": e["title"], "short": e["short"], "status": e["status_text"]} for e in _ex]
+        fr = "\n".join(f"{e['title']}: {e['short']}" for e in _ex)
+        # v8a (owner): the GUEST key card - cut at check-in (or the room shift) and wiped at check-out
+        _gcards = (db.query(CardIssuance)
+                   .filter(CardIssuance.booking_id == b.booking_id, CardIssuance.room_id == it.room_id,
+                           CardIssuance.card_type == "guest", CardIssuance.status != "cancelled")
+                   .order_by(CardIssuance.issued_at).all())
+        _first = next((c for c in _gcards if c.issue_type in ("checkin", "shift")), _gcards[0] if _gcards else None)
+        key_cut = clock.to_local(_first.issued_at) if _first and _first.issued_at else None
+        _wiped = [c.erased_at for c in _gcards if c.erased_at]
+        if r is not None and (r.lock_type or "card") == "key":
+            key_wiped = "key room"
+        elif _wiped:
+            key_wiped = clock.to_local(max(_wiped)).isoformat()
+        elif any(c.status == "active" for c in _gcards):
+            key_wiped = "NOT wiped - still works"
+        elif _gcards:
+            key_wiped = "not wiped (closed in the system)"
+        else:
+            key_wiped = "no card cut"
         rows.append({
             "booking_id": b.booking_id, "room": r.room_number if r else "—", "room_id": it.room_id,
             "guest": b.display_guest_name or None,
             "check_in": ci_local.isoformat() if ci_local else None,
             "check_out": clock.to_local(co).isoformat() if co else None,
+            "key_card_cut": key_cut.isoformat() if key_cut else None,              # v8a
+            "key_card_shift": bool(_first and _first.issue_type == "shift"),
+            "key_card_wiped": key_wiped,                                          # v8a
             "card_cut": card_cut.isoformat() if card_cut else None,
             "card_returned": card_back,
             "cleaning_started": (started or card_cut).isoformat() if (started or card_cut) else None,
@@ -1894,6 +1958,7 @@ def room_detail_data(db, dfrom, dto):
             "cleaned_by": task.cleaned_by_name if task else None,
             "inspected_by": task.inspected_by_name if task else None,
             "frauds": fr,
+            "fraud_list": fraud_list,
             "has_fraud": bool(frauds),
         })
     return {"from": str(dfrom), "to": str(dto), "rows": rows,
@@ -1941,9 +2006,12 @@ def room_turnaround_data(db, dfrom, dto):
         ci, co = _iso_local(r["check_in"]), _iso_local(r["check_out"])
         guest_cards = (db.query(CardIssuance)
                        .filter(CardIssuance.booking_id == r["booking_id"], CardIssuance.room_id == r.get("room_id"),
-                               CardIssuance.card_type == "guest")
+                               CardIssuance.card_type == "guest", CardIssuance.status != "cancelled")
                        .order_by(CardIssuance.issued_at).all()) if r.get("room_id") else []
-        first = next((c for c in guest_cards if c.issue_type == "checkin"), guest_cards[0] if guest_cards else None)
+        # v8a: the room's own first card - a guest SHIFTED into this room got theirs at the shift
+        first = next((c for c in guest_cards if c.issue_type in ("checkin", "shift")),
+                     guest_cards[0] if guest_cards else None)
+        shifted_in = bool(first and first.issue_type == "shift")
         card_cut = clock.to_local(first.issued_at) if first and first.issued_at else None
         live = [c for c in guest_cards if c.status == "active"]
         wiped = [c.erased_at for c in guest_cards if c.erased_at]
@@ -1976,7 +2044,7 @@ def room_turnaround_data(db, dfrom, dto):
                 flags.append("No key card was cut for this check-in")
             elif d["ci_to_card"] is not None and d["ci_to_card"] < -5:
                 flags.append(f"Key card cut {abs(d['ci_to_card']):.0f} min BEFORE check-in")
-            elif d["ci_to_card"] is not None and d["ci_to_card"] > CARD_LATE_AFTER_CHECKIN_MIN:
+            elif d["ci_to_card"] is not None and d["ci_to_card"] > CARD_LATE_AFTER_CHECKIN_MIN and not shifted_in:
                 flags.append(f"Key card cut {d['ci_to_card']:.0f} min after check-in")
             if wipe_txt and wipe_txt.startswith("NOT"):
                 flags.append("Guest's key card was NOT wiped at check-out - it still opens the room")
@@ -1994,8 +2062,9 @@ def room_turnaround_data(db, dfrom, dto):
             flags.append("Room never inspected after cleaning")
         if not (st or en) and co:
             flags.append("No cleaning recorded after check-out")
-        if r.get("has_fraud"):
-            flags.append("Fraud alert(s): " + (r.get("frauds") or ""))
+        # v8a (owner): each fraud alert of this stay its own flag ("Title: what happened"), not one long line
+        for _fa in (r.get("fraud_list") or []):
+            flags.append(f"Alert - {_fa['title']}: {_fa['short']}")
         rows.append({
             "booking_id": r["booking_id"], "room": r["room"], "guest": r["guest"], "lock": "card" if is_card_room else "key",
             "check_in": ci.isoformat() if ci else None, "checkin_card": card_cut.isoformat() if card_cut else None,
@@ -2132,7 +2201,7 @@ def room_turnaround_tables(data):
             (_hm(x["inspected_at"], delta=d["end_to_inspected"]) + (f" by {x['inspected_by']}" if x["inspected_by"] else "")
              if x["inspected_at"] else "—"),
             (f"{d['turnaround']:.0f} min" if d["turnaround"] is not None else "—"),
-            "; ".join(x["flags"]) or "OK"])
+            "\n".join(f"- {f}" for f in x["flags"]) or "OK"])
         sflags.append(x["suspicious"])
     vrows, vflags = [], []
     for v in data["viewings"]:
@@ -2141,12 +2210,12 @@ def room_turnaround_tables(data):
                       v["allowed_minutes"] or "—", v["issued_by"] or "—",
                       (f"Yes - booking #{v['checkin_booking_id']}, {v['minutes_to_checkin']:.0f} min later"
                        if v["checked_in"] else "No"),
-                      "; ".join(v["flags"]) or "OK"])
+                      "\n".join(f"- {f}" for f in v["flags"]) or "OK"])
         vflags.append(v["suspicious"])
     return (TURNAROUND_STAY_COLS, srows, sflags), (TURNAROUND_VIEW_COLS, vrows, vflags)
 
 
-@router.get("/room-turnaround", dependencies=[Depends(require_admin)])
+@router.get("/room-turnaround", dependencies=[Depends(require_report_access)])
 def room_turnaround_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                            format: str = Query("json"), db: Session = Depends(get_db)):
     """v7p: Room Turnaround & Cards - KPIs, per-stay timeline with differences and red flags, viewing cards."""
@@ -2167,8 +2236,11 @@ def room_turnaround_report(from_: str | None = Query(None, alias="from"), to: st
 
 
 
-ROOM_DETAIL_COLS = ["Room", "Guest", "Check-in", "Check-out", "Card cut", "Card returned", "Cleaning start",
-                    "Cleaning end", "Inspected", "Cleaned by", "Inspected by", "Frauds"]
+# v8a (owner, 18 Oct): the guest's key card cut at check-in and wiped at check-out, beside the times; the
+# cleaning card's own columns say so (they were "Card cut / Card returned", read as the guest's card)
+ROOM_DETAIL_COLS = ["Room", "Guest", "Check-in", "Key card cut", "Check-out", "Key card wiped", "Cleaning card cut",
+                    "Cleaning card back", "Cleaning start", "Cleaning end", "Inspected", "Cleaned by", "Inspected by",
+                    "Frauds"]
 
 
 def room_detail_table(data):
@@ -2178,7 +2250,9 @@ def room_detail_table(data):
     rows = []
     for r in data["rows"]:
         start = _t(r["cleaning_started"]) + (" (card)" if r.get("cleaning_started_from_card") else "")
-        rows.append([r["room"], r["guest"] or "", _t(r["check_in"]), _t(r["check_out"]), _t(r.get("card_cut")),
+        rows.append([r["room"], r["guest"] or "", _t(r["check_in"]),
+                     _t(r.get("key_card_cut")) + (" (shift)" if r.get("key_card_shift") else ""),
+                     _t(r["check_out"]), _t(r.get("key_card_wiped")), _t(r.get("card_cut")),
                      _t(r.get("card_returned")), start, _t(r["cleaning_ended"]), _t(r["inspected_at"]),
                      r["cleaned_by"] or "", r["inspected_by"] or "", r["frauds"] or ""])
     return ROOM_DETAIL_COLS, rows
@@ -2433,7 +2507,7 @@ def _meta(dfrom=None, dto=None):
 # report endpoints
 # ============================================================
 
-@router.get("/arrival-exceptions", dependencies=[Depends(require_admin)])
+@router.get("/arrival-exceptions", dependencies=[Depends(require_report_access)])
 def arrival_exceptions_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                               kind: str | None = Query(None), format: str = Query("json"),
                               db: Session = Depends(get_db)):
@@ -2467,7 +2541,7 @@ def arrival_exceptions_report(from_: str | None = Query(None, alias="from"), to:
                            totals_row=totals, meta=_meta(dfrom, dto), filename="arrival-exceptions")
 
 
-@router.get("/occupancy", dependencies=[Depends(require_admin)])
+@router.get("/occupancy", dependencies=[Depends(require_report_access)])
 def occupancy_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                      group_by: str = Query("day"), format: str = Query("json"),
                      db: Session = Depends(get_db)):
@@ -2488,7 +2562,7 @@ def occupancy_report(from_: str | None = Query(None, alias="from"), to: str | No
                            totals_row=totals, meta=_meta(dfrom, dto), filename="occupancy")
 
 
-@router.get("/sales/daily", dependencies=[Depends(require_admin)])
+@router.get("/sales/daily", dependencies=[Depends(require_report_access)])
 def daily_sales_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                        format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
@@ -2506,7 +2580,7 @@ def daily_sales_report(from_: str | None = Query(None, alias="from"), to: str | 
                            totals_row=totals, meta=_meta(dfrom, dto), filename="daily_sales")
 
 
-@router.get("/room-service/daily", dependencies=[Depends(require_admin)])
+@router.get("/room-service/daily", dependencies=[Depends(require_report_access)])
 def room_service_daily_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                               format: str = Query("json"), db: Session = Depends(get_db)):
     """Day-wise room-service sales (v3 item 4). Reconciles with the Room Service column on
@@ -2523,7 +2597,7 @@ def room_service_daily_report(from_: str | None = Query(None, alias="from"), to:
                            filename="room_service_daily")
 
 
-@router.get("/room-service/items", dependencies=[Depends(require_admin)])
+@router.get("/room-service/items", dependencies=[Depends(require_report_access)])
 def room_service_items_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                               format: str = Query("json"), db: Session = Depends(get_db)):
     """Product-wise room-service sales (v3 item 4) — which dishes sell, best first."""
@@ -2539,7 +2613,7 @@ def room_service_items_report(from_: str | None = Query(None, alias="from"), to:
                            filename="room_service_items")
 
 
-@router.get("/shift-payments", dependencies=[Depends(require_admin)])
+@router.get("/shift-payments", dependencies=[Depends(require_report_access)])
 def shift_payments_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                           format: str = Query("json"), db: Session = Depends(get_db)):
     """Shift-wise collections split by payment method (v3 item 6). Shifts are selected by the
@@ -2558,7 +2632,7 @@ def shift_payments_report(from_: str | None = Query(None, alias="from"), to: str
                            totals_row=totals, meta=_meta(dfrom, dto), filename="shift_payments")
 
 
-@router.get("/payments-daily", dependencies=[Depends(require_admin)])
+@router.get("/payments-daily", dependencies=[Depends(require_report_access)])
 def payments_daily_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                           format: str = Query("json"), db: Session = Depends(get_db)):
     """Day-wise payments collected by method (cash/card/UPI/bank), refunds, and net (ALT-4)."""
@@ -2573,7 +2647,7 @@ def payments_daily_report(from_: str | None = Query(None, alias="from"), to: str
                            totals_row=totals, meta=_meta(dfrom, dto), filename="payments_daily")
 
 
-@router.get("/arrivals-departures", dependencies=[Depends(require_admin)])
+@router.get("/arrivals-departures", dependencies=[Depends(require_report_access)])
 def arrivals_departures_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                                format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
@@ -2585,21 +2659,61 @@ def arrivals_departures_report(from_: str | None = Query(None, alias="from"), to
                            totals_row=totals, meta=_meta(dfrom, dto), filename="arrivals_departures")
 
 
-@router.get("/in-house", dependencies=[Depends(require_admin)])
-def in_house_report(format: str = Query("json"), db: Session = Depends(get_db)):
-    data = in_house_data(db)
-    cols = ["Booking", "Guest", "Phone", "Rooms", "Check-in", "Check-out", "Nights", "Balance"]
+@router.get("/in-house", dependencies=[Depends(require_report_access)])
+def in_house_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
+                    format: str = Query("json"), db: Session = Depends(get_db)):
+    """In-house guests now - or v8a every stay in house at any time between `from` and `to`."""
+    if from_ or to:
+        dfrom, dto = _range(from_, to)
+        data = in_house_data(db, dfrom, dto)
+        meta = _meta(dfrom, dto)
+    else:
+        data = in_house_data(db)
+        meta = _meta()
+    cols = ["Booking", "Guest", "Phone", "Rooms", "Check-in", "Check-out", "Nights", "Balance", "Status"]
     rows = [[r["booking_id"], r["guest_name"], r["phone"], r["rooms"], r["check_in"],
-             r["check_out"], r["nights"], r["balance"]] for r in data["rows"]]
+             r["check_out"], r["nights"], r["balance"],
+             "in house" if r.get("status") == "checked_in" else "checked out"] for r in data["rows"]]
     return _export_or_json(format, data, title="In-House Guests", columns=cols, rows=rows,
-                           meta=_meta(), filename="in_house")
+                           meta=meta, filename="in_house")
 
 
-@router.get("/occupancy-analysis", dependencies=[Depends(require_admin)])
-def occupancy_analysis_report(as_on: str | None = Query(None), format: str = Query("json"),
+def _occupancy_analysis_range(db, dfrom, dto, format):
+    """v8a: one 'as on' snapshot per day of the range, each under its own heading."""
+    cols = ["Floor", "Room", "Guest", "Source", "Type", "Arrival", "Departure", "Pax",
+            "Dis %", "Rack", "Room Rent", "Discount", "Gross Rent", "GST", "Net"]
+    days, rows = [], []
+    d = dfrom
+    while d <= dto:
+        data = occupancy_analysis_data(db, d)
+        days.append(data)
+        t = data["totals"]
+        rows.append({"section": f"As on {d:%d-%m-%Y} - {t['occ_rooms']} room(s) occupied, {t['pax']} pax, "
+                                f"revenue Rs {t['revenue']:,.2f}"})
+        for r in data["rooms"]:
+            rows.append([r["floor"], r["room_no"], r["guest"], r["segment"], r["room_type"], r["arrival"],
+                         r["departure"], r["pax"], r["discount_pct"], r["rack"], r["room_rent"], r["discount"],
+                         r["gross_rent"], r["gst"], r["net"]])
+        d = d + timedelta(days=1)
+    out = {"from": str(dfrom), "to": str(dto), "days": days}
+    return _export_or_json(format, out, title="Occupancy Analysis", columns=cols, rows=rows,
+                           meta=_meta(dfrom, dto), filename="occupancy_analysis")
+
+
+@router.get("/occupancy-analysis", dependencies=[Depends(require_report_access)])
+def occupancy_analysis_report(as_on: str | None = Query(None), from_: str | None = Query(None, alias="from"),
+                              to: str | None = Query(None), format: str = Query("json"),
                               db: Session = Depends(get_db)):
     """Adapted Occupancy Analysis 'as on' snapshot: per-room stay + revenue, grouped by floor, with
-    floor-wise / by-source / by-type summaries."""
+    floor-wise / by-source / by-type summaries. v8a (owner, "all reports by date range"): with `from`/`to`,
+    one snapshot per day (at most 31), each under its own heading."""
+    if from_ or to:
+        dfrom, dto = _range(from_, to)
+        if (dto - dfrom).days > 30:
+            raise HTTPException(status_code=400, detail="Pick at most 31 days")
+        if dfrom != dto:
+            return _occupancy_analysis_range(db, dfrom, dto, format)
+        as_on = str(dfrom)
     d = _parse_date(as_on, "as_on") if as_on else date.today()
     data = occupancy_analysis_data(db, d)
     cols = ["Floor", "Room", "Guest", "Source", "Type", "Arrival", "Departure", "Pax",
@@ -2630,7 +2744,7 @@ def occupancy_analysis_report(as_on: str | None = Query(None), format: str = Que
                            totals_row=totals, meta=meta, filename="occupancy_analysis")
 
 
-@router.get("/cashier-summary", dependencies=[Depends(require_admin)])
+@router.get("/cashier-summary", dependencies=[Depends(require_report_access)])
 def cashier_summary_report(day: str | None = Query(None), from_: str | None = Query(None, alias="from"),
                            to: str | None = Query(None), format: str = Query("json"),
                            db: Session = Depends(get_db)):
@@ -2650,7 +2764,7 @@ def cashier_summary_report(day: str | None = Query(None), from_: str | None = Qu
                            rows=rows, totals_row=totals, meta=meta, filename="cashier_summary")
 
 
-@router.get("/lost-cards", dependencies=[Depends(require_admin)])
+@router.get("/lost-cards", dependencies=[Depends(require_report_access)])
 def lost_cards_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                       format: str = Query("json"), db: Session = Depends(get_db)):
     """Key cards reported lost, and what was charged for each."""
@@ -2669,7 +2783,7 @@ def lost_cards_report(from_: str | None = Query(None, alias="from"), to: str | N
                            totals_row=totals, meta=_meta(dfrom, dto), filename="lost_cards")
 
 
-@router.get("/documents-zip", dependencies=[Depends(require_admin)])
+@router.get("/documents-zip", dependencies=[Depends(require_report_access)])
 def documents_zip(day: str | None = Query(None), db: Session = Depends(get_db)):
     """v7e (owner): "an option to zip receipts, invoices, reg slip of 1 for any date and download"."""
     from fastapi.responses import FileResponse
@@ -2682,20 +2796,28 @@ def documents_zip(day: str | None = Query(None), db: Session = Depends(get_db)):
     return FileResponse(path, media_type="application/zip", filename=name)
 
 
-@router.get("/checkout-summary", dependencies=[Depends(require_admin)])
-def checkout_summary_report(day: str | None = Query(None), format: str = Query("json"),
+@router.get("/checkout-summary", dependencies=[Depends(require_report_access)])
+def checkout_summary_report(day: str | None = Query(None), from_: str | None = Query(None, alias="from"),
+                            to: str | None = Query(None), format: str = Query("json"),
                             db: Session = Depends(get_db)):
-    """Adapted Check-Out Summary for one day: per-bill room rent, SGST/CGST, food, laundry, misc,
-    discount, advance, refund, bill amount."""
-    d = _parse_date(day, "day") if day else date.today()
-    data = checkout_summary_data(db, d)
+    """Adapted Check-Out Summary: per-bill room rent, SGST/CGST, food, laundry, misc, discount, advance,
+    balance, refund, due, bill amount. One `day`, or v8a a `from`/`to` range."""
+    if from_ or to:
+        d, d_to = _range(from_, to)
+    else:
+        d = _parse_date(day, "day") if day else date.today()
+        d_to = d
+    if (d_to - d).days > 92:
+        raise HTTPException(status_code=400, detail="Pick at most 92 days")
+    data = checkout_summary_data(db, d, d_to)
     cols, rows, totals = checkout_summary_table(data)
-    meta = {"Day": f"{d:%d-%m-%Y}", **_meta()}
+    meta = ({"Day": f"{d:%d-%m-%Y}"} if d == d_to else {"Period": f"{d:%d-%m-%Y} to {d_to:%d-%m-%Y}"})
+    meta.update(_meta())
     return _export_or_json(format, data, title="Check-Out Summary", columns=cols, rows=rows,
                            totals_row=totals, meta=meta, filename="checkout_summary")
 
 
-@router.get("/room-service/by-room", dependencies=[Depends(require_admin)])
+@router.get("/room-service/by-room", dependencies=[Depends(require_report_access)])
 def room_service_by_room_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                                 format: str = Query("json"), db: Session = Depends(get_db)):
     """Room-service sales grouped by room, product-wise within each room."""
@@ -2706,7 +2828,7 @@ def room_service_by_room_report(from_: str | None = Query(None, alias="from"), t
                            totals_row=totals, meta=_meta(dfrom, dto), filename="room_service_by_room")
 
 
-@router.get("/room-detail", dependencies=[Depends(require_admin)])
+@router.get("/room-detail", dependencies=[Depends(require_report_access)])
 def room_detail_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                        format: str = Query("json"), db: Session = Depends(get_db)):
     """Per checked-out stay: check-in/out + cleaning/inspection timestamps, cleaned-by/inspected-by,
@@ -2718,7 +2840,7 @@ def room_detail_report(from_: str | None = Query(None, alias="from"), to: str | 
                            rows=rows, meta=_meta(dfrom, dto), filename="room_detail")
 
 
-@router.get("/maintenance-detail", dependencies=[Depends(require_admin)])
+@router.get("/maintenance-detail", dependencies=[Depends(require_report_access)])
 def maintenance_detail_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                               format: str = Query("json"), db: Session = Depends(get_db)):
     """Per maintenance ticket created in the range: details + items, fixed?/inspected?, parts cost."""
@@ -2739,7 +2861,7 @@ def maintenance_detail_report(from_: str | None = Query(None, alias="from"), to:
                            totals_row=totals, meta=_meta(dfrom, dto), filename="maintenance_detail")
 
 
-@router.get("/travel-agents", dependencies=[Depends(require_admin)])
+@router.get("/travel-agents", dependencies=[Depends(require_report_access)])
 def travel_agents_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                          format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
@@ -2754,7 +2876,7 @@ def travel_agents_report(from_: str | None = Query(None, alias="from"), to: str 
                            totals_row=totals, meta=_meta(dfrom, dto), filename="travel_agents")
 
 
-@router.get("/ota", dependencies=[Depends(require_admin)])
+@router.get("/ota", dependencies=[Depends(require_report_access)])
 def ota_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
@@ -2767,7 +2889,7 @@ def ota_report(from_: str | None = Query(None, alias="from"), to: str | None = Q
                            totals_row=totals, meta=_meta(dfrom, dto), filename="ota_revenue")
 
 
-@router.get("/gst", dependencies=[Depends(require_admin)])
+@router.get("/gst", dependencies=[Depends(require_report_access)])
 def gst_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
@@ -2779,7 +2901,7 @@ def gst_report(from_: str | None = Query(None, alias="from"), to: str | None = Q
                            totals_row=totals, meta=_meta(dfrom, dto), filename="gst_report")
 
 
-@router.get("/cash-shift", dependencies=[Depends(require_admin)])
+@router.get("/cash-shift", dependencies=[Depends(require_report_access)])
 def cash_shift_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                       format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
@@ -2796,7 +2918,7 @@ def cash_shift_report(from_: str | None = Query(None, alias="from"), to: str | N
                            totals_row=totals, meta=_meta(dfrom, dto), filename="cash_shift")
 
 
-@router.get("/card-audit", dependencies=[Depends(require_admin)])
+@router.get("/card-audit", dependencies=[Depends(require_report_access)])
 def card_audit_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                       format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
@@ -2810,7 +2932,7 @@ def card_audit_report(from_: str | None = Query(None, alias="from"), to: str | N
                            meta=_meta(dfrom, dto), filename="card_audit")
 
 
-@router.get("/fraud-summary", dependencies=[Depends(require_admin)])
+@router.get("/fraud-summary", dependencies=[Depends(require_report_access)])
 def fraud_summary_report(from_: str | None = Query(None, alias="from"), to: str | None = Query(None),
                          format: str = Query("json"), db: Session = Depends(get_db)):
     dfrom, dto = _range(from_, to)
@@ -2821,7 +2943,7 @@ def fraud_summary_report(from_: str | None = Query(None, alias="from"), to: str 
                            meta=meta, filename="fraud_summary")
 
 
-@router.get("/staff-performance", dependencies=[Depends(require_admin)])
+@router.get("/staff-performance", dependencies=[Depends(require_report_access)])
 def staff_performance_report(from_: str | None = Query(None, alias="from"),
                              to: str | None = Query(None),
                              format: str = Query("json"), db: Session = Depends(get_db)):

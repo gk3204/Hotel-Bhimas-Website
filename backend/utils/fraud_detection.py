@@ -279,7 +279,9 @@ def _detect_same_id_two_rooms(db, new_alerts, keys):
         by_id[masked]["bookings"].add(booking_id)
         by_id[masked]["rooms"].add(room_id)
     for masked, g in by_id.items():
-        if len(g["rooms"]) >= 2:
+        # v8a (owner, 18 Oct): one booking's own rooms (a family / group on one ID) is normal - only the
+        # same ID in two DIFFERENT bookings at once is a signal. Prod: all 24 alerts were one booking.
+        if len(g["rooms"]) >= 2 and len(g["bookings"]) >= 2:
             anchor = min(g["bookings"])
             _make_alert(new_alerts, keys, type="same_id_two_rooms", severity="med",
                         dedupe_key=f"same_id_two_rooms:id:{masked}", booking_id=anchor,

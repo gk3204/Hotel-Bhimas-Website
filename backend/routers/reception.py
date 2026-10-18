@@ -32,7 +32,7 @@ from utils.settings import validate_category
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, ComplimentaryRequest, \
     ExtendStayRequest, FolioOpenRequest, ReverseOverstayRequest, RoomShiftRequest, EarlyCheckoutRequest, \
     CheckinQuoteRequest, ExtendHoursRequest, ShiftOldCardRequest, CardDeferredRequest
-from utils.auth_utils import require_admin, require_reception_or_admin
+from utils.auth_utils import require_admin, require_reception_or_admin, require_staff_or_accountant
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
 from utils.rate_engine import quote_stay
@@ -4749,7 +4749,7 @@ def registration_slip_data(db, booking_id: int, room_ids: str | None = None, use
 @router.get("/checkin/{booking_id}/slip")
 def registration_slip(booking_id: int, room_ids: str = Query(None),
                       db: Session = Depends(get_db),
-                      user=Depends(require_reception_or_admin)):
+                      user=Depends(require_staff_or_accountant)):        # v8a: + accountant (Documents)
     """The paper the guest signs. `room_ids` (comma-separated) prints the slip for just those
     rooms — v6f, because on a split arrival the first car should not have to wait for the third
     before it can sign anything. Omitted, every room that has actually arrived is on it."""

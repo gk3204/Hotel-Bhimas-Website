@@ -323,6 +323,38 @@ class settings_cache:
         return False
 
 
+# v8a (owner, 18 Oct): which reports the ACCOUNTANT login may open - chosen by the admin in Settings.
+# Keys are the report paths (/reports/<key>), the same keys the web Reports page uses.
+ACCOUNTANT_REPORTS_KEY = "accountant_reports"
+ACCOUNTANT_REPORT_CATALOGUE = [
+    ("cashier-summary", "Cashier Summary"), ("checkout-summary", "Check-Out Summary"),
+    ("sales/daily", "Daily Sales"), ("payments-daily", "Payments Daily"), ("gst", "GST"),
+    ("shift-payments", "Shift Payments"), ("cash-shift", "Cash / Shift"), ("room-service/daily", "Room Service Daily"),
+    ("room-service/items", "Room Service Items"), ("room-service/by-room", "Room Service by Room"),
+    ("travel-agents", "Travel Agents"), ("ota", "OTA"), ("occupancy", "Occupancy"),
+    ("occupancy-analysis", "Occupancy Analysis"), ("arrivals-departures", "Arrivals & Departures"),
+    ("in-house", "In-House"), ("arrival-exceptions", "Arrival Exceptions"), ("room-detail", "Room Detail (HK + frauds)"),
+    ("maintenance-detail", "Maintenance Detail"), ("lost-cards", "Lost Cards"), ("card-audit", "Card Audit"),
+    ("room-turnaround", "Room Turnaround & Cards"), ("fraud-summary", "Fraud Summary"),
+    ("staff-performance", "Staff Performance"), ("documents-zip", "Documents ZIP (a day's receipts / invoices / slips)"),
+]
+ACCOUNTANT_REPORTS_DEFAULT = ["cashier-summary", "checkout-summary", "sales/daily", "payments-daily", "gst",
+                              "shift-payments", "cash-shift", "room-service/daily", "travel-agents", "ota",
+                              "documents-zip"]
+
+
+def get_accountant_reports(db) -> list:
+    raw = get_setting(db, ACCOUNTANT_REPORTS_KEY, None)
+    if raw in (None, ""):
+        return list(ACCOUNTANT_REPORTS_DEFAULT)
+    try:
+        v = json.loads(raw)
+    except Exception:
+        return list(ACCOUNTANT_REPORTS_DEFAULT)
+    keys = {k for k, _l in ACCOUNTANT_REPORT_CATALOGUE}
+    return [k for k in v if k in keys] if isinstance(v, list) else list(ACCOUNTANT_REPORTS_DEFAULT)
+
+
 def get_setting(db, key, default=None):
     """Raw text value for `key`, or `default` (falls back to a known seed default)."""
     cache = getattr(db, "info", {}).get(_CACHE_KEY)

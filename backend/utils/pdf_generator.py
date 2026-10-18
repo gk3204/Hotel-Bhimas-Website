@@ -1558,6 +1558,11 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
             return f"{v:,.2f}"
         return str(v)
 
+    def _para_text(v):
+        # v8a: one flag / alert per line - "\n" breaks the line; &, <, > are escaped for the Paragraph
+        from xml.sax.saxutils import escape as _esc
+        return _esc(_cell(v)).replace("\n", "<br/>")
+
     header = [str(c) for c in columns]
     ncols = len(header)
     _money = ("amount", "receipt", "payment", "balance", "rent", "gst", "sgst", "cgst", "net",
@@ -1578,7 +1583,7 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
             table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", body) for v in r["subtotal"]])
             subtotal_idx.append(idx)
         else:
-            table_rows.append([Paragraph(_cell(v), body) for v in r])
+            table_rows.append([Paragraph(_para_text(v), body) for v in r])
     has_totals = totals_row is not None
     if has_totals:
         table_rows.append([Paragraph(f"<b>{_cell(v)}</b>", body) for v in totals_row])

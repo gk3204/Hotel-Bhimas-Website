@@ -82,6 +82,17 @@ export const updateOtaConfig = (patch) =>
     body: JSON.stringify(patch),
   }).then(handle);
 
+// v8a: which reports the accountant may open (read by the accountant too, saved by the admin)
+export const getAccountantAccess = () =>
+  fetch(`${BASE_URL}/settings/accountant-access`, { headers: authHeaders() }).then(handle);
+
+export const setAccountantAccess = (reports) =>
+  fetch(`${BASE_URL}/settings/accountant-access`, {
+    method: "PUT",
+    headers: authHeaders(),
+    body: JSON.stringify({ reports }),
+  }).then(handle);
+
 // v7q: buildings and floors (number + optional name) for Rooms and the desk housekeeping grid.
 export const getRoomLayout = () =>
   fetch(`${BASE_URL}/settings/room-layout`, { headers: authHeaders() }).then(handle);

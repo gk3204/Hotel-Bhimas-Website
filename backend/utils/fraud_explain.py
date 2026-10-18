@@ -142,6 +142,32 @@ def _when(v, alert=None, always_local=False):
         return str(v)[:16]
 
 
+_EVENT_KEYS = ("issued_at", "client_issued_at", "since", "done_at", "cleaned_at", "started_at", "at")
+
+
+def event_time(alert):
+    """v8a: the moment the alert is ABOUT (a card cut, a cleaning finished...) in the hotel's clock, from its
+    detail - not when the sweep noticed it. The 14 Oct deploy sweep re-raised alerts about events weeks old,
+    and a report that scoped alerts by detection time pinned them onto whichever stay was in the room then.
+    Falls back to detected_at."""
+    d = _d(alert)
+    for k in _EVENT_KEYS:
+        v = d.get(k)
+        if not v:
+            continue
+        try:
+            s = str(v)
+            if "+" in s[10:] or s.endswith("Z"):
+                t = datetime.fromisoformat(s.replace("Z", "+00:00"))
+                return clock.to_local(t.replace(tzinfo=None) - t.utcoffset())
+            t = datetime.fromisoformat(s[:26])
+            stored_local = alert.detected_at is None or alert.detected_at >= _LOCAL_SINCE_UTC
+            return t if stored_local else clock.to_local(t)
+        except Exception:
+            continue
+    return clock.to_local(alert.detected_at) if alert.detected_at else None
+
+
 def _money(v):
     try:
         return f"Rs {float(v):,.2f}"

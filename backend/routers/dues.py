@@ -14,7 +14,7 @@ from database import SessionLocal
 from models import Folio
 from services import dues
 from utils.audit import write_audit
-from utils.auth_utils import require_admin
+from utils.auth_utils import require_admin, require_admin_or_accountant
 
 router = APIRouter(prefix="/dues", tags=["Dues"])
 
@@ -34,8 +34,8 @@ class DuePaymentRequest(BaseModel):
     note: Optional[str] = Field(None, max_length=200)
 
 
-@router.get("", dependencies=[Depends(require_admin)])
-@router.get("/", dependencies=[Depends(require_admin)], include_in_schema=False)
+@router.get("", dependencies=[Depends(require_admin_or_accountant)])       # v8a: accountant reads, admin receives
+@router.get("/", dependencies=[Depends(require_admin_or_accountant)], include_in_schema=False)
 def list_dues(status: str = Query("open", pattern="^(open|paid|all)$"),
               agent_id: Optional[int] = Query(None, gt=0),
               q: Optional[str] = Query(None, max_length=80),

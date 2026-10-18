@@ -1,4 +1,4 @@
-from fastapi import Depends, HTTPException
+from fastapi import Depends, HTTPException, Request
 from jose import jwt, JWTError
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 import os
@@ -27,6 +27,42 @@ def require_admin(user=Depends(get_current_user)):
     if user.get("role") != "admin":
         raise HTTPException(status_code=403, detail="Admin access required")
     return user
+
+
+def require_admin_or_accountant(user=Depends(get_current_user)):
+    """v8a (owner, 18 Oct): the ACCOUNTANT is a read-only web login - reports, documents, dues, payments."""
+    if user.get("role") not in ["admin", "accountant"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return user
+
+
+def require_staff_or_accountant(user=Depends(get_current_user)):
+    """v8a: a document / list the desk and the admin already read, now also the accountant (GET only)."""
+    if user.get("role") not in ["admin", "reception", "accountant"]:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return user
+
+
+def require_report_access(request: Request, user=Depends(get_current_user)):
+    """v8a: a report - the admin always; the accountant only the reports the admin opened to them in
+    Settings (accountant_reports). The report is the path after /reports/ (e.g. "cashier-summary")."""
+    role = user.get("role")
+    if role == "admin":
+        return user
+    if role == "accountant":
+        key = request.url.path.split("/reports/", 1)[-1].strip("/")
+        from database import SessionLocal
+        from utils import settings as _s
+        db = SessionLocal()
+        try:
+            allowed = _s.get_accountant_reports(db)
+        finally:
+            db.close()
+        if key in allowed:
+            return user
+        raise HTTPException(status_code=403,
+                            detail="This report is not open to the accountant - the admin can allow it in Settings")
+    raise HTTPException(status_code=403, detail="Admin access required")
 
 
 def require_reception_or_admin(user=Depends(get_current_user)):

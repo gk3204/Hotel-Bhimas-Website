@@ -19,7 +19,8 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from utils import settings as app_settings
 from utils.audit import write_audit
-from utils.auth_utils import require_admin, require_reception_or_admin, get_current_user
+from utils.auth_utils import (require_admin, require_reception_or_admin, get_current_user,
+                              require_admin_or_accountant)
 
 logger = logging.getLogger(__name__)
 
@@ -140,6 +141,29 @@ def set_arrival_rules(rules: dict = Body(..., embed=True),
 # --- Room layout (v7q) ----------------------------------------------------------------------
 # Buildings and floors offered on web Rooms (dropdowns) and used by the desk housekeeping grid.
 # GET for the desk too; PUT admin-only, validated, audited. A value a room still uses cannot go.
+
+@router.get("/accountant-access", dependencies=[Depends(require_admin_or_accountant)])
+def get_accountant_access(db: Session = Depends(get_db)):
+    """v8a: which reports the accountant may open (+ every report that can be offered)."""
+    return {"reports": app_settings.get_accountant_reports(db),
+            "catalogue": [{"key": k, "label": l} for k, l in app_settings.ACCOUNTANT_REPORT_CATALOGUE]}
+
+
+@router.put("/accountant-access")
+def set_accountant_access(reports: list = Body(..., embed=True), db: Session = Depends(get_db),
+                          user=Depends(require_admin)):
+    import json
+    keys = {k for k, _l in app_settings.ACCOUNTANT_REPORT_CATALOGUE}
+    bad = [str(k) for k in reports if k not in keys]
+    if bad:
+        raise HTTPException(status_code=422, detail=f"Unknown report(s): {', '.join(bad[:5])}")
+    before = app_settings.get_accountant_reports(db)
+    clean = [k for k, _l in app_settings.ACCOUNTANT_REPORT_CATALOGUE if k in set(reports)]
+    app_settings.set_setting(db, app_settings.ACCOUNTANT_REPORTS_KEY, json.dumps(clean), user=user, commit=True)
+    write_audit(db, user, "settings.accountant_access_update", "app_settings", None,
+                before={"reports": before}, after={"reports": clean}, client="web", commit=True)
+    return get_accountant_access(db)
+
 
 @router.get("/room-layout", dependencies=[Depends(require_reception_or_admin)])
 def get_room_layout(db: Session = Depends(get_db)):

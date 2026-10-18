@@ -34,7 +34,9 @@ def _cell(v):
         return ""
     if isinstance(v, float):
         return f"{v:,.2f}"
-    return str(v)
+    # v8a: escaped for the Paragraph, and a "\n" (one flag / alert per line) breaks the line
+    from xml.sax.saxutils import escape as _esc
+    return _esc(str(v)).replace("\n", "<br/>")
 
 
 def _section(elements, styles, heading, columns, rows, note=None):

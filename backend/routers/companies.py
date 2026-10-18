@@ -26,7 +26,7 @@ from schemas import (BackofficeConfigUpdate, CompanyAdjustment, CompanyCreate,
                      CompanyInvoiceCreate, CompanyPaymentRecord, CompanyUpdate)
 from services import company_service
 from utils.audit import _resolve_user_id, write_audit
-from utils.auth_utils import require_admin, require_reception_or_admin
+from utils.auth_utils import require_admin, require_reception_or_admin, require_admin_or_accountant
 from utils.settings import (BACKOFFICE_EDITABLE_KEYS, MAINTENANCE_DEFAULT_ASSIGNEE_KEY,
                             get_backoffice_config, set_setting)
 
@@ -604,7 +604,7 @@ def get_company_invoice(cinvoice_id: int, db: Session = Depends(get_db)):
     return {**_company_invoice_dict(cinv), "detail": _cinvoice_payload(db, cinv)}
 
 
-@invoice_router.get("/{cinvoice_id}/pdf", dependencies=[Depends(require_admin)])
+@invoice_router.get("/{cinvoice_id}/pdf", dependencies=[Depends(require_admin_or_accountant)])
 def company_invoice_pdf(cinvoice_id: int, db: Session = Depends(get_db)):
     """Branded consolidated GST invoice PDF — what the accountant emails the company."""
     from utils.pdf_generator import generate_company_invoice_pdf

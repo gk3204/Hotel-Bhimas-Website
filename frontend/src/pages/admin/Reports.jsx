@@ -1,6 +1,8 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { FaSearch, FaFileCsv, FaFilePdf, FaChartBar } from "react-icons/fa";
 import * as api from "../../api/reports";
+import { jwtDecode } from "jwt-decode";
+import { getAccountantAccess } from "../../api/settings";
 import { usePaged, Paginator } from "../../components/admin/Paginator";
 import { PageShell } from "../../components/admin/BackofficeUI";
 
@@ -39,10 +41,26 @@ const REPORTS = {
   "occupancy-analysis": {
     label: "Occupancy Analysis",
     path: "occupancy-analysis",
-    dateParam: "as_on",
-    note: "Snapshot of every occupied room 'as on' the chosen date, with each stay's prorated revenue. Segments are our booking sources (direct / website / each OTA / agent / complimentary).",
+    range: true,   // v8a (owner): one "as on" snapshot per day of the range (at most 31)
+    note: "Snapshot of every occupied room 'as on' each date in the range (one block per day), with each stay's prorated revenue. Segments are our booking sources (direct / website / each OTA / agent / complimentary).",
     fetch: (p) => api.getOccupancyAnalysis(p),
     project: (d) => {
+      if (d.days) {
+        // v8a: a range - one block per day
+        const rows = [];
+        d.days.forEach((day) => {
+          rows.push({ kind: "section", label: `As on ${day.as_on} - ${day.totals.occ_rooms} room(s) occupied, ${day.totals.pax} pax, revenue ${fmt(day.totals.revenue)}` });
+          day.rooms.forEach((r) => rows.push([r.floor, r.room_no, r.guest, r.segment, r.room_type,
+            (r.arrival || "").replace("T", " ").slice(0, 16), (r.departure || "").replace("T", " ").slice(0, 16),
+            r.pax || "", r.discount_pct ? `${r.discount_pct}%` : "", fmt(r.rack), fmt(r.room_rent),
+            fmt(r.discount), fmt(r.gross_rent), fmt(r.gst), fmt(r.net)]));
+        });
+        return {
+          columns: ["Floor", "Room", "Guest", "Source", "Type", "Arrival", "Departure", "Pax",
+            "Dis %", "Rack", "Room Rent", "Discount", "Gross", "GST", "Net"],
+          rows,
+        };
+      }
       const rows = d.rooms.map((r) => [r.floor, r.room_no, r.guest, r.segment, r.room_type,
         (r.arrival || "").replace("T", " ").slice(0, 16), (r.departure || "").replace("T", " ").slice(0, 16),
         r.pax || "", r.discount_pct ? `${r.discount_pct}%` : "", fmt(r.rack), fmt(r.room_rent),
@@ -112,7 +130,7 @@ const REPORTS = {
   "checkout-summary": {
     label: "Check-Out Summary",
     path: "checkout-summary",
-    dateParam: "day",
+    range: true,   // v8a (owner): any date range
     note: "One row per bill checked out on the day — room rent and food each with the CGST / SGST inside them, laundry, misc, discount, the bill's total CGST / SGST, advance (taken before check-out), balance (paid at check-out), refund, due (agent bills left to pay later) and bill amount.",
     fetch: (p) => api.getCheckoutSummary(p),
     project: (d) => ({
@@ -205,16 +223,19 @@ const REPORTS = {
     label: "Room Detail (HK + frauds)",
     path: "room-detail",
     range: true,
-    note: "Per checked-out stay (by check-out date): check-in/out, cleaning started/ended, inspected time, cleaned-by, inspected-by, and any frauds.",
+    note: "Per checked-out stay (by check-out date): check-in and the guest's key card cut, check-out and the key card wiped, the cleaning card, cleaning started/ended, inspected, cleaned-by, inspected-by, and this stay's fraud alerts (one per line).",
     fetch: (p) => api.getRoomDetail(p),
     project: (d) => {
       const t = (s) => (s || "").replace("T", " ").slice(0, 16);
       return {
         // v7g: cleaning card cut / returned; a start taken from the card cut is marked "(card)"
-        columns: ["Room", "Guest", "Check-in", "Check-out", "Card cut", "Card returned", "Cleaning start",
-          "Cleaning end", "Inspected", "Cleaned by", "Inspected by", "Frauds"],
+        // v8a (owner): the guest's key card cut at check-in and wiped at check-out
+        columns: ["Room", "Guest", "Check-in", "Key card cut", "Check-out", "Key card wiped", "Cleaning card cut",
+          "Cleaning card back", "Cleaning start", "Cleaning end", "Inspected", "Cleaned by", "Inspected by", "Frauds"],
         // v7p: frauds in plain words; a row with a fraud alert is shaded red
-        rows: d.rows.map((r) => ({ kind: "row", danger: r.has_fraud, cells: [r.room, r.guest, t(r.check_in), t(r.check_out),
+        rows: d.rows.map((r) => ({ kind: "row", danger: r.has_fraud, cells: [r.room, r.guest, t(r.check_in),
+          t(r.key_card_cut) + (r.key_card_shift ? " (shift)" : ""), t(r.check_out),
+          (r.key_card_wiped || "").startsWith("20") ? t(r.key_card_wiped) : (r.key_card_wiped || ""),
           t(r.card_cut), (r.card_returned || "").startsWith("20") ? t(r.card_returned) : (r.card_returned || ""),
           t(r.cleaning_started) + (r.cleaning_started_from_card ? " (card)" : ""), t(r.cleaning_ended),
           t(r.inspected_at), r.cleaned_by || "", r.inspected_by || "", r.frauds || ""] })),
@@ -285,12 +306,13 @@ const REPORTS = {
   "in-house": {
     label: "In-House",
     path: "in-house",
-    range: false,
-    fetch: () => api.getInHouse(),
+    range: true,   // v8a (owner): everyone in house at any time in the range
+    note: "Every stay that was in the hotel at any time between the two dates (still in house, or checked out since).",
+    fetch: (p) => api.getInHouse(p),
     project: (d) => ({
-      columns: ["Booking", "Guest", "Phone", "Rooms", "Check-in", "Check-out", "Nights", "Balance"],
+      columns: ["Booking", "Guest", "Phone", "Rooms", "Check-in", "Check-out", "Nights", "Balance", "Status"],
       rows: d.rows.map((r) => [r.booking_id, r.guest_name, r.phone, r.rooms, r.check_in, r.check_out,
-        r.nights, r.balance == null ? "—" : fmt(r.balance)]),
+        r.nights, r.balance == null ? "—" : fmt(r.balance), r.status === "checked_out" ? "checked out" : "in house"]),
     }),
   },
   "arrival-exceptions": {
@@ -434,14 +456,14 @@ const REPORTS = {
           t(r.clean_card_returned) + m(x.end_to_card_return),
           r.inspected_at ? `${t(r.inspected_at)}${m(x.end_to_inspected)}${r.inspected_by ? ` by ${r.inspected_by}` : ""}` : "—",
           x.turnaround == null ? "—" : `${Math.round(x.turnaround)} min`,
-          (r.flags || []).join("; ") || "OK"] });
+          (r.flags || []).map((f) => `- ${f}`).join("\n") || "OK"] });
       });
       rows.push({ kind: "section", label: `Viewing cards (${(d.viewings || []).length}) - room, cut, returned, minutes out (allowed), cut by, checked in after?, red flags` });
       (d.viewings || []).forEach((w) => rows.push({ kind: "row", danger: w.suspicious, cells: [
         w.room, "viewing", t(w.cut), "", w.returned ? t(w.returned) : w.status, "",
         w.minutes_out == null ? "" : `${Math.round(w.minutes_out)} min out`, w.allowed_minutes ? `allowed ${w.allowed_minutes}` : "",
         w.issued_by || "", "", w.checked_in ? `Checked in - #${w.checkin_booking_id}, ${Math.round(w.minutes_to_checkin)} min later` : "Not checked in",
-        "", (w.flags || []).join("; ") || "OK"] }));
+        "", (w.flags || []).map((f) => `- ${f}`).join("\n") || "OK"] }));
       return {
         tiles,
         columns: ["Room", "Guest", "Check-in", "Key card cut", "Check-out", "Card wiped", "Clean card cut",
@@ -460,10 +482,17 @@ const REPORTS = {
     project: (d) => {
       const rows = [];
       (d.kinds || []).forEach((k) => {
-        rows.push({ kind: "section", label: `${k.title} - ${k.count} alert${k.count === 1 ? "" : "s"} (${k.open} not reviewed). ${k.meaning} Check: ${k.check}` });
-        d.rows.filter((r) => r.type === k.type).forEach((r) => rows.push([
-          r.when, r.room || "—", [r.guest, r.booking_id ? `#${r.booking_id}` : ""].filter(Boolean).join(" · ") || "—",
-          r.what_happened, r.staff || "—", r.status_text]));
+        // v8a (owner): "display it properly, not clumsy"
+        rows.push({ kind: "section", label: `${k.title} - ${k.count} alert${k.count === 1 ? "" : "s"} (${k.open} not reviewed)` });
+        const why = [k.meaning ? `Why it matters: ${k.meaning}` : "", k.check ? `What to check: ${k.check}` : ""].filter(Boolean).join("\n");
+        if (why) rows.push(["", "", "", why, "", ""]);
+        d.rows.filter((r) => r.type === k.type).forEach((r) => {
+          const pre = r.room ? `Room ${r.room}: ` : "";
+          let what = r.what_happened || "";
+          if (pre && what.startsWith(pre)) what = what.slice(pre.length, pre.length + 1).toUpperCase() + what.slice(pre.length + 1);
+          rows.push([r.when, r.room || "—", [r.guest, r.booking_id ? `#${r.booking_id}` : ""].filter(Boolean).join(" · ") || "—",
+            what, r.staff || "—", r.status_text]);
+        });
       });
       return { columns: ["When", "Room", "Guest / booking", "What happened", "Staff", "Status"], rows };
     },
@@ -524,7 +553,16 @@ function DocumentsZip() {
 }
 
 export default function Reports() {
+  // v8a: the accountant sees only the reports the admin opened to them (Settings -> Accountant access)
+  const role = useMemo(() => { try { return jwtDecode(localStorage.getItem("adminToken")).role; } catch { return null; } }, []);
+  const [allowed, setAllowed] = useState(null);       // null = everything (admin)
+  useEffect(() => {
+    if (role !== "accountant") return;
+    getAccountantAccess().then((d) => setAllowed(new Set(d.reports || []))).catch(() => setAllowed(new Set()));
+  }, [role]);
+  const tabs = allowed ? TAB_ORDER.filter((k) => allowed.has(REPORTS[k].path || k)) : TAB_ORDER;
   const [tab, setTab] = useState("occupancy");
+  useEffect(() => { if (allowed && tabs.length && !tabs.includes(tab)) setTab(tabs[0]); }, [allowed]); // eslint-disable-line react-hooks/exhaustive-deps
   const [range, setRange] = useState({ from: daysAgo(29), to: today() });
   const [singleDate, setSingleDate] = useState(today());   // for single-date snapshot reports
   const [groupBy, setGroupBy] = useState("day");
@@ -576,6 +614,8 @@ export default function Reports() {
   }, [cfg, range, singleDate, groupBy]);
 
   const load = async () => {
+    // v8a: an accountant only loads a report the admin opened to them (and only once the list is known)
+    if (role === "accountant" && (!allowed || !allowed.has(cfg.path || tab))) return;
     setLoading(true);
     setError("");
     try {
@@ -592,7 +632,7 @@ export default function Reports() {
     load();
     // reload when the tab or its controls change
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [tab, groupBy]);
+  }, [tab, groupBy, allowed]);   // v8a: + once the accountant's list is known
 
   const doExport = async (format) => {
     try {
@@ -630,11 +670,14 @@ export default function Reports() {
     >
 
         {/* v7e: every document of one day as a ZIP, in folders */}
-        <DocumentsZip />
+        {(!allowed || allowed.has("documents-zip")) && <DocumentsZip />}
+        {allowed && tabs.length === 0 && (
+          <p className="text-slate-400 mb-6">No report is open to you yet - ask the admin to allow some in Settings → Accountant access.</p>
+        )}
 
         {/* Tabs */}
         <div className="flex flex-wrap gap-2 mb-6">
-          {TAB_ORDER.map((k) => (
+          {tabs.map((k) => (
             <button
               key={k}
               onClick={() => {
@@ -791,8 +834,8 @@ export default function Reports() {
                         : isRow && r.danger ? "bg-red-900/25 hover:bg-red-900/35 transition"
                         : "hover:bg-slate-700/30 transition"}>
                         {cells.map((c, j) => (
-                          <td key={j} className={`px-4 py-2.5 text-slate-200 ${String(c ?? "").length > 45
-                            ? "whitespace-normal min-w-[18rem]" : "whitespace-nowrap"} ${moneyCols.has(j) ? "text-right tabular-nums" : ""}`}>
+                          <td key={j} className={`px-4 py-2.5 text-slate-200 ${String(c ?? "").length > 45 || String(c ?? "").includes("\n")
+                            ? "whitespace-pre-line min-w-[18rem]" : "whitespace-nowrap"} ${moneyCols.has(j) ? "text-right tabular-nums" : ""}`}>
                             {c == null ? (isSub ? "" : "—") : String(c)}
                           </td>
                         ))}

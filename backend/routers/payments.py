@@ -19,7 +19,7 @@ from sqlalchemy.orm import object_session   # v6m.13: booking_pdf_payload has no
 from schemas import DeskPaymentRecord, PaymentRefundRequest, ExcessReturnRequest, DeskCollectRequest
 from utils.pdf_generator import generate_booking_pdf, generate_payment_receipt_pdf
 from utils.email_service import send_booking_email
-from utils.auth_utils import require_reception_or_admin, require_admin, get_current_user
+from utils.auth_utils import require_reception_or_admin, require_admin, get_current_user, require_staff_or_accountant
 from services import folio_resolver, payment_split
 from utils.audit import write_audit, _resolve_user_id
 from utils.owner_otp import consume_otp, consume_otp_for_booking
@@ -180,7 +180,7 @@ def process_gateway_refund(db: Session, payment_id: int, refund_amount: float, r
 
 
 # 📊 GET all payments (admin only)
-@router.get("/", dependencies=[Depends(require_reception_or_admin)])
+@router.get("/", dependencies=[Depends(require_staff_or_accountant)])     # v8a: + accountant (read-only list)
 def get_all_payments(db: Session = Depends(get_db)):
     """Get all payments"""
     try:
@@ -1964,7 +1964,7 @@ def get_prepaid_receipt(booking_id: int, db: Session = Depends(get_db),
 
 @router.get("/prepaid-receipt/{receipt_id}/pdf")
 def prepaid_receipt_pdf(receipt_id: int, db: Session = Depends(get_db),
-                        user=Depends(require_reception_or_admin)):
+                        user=Depends(require_staff_or_accountant)):        # v8a: + accountant
     """v6m.13: the PRE-<id> receipt as a PDF."""
     from models import PrepaidReceipt
     from services.prepaid_receipts import prepaid_receipt_payload
@@ -1981,7 +1981,7 @@ def prepaid_receipt_pdf(receipt_id: int, db: Session = Depends(get_db),
 
 @router.get("/{payment_id}/receipt/pdf")
 def payment_receipt_pdf(payment_id: int, kind: str = "payment", db: Session = Depends(get_db),
-                        user=Depends(require_reception_or_admin)):
+                        user=Depends(require_staff_or_accountant)):        # v8a: + accountant
     """Receipt PDF for a payment (kind=payment) or refund voucher (kind=refund).
     Regenerated on demand into the temp dir, same as the folio invoice PDF."""
     if kind not in ("payment", "refund"):

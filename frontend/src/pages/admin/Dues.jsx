@@ -5,11 +5,14 @@ import React, { useEffect, useMemo, useState } from "react";
 import { PageShell, InfoTip } from "../../components/admin/BackofficeUI";
 import { listDues, receiveDue, exportDues } from "../../api/backoffice";
 import { getAgents } from "../../api/travelAgents";
+import { jwtDecode } from "jwt-decode";
 import { FaMoneyBillWave, FaSearch, FaFileCsv, FaFilePdf, FaEye } from "react-icons/fa";
 
 const fmt = (n) => `₹${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
 const Dues = () => {
+  // v8a: the accountant reads dues; only the admin records money received
+  const canReceive = (() => { try { return jwtDecode(localStorage.getItem("adminToken")).role === "admin"; } catch { return false; } })();
   const [status, setStatus] = useState("open");
   const [agentId, setAgentId] = useState("");
   const [q, setQ] = useState("");
@@ -97,7 +100,7 @@ const Dues = () => {
             <label className="mb-2 text-sm font-semibold text-slate-300">Agent</label>
             <select value={agentId} onChange={(e) => setAgentId(e.target.value)} className={inputCls}>
               <option value="">All agents</option>
-              {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+              {(agents.length ? agents : (data?.agents || []).filter((a) => a.agent_id).map((a) => ({ id: a.agent_id, name: a.agent }))).map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
             </select>
           </div>
           <div className="flex flex-col md:col-span-2">
@@ -172,7 +175,7 @@ const Dues = () => {
                     </td>
                     <td className="px-4 py-3 whitespace-nowrap space-x-2">
                       <button onClick={() => setViewFor(r)} title="Receipts" className="bg-blue-600 hover:bg-blue-700 px-3 py-2 rounded-lg text-white inline-flex items-center"><FaEye size={12} /></button>
-                      {r.status === "due" && (
+                      {r.status === "due" && canReceive && (
                         <button onClick={() => openPay(r)} className="bg-green-700 hover:bg-green-800 px-3 py-2 rounded-lg text-white inline-flex items-center gap-1">
                           <FaMoneyBillWave size={12} /> Received
                         </button>

@@ -11,7 +11,7 @@ CATEGORY_SLUG_RE = "^[a-z0-9_]{2,40}$"
 class UserCreate(BaseModel):
     username: str = Field(..., min_length=3, max_length=50)
     password: str = Field(..., min_length=8, max_length=100)
-    role: str = Field(..., pattern="^(admin|reception|housekeeper|maintenance|roomservice|user)$")
+    role: str = Field(..., pattern="^(admin|reception|housekeeper|maintenance|roomservice|accountant|user)$")
 
     @field_validator('username')
     @classmethod
@@ -23,7 +23,7 @@ class UserCreate(BaseModel):
 
 class UserUpdate(BaseModel):
     password: Optional[str] = Field(None, min_length=8, max_length=100)
-    role: Optional[str] = Field(None, pattern="^(admin|reception|housekeeper|maintenance|roomservice|user)$")
+    role: Optional[str] = Field(None, pattern="^(admin|reception|housekeeper|maintenance|roomservice|accountant|user)$")
 
 
 class UserResponse(BaseModel):

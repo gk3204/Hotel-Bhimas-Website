@@ -24,7 +24,7 @@ from database import SessionLocal
 from models import (Booking, BookingItem, CashShift, Company, CompanyInvoice, Folio, Guest, Invoice,
                     Payment, Room, User)
 from utils import ordering
-from utils.auth_utils import require_admin
+from utils.auth_utils import require_admin, require_admin_or_accountant
 
 router = APIRouter(prefix="/documents", tags=["Documents"])
 
@@ -270,8 +270,8 @@ def list_documents(db: Session, q: str = "", type_: str = "all", dfrom: Optional
     return out
 
 
-@router.get("", dependencies=[Depends(require_admin)])
-@router.get("/", dependencies=[Depends(require_admin)], include_in_schema=False)
+@router.get("", dependencies=[Depends(require_admin_or_accountant)])
+@router.get("/", dependencies=[Depends(require_admin_or_accountant)], include_in_schema=False)
 def documents(q: str = Query(""), type: str = Query("all"),
               from_: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None),
               limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0),
@@ -316,7 +316,7 @@ def _checked_in_stay(db: Session, booking_id: int) -> Booking:
     return b
 
 
-@router.get("/stays", dependencies=[Depends(require_admin)])
+@router.get("/stays", dependencies=[Depends(require_admin_or_accountant)])
 def stays(q: str = Query(""), from_: Optional[str] = Query(None, alias="from"), to: Optional[str] = Query(None),
           limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0), db: Session = Depends(get_db)):
     """Every stay that was CHECKED IN (in house or checked out) - never a cancelled / no-show / unpaid
@@ -357,7 +357,7 @@ def stays(q: str = Query(""), from_: Optional[str] = Query(None, alias="from"), 
     return {"total": total, "data": rows}
 
 
-@router.get("/stays/{booking_id}", dependencies=[Depends(require_admin)])
+@router.get("/stays/{booking_id}", dependencies=[Depends(require_admin_or_accountant)])
 def stay_documents(booking_id: int, db: Session = Depends(get_db)):
     """The stay's documents (no PDFs rendered here - each opens through .../file)."""
     from services.day_documents import documents_of_booking
@@ -374,7 +374,7 @@ def stay_documents(booking_id: int, db: Session = Depends(get_db)):
     return {"booking_id": b.booking_id, "guest": b.display_guest_name, "status": b.status, "documents": docs}
 
 
-@router.get("/stays/{booking_id}/file", dependencies=[Depends(require_admin)])
+@router.get("/stays/{booking_id}/file", dependencies=[Depends(require_admin_or_accountant)])
 def stay_document_file(booking_id: int, key: str = Query(...), download: int = Query(0),
                        db: Session = Depends(get_db)):
     """One document of the stay as a PDF - inline to view, `download=1` to save."""
@@ -390,7 +390,7 @@ def stay_document_file(booking_id: int, key: str = Query(...), download: int = Q
                     headers={"Content-Disposition": f'{disp}; filename="{doc[1]}"'})
 
 
-@router.get("/stays/{booking_id}/zip", dependencies=[Depends(require_admin)])
+@router.get("/stays/{booking_id}/zip", dependencies=[Depends(require_admin_or_accountant)])
 def stay_documents_zip(booking_id: int, db: Session = Depends(get_db)):
     """Every document of the stay in one ZIP, in the same folders as the day's ZIP."""
     from services.day_documents import build_booking_zip
@@ -402,7 +402,7 @@ def stay_documents_zip(booking_id: int, db: Session = Depends(get_db)):
     return FileResponse(path, media_type="application/zip", filename=name)
 
 
-@router.get("/bookings/{booking_id}/confirmation/pdf", dependencies=[Depends(require_admin)])
+@router.get("/bookings/{booking_id}/confirmation/pdf", dependencies=[Depends(require_admin_or_accountant)])
 def booking_confirmation_pdf(booking_id: int, db: Session = Depends(get_db)):
     """Regenerate the booking-confirmation PDF the guest was sent (the desk / online flows only
     ever produced it as an attachment at booking time)."""

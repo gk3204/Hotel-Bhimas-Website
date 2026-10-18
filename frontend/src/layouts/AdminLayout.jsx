@@ -5,7 +5,7 @@ import AdminSidebar from "../components/admin/AdminSidebar";
 import GlobalSearch from "../components/admin/GlobalSearch";
 import RouteErrorBoundary from "../components/RouteErrorBoundary";
 import PwaPrompts from "../components/PwaPrompts";
-import { NAV_ITEMS, HOUSEKEEPER_PATHS } from "../components/admin/adminNav";
+import { NAV_ITEMS, HOUSEKEEPER_PATHS, ACCOUNTANT_PATHS } from "../components/admin/adminNav";
 import { getComplianceConfig } from "../api/compliance";
 
 const AdminLayout = () => {
@@ -22,6 +22,10 @@ const AdminLayout = () => {
     try { role = jwtDecode(localStorage.getItem("adminToken")).role; } catch { role = null; }
     if (role === "housekeeper" && !HOUSEKEEPER_PATHS.includes(location.pathname)) {
       navigate("/admin/housekeeping", { replace: true });
+    }
+    // v8a: the accountant stays on Reports / Documents / Dues / Payments
+    if (role === "accountant" && !ACCOUNTANT_PATHS.includes(location.pathname)) {
+      navigate("/admin/reports", { replace: true });
     }
   }, [location.pathname, navigate]);
 

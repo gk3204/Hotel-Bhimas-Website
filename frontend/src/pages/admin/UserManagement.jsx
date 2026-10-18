@@ -18,6 +18,8 @@ const ROLE_META = {
   housekeeper: { label: "🧹 Housekeeper", chip: "bg-amber-500/20 text-amber-300 border-amber-500/30" },
   maintenance: { label: "🔧 Maintenance", chip: "bg-cyan-500/20 text-cyan-300 border-cyan-500/30" },
   roomservice: { label: "🛎️ Room Service", chip: "bg-emerald-500/20 text-emerald-300 border-emerald-500/30" },
+  // v8a: read-only web login - Reports (chosen in Settings), Documents, Dues, Payments
+  accountant: { label: "📒 Accountant", chip: "bg-violet-500/20 text-violet-300 border-violet-500/30" },
 };
 
 const UserManagement = () => {
@@ -163,6 +165,7 @@ const UserManagement = () => {
                 <option value="housekeeper">🧹 Housekeeper</option>
                 <option value="maintenance">🔧 Maintenance</option>
                 <option value="roomservice">🛎️ Room Service</option>
+                <option value="accountant">📒 Accountant (reports &amp; documents)</option>
               </select>
             </div>
           </div>

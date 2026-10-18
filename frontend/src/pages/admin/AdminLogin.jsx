@@ -23,6 +23,8 @@ const AdminLogin = () => {
     // v4b8: the housekeeper (ex-supervisor) cleans, inspects and approves maintenance from the
     // WEB ADMIN, so land them on the Housekeeping page — not the staff phone shell.
     else if (decoded.role === "housekeeper") navigate("/admin/housekeeping");
+    // v8a: the accountant - Reports (and Documents / Dues / Payments) only
+    else if (decoded.role === "accountant") navigate("/admin/reports");
     // roomservice is a tablet role and lives in the same installable staff shell (TBC-4).
     else if (["maintenance", "roomservice"].includes(decoded.role)) navigate("/staff");
     else setError("Unauthorized role");

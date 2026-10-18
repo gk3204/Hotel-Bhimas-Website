@@ -47,11 +47,11 @@ export const NAV_GROUPS = [
   {
     label: "Money",
     items: [
-      { to: "/admin/payments", label: "Payments", icon: FaMoneyBillWave },
+      { to: "/admin/payments", label: "Payments", icon: FaMoneyBillWave, roles: ["admin", "accountant"] },
       { to: "/admin/cash-shift", label: "Cash / Shift", icon: FaCashRegister },
-      { to: "/admin/dues", label: "Dues (pay later)", icon: FaHourglassHalf },
-      { to: "/admin/reports", label: "Reports", icon: FaChartBar },
-      { to: "/admin/documents", label: "Documents", icon: FaFileInvoice },
+      { to: "/admin/dues", label: "Dues (pay later)", icon: FaHourglassHalf, roles: ["admin", "accountant"] },
+      { to: "/admin/reports", label: "Reports", icon: FaChartBar, roles: ["admin", "accountant"] },
+      { to: "/admin/documents", label: "Documents", icon: FaFileInvoice, roles: ["admin", "accountant"] },
     ],
   },
   {
@@ -91,6 +91,11 @@ export const NAV_ITEMS = NAV_GROUPS.flatMap((g) =>
 // v4b8: routes a housekeeper may reach in web admin (untagged items are admin-only).
 // The `supervisor` role was merged into `housekeeper` — one role cleans, inspects and signs
 // off maintenance, so it needs these oversight screens.
+// v8a: the accountant - Reports, Documents, Dues, Payments (read-only)
+export const ACCOUNTANT_PATHS = NAV_ITEMS
+  .filter((it) => it.roles && it.roles.includes("accountant"))
+  .map((it) => it.to);
+
 export const HOUSEKEEPER_PATHS = NAV_ITEMS
   .filter((it) => it.roles && it.roles.includes("housekeeper"))
   .map((it) => it.to);

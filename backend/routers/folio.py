@@ -39,7 +39,7 @@ from utils import clock          # v6m.12: invoice times in the hotel clock
 from utils import ordering
 from utils import settings as app_settings
 from utils.audit import write_audit, _resolve_user_id
-from utils.auth_utils import get_current_user, require_admin, require_reception_or_admin
+from utils.auth_utils import get_current_user, require_admin, require_reception_or_admin, require_staff_or_accountant
 from utils.owner_otp import consume_otp
 
 logger = logging.getLogger(__name__)
@@ -1550,7 +1550,7 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
 
 @router.get("/{folio_id}/invoice/pdf")
 def invoice_pdf(folio_id: int, db: Session = Depends(get_db),
-                user=Depends(require_reception_or_admin)):
+                user=Depends(require_staff_or_accountant)):        # v8a: + accountant
     folio = _get_folio(db, folio_id)
     invoice = _get_invoice(db, folio.id)
     if not invoice:

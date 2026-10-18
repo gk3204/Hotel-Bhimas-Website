@@ -31,7 +31,7 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import CashShift, Expense, Payment, User, FraudAlert, PAYMENT_METHODS
 from schemas import ShiftOpenRequest, ExpenseCreate, FloatTopupRequest, ShiftCloseRequest, CashConfigUpdate
-from utils.auth_utils import require_reception_or_admin, require_admin
+from utils.auth_utils import require_reception_or_admin, require_admin, require_staff_or_accountant
 from utils.audit import write_audit, _resolve_user_id
 from utils.settings import (get_cash_config, set_setting, validate_category,
                             CASH_CYCLE_KEY, CASH_VARIANCE_THRESHOLD_KEY, CASH_VARIANCE_ALERT_KEY)
@@ -456,7 +456,7 @@ def shift_detail(shift_id: int, db: Session = Depends(get_db)):
     }
 
 
-@router.get("/{shift_id}/report/pdf", dependencies=[Depends(require_reception_or_admin)])
+@router.get("/{shift_id}/report/pdf", dependencies=[Depends(require_staff_or_accountant)])
 def shift_report_pdf(shift_id: int, db: Session = Depends(get_db)):
     """Printable shift report (opening float, collections, expenses, payouts, expected vs
     counted, variance, denomination breakdown)."""
