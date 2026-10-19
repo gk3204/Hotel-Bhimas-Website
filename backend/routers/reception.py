@@ -4512,8 +4512,16 @@ async def upload_guest_scan(booking_id: int, file: UploadFile = File(...),
     if not secure_id_store.allowed_mime(file.content_type):
         raise HTTPException(status_code=400, detail="Unsupported file type (use JPG/PNG/WEBP/PDF)")
     data = await file.read()
+    # v8d: encrypt + write to object storage OFF the event loop. This is an `async def`, so the
+    # blocking boto3 put used to freeze the whole worker for as long as the write took (up to ~40 s
+    # with the retries) - every other desk request on that worker waited behind the ID scan.
+    from starlette.concurrency import run_in_threadpool
+    import time as _t
+    _t0 = _t.monotonic()
     try:
-        ref = secure_id_store.save_scan(booking_id, data, file.content_type)
+        ref = await run_in_threadpool(secure_id_store.save_scan, booking_id, data, file.content_type)
+        logger.info(f"[scan] booking {booking_id}: stored {len(data) // 1024} KB in "
+                    f"{(_t.monotonic() - _t0) * 1000:.0f} ms")
     except RuntimeError:
         # RuntimeError now covers two cases: the encryption key is unset, OR object storage is
         # unreachable. Both mean "we will not store this scan" and both fail closed — nothing is
