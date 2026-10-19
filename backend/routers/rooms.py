@@ -2,6 +2,7 @@
 programmed with (card code BBFFRR). Admin manages rooms; reception reads them (desktop room grid).
 """
 import logging
+import re
 from utils import clock          # v6m.12
 from datetime import datetime
 
@@ -36,6 +37,25 @@ def _type_names(db) -> dict:
     return dict(db.query(RoomType.room_type_id, RoomType.name).all())
 
 
+def _card_code(r: Room):
+    if (r.lock_type or "card") == "key":
+        return None
+    from routers.reception import _room_code
+    try:
+        return _room_code(r)
+    except HTTPException:
+        return None
+
+
+def _check_lock_no(lock_no):
+    """v8c: lock_no now decides the card's code, so it must be one: "BBFFRR" or "BBFFRRAA"."""
+    s = (lock_no or "").strip()
+    if s and not re.fullmatch(r"\d{6}(\d{2})?", s):
+        raise HTTPException(status_code=422,
+                            detail="Lock No must be the door's code: 6 digits BBFFRR (e.g. 010129 = building 1, "
+                                   "floor 1, room 29), or 8 with the area (01012999). Leave it empty for 01 01 + room number.")
+
+
 def _serialize(r: Room, type_names: dict | None = None) -> dict:
     return {
         "room_id": r.room_id,
@@ -45,6 +65,8 @@ def _serialize(r: Room, type_names: dict | None = None) -> dict:
         "floor": r.floor,
         "max_cards": r.max_cards,
         "lock_no": r.lock_no,
+        # v8c: what a card for this room is written with (the door's code, not the display layout)
+        "card_code": _card_code(r),
         "lock_type": r.lock_type,   # card | key — key rooms skip the encode/decode flow
         # v4b7: the second type this room may be sold as, plus its name for the admin list.
         "alt_room_type_id": r.alt_room_type_id,
@@ -151,6 +173,7 @@ def create_room(data: RoomCreate, db: Session = Depends(get_db)):
         if not db.query(RoomType).filter(RoomType.room_type_id == data.room_type_id).first():
             raise HTTPException(status_code=400, detail="Room type not found")
         _check_layout(db, data.building, data.floor)
+        _check_lock_no(data.lock_no)
 
         room = Room(
             room_number=data.room_number,
@@ -210,6 +233,8 @@ def update_room(room_id: int, data: RoomUpdate, db: Session = Depends(get_db)):
         if "building" in update_data or "floor" in update_data:
             _check_layout(db, update_data.get("building", room.building), update_data.get("floor", room.floor),
                           current=(room.building, room.floor))
+        if "lock_no" in update_data:
+            _check_lock_no(update_data.get("lock_no"))
         # v4b7: 0 clears the alternate; otherwise it must exist, be active, and differ from
         # the room's own type (also enforced by ck_rooms_alt_differs at the DB level).
         if "alt_room_type_id" in update_data:

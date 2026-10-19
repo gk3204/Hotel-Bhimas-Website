@@ -363,14 +363,14 @@ def inspect_room(room_id: int, data: InspectRequest, db: Session = Depends(get_d
 # threshold, so the current `cleaning_too_long` detector fires if the room runs over.
 
 def _cleaning_card_payload(room: Room, card: CardIssuance) -> dict:
-    from routers.reception import _room_code  # lazy: avoids any import-time coupling
+    from routers.reception import _room_code, lock_building_floor, lock_room_no  # lazy
     return {
         "card_id": card.id,
         "room_id": room.room_id,
         "room_number": room.room_number,
-        "building": room.building,
-        "floor": room.floor,
-        "room": int(room.room_number),
+        "building": lock_building_floor(room)[0],   # v8c: the LOCK's, not the display layout
+        "floor": lock_building_floor(room)[1],
+        "room": lock_room_no(room),
         "area": 99,
         "room_code": card.room_code or _room_code(room),
         "valid_from": card.valid_from.isoformat() if card.valid_from else None,

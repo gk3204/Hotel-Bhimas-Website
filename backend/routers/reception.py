@@ -13,6 +13,7 @@ import json
 import io
 import logging
 import os
+import re
 from datetime import date, datetime, time, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile, File, Form
@@ -610,8 +611,35 @@ def _wa_notify(db, setting_key, guest, template, params, booking_id=None, client
                                        client_ref=client_ref)
 
 
-def _room_code(room: Room) -> str:
-    """BBFFRRAA code written to the card (area fixed at 99 for this property)."""
+# v8c (owner, 19 Oct): the building / floor a LOCK is programmed with - never the room's DISPLAY
+# building / floor. Every lock here was set up as building 01 / floor 01 (all 500+ cards before
+# 18 Oct were 0101RR99). v7q made building / floor editable for the housekeeping grid, the owner laid
+# rooms out as B2/F1, B1/F2, B2/F2 - and every card cut for those 26 rooms got a code their doors had
+# never been programmed with (rooms 10 and 24 guests, viewing cards for 1, 8, 14, 29). A room whose
+# door was programmed differently sets `lock_no` ("BBFFRR" or "BBFFRRAA") in web Rooms.
+LOCK_BUILDING = 1
+LOCK_FLOOR = 1
+
+
+def lock_no_parts(lock_no):
+    """(building, floor, room) from a lock_no "BBFFRR" / "BBFFRRAA", else None."""
+    s = re.sub(r"\s+", "", lock_no or "")
+    if re.fullmatch(r"\d{6}(\d{2})?", s):
+        return int(s[0:2]), int(s[2:4]), int(s[4:6])
+    return None
+
+
+def lock_building_floor(room: Room) -> tuple:
+    """The building / floor this room's DOOR was programmed with (what goes on its cards)."""
+    p = lock_no_parts(getattr(room, "lock_no", None))
+    return (p[0], p[1]) if p else (LOCK_BUILDING, LOCK_FLOOR)
+
+
+def lock_room_no(room: Room) -> int:
+    """The room number on the door's lock, for the card (validated like the code)."""
+    p = lock_no_parts(getattr(room, "lock_no", None))
+    if p:
+        return p[2]
     try:
         rr = int(room.room_number)
     except (TypeError, ValueError):
@@ -622,7 +650,14 @@ def _room_code(room: Room) -> str:
         raise HTTPException(
             status_code=400,
             detail=f"Room number {rr} out of card range (00-99)")
-    return f"{room.building:02d}{room.floor:02d}{rr:02d}99"
+    return rr
+
+
+def _room_code(room: Room) -> str:
+    """BBFFRRAA code written to the card (area fixed at 99 for this property) - the LOCK's code."""
+    rr = lock_room_no(room)
+    b, f = lock_building_floor(room)
+    return f"{b:02d}{f:02d}{rr:02d}99"
 
 
 def _active_cards(db: Session, room_id: int) -> int:
@@ -650,9 +685,9 @@ def _encode_payload(db: Session, item: BookingItem, room: Room, valid_from, vali
         "booking_item_id": item.booking_item_id,
         "room_id": room.room_id,
         "room_number": room.room_number,
-        "building": room.building,
-        "floor": room.floor,
-        "room": int(room.room_number),
+        "building": lock_building_floor(room)[0],   # v8c: the LOCK's, not the display layout
+        "floor": lock_building_floor(room)[1],
+        "room": lock_room_no(room),
         "area": 99,
         "room_code": _room_code(room),
         "valid_from": valid_from.isoformat(),
@@ -4082,8 +4117,8 @@ def _build_desk_board(db: Session):
             "rooms": sorted([{
                 "room_id": i.room.room_id,
                 "room_number": i.room.room_number,
-                "building": i.room.building,
-                "floor": i.room.floor,
+                "building": lock_building_floor(i.room)[0],   # v8c: what the desk encodes with
+                "floor": lock_building_floor(i.room)[1],
                 "max_cards": i.room.max_cards,
                 "active_cards": int(_active_cards_by_room.get(i.room.room_id, 0)),
                 "lock_type": i.room.lock_type,
@@ -4198,8 +4233,8 @@ def _build_desk_board(db: Session):
                     rooms.append({
                         "room_id": room.room_id,
                         "room_number": room.room_number,
-                        "building": room.building,
-                        "floor": room.floor,
+                        "building": lock_building_floor(room)[0],   # v8c: what the desk encodes with
+                        "floor": lock_building_floor(room)[1],
                         "max_cards": room.max_cards,
                         "active_cards": int(_active_cards_by_room.get(room.room_id, 0)),
                         "lock_type": room.lock_type,   # key rooms skip card read/erase at checkout
@@ -4267,8 +4302,8 @@ def _build_desk_board(db: Session):
         # booking of THAT type — and say that doing so needs the owner's approval.
         "alt_room_type_id": r.alt_room_type_id,
         "alt_room_type_name": _rt_names.get(r.alt_room_type_id),
-        "building": r.building,
-        "floor": r.floor,
+        "building": lock_building_floor(r)[0],   # v8c: the desk builds the card code from these
+        "floor": lock_building_floor(r)[1],
         "max_cards": r.max_cards,
         "lock_type": r.lock_type,
     } for r, rt in db.query(Room, RoomType).outerjoin(

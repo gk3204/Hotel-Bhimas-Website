@@ -226,7 +226,7 @@ const Rooms = () => {
               </select>
             </div>
             <InputField label="Max Cards" name="max_cards" type="number" value={formData.max_cards} onChange={handleChange} />
-            <InputField label="Lock No (optional)" name="lock_no" placeholder="optional" value={formData.lock_no} onChange={handleChange} />
+            <InputField label="Lock No - door code BBFFRR (optional)" name="lock_no" placeholder="empty = 01 01 + room no." value={formData.lock_no} onChange={handleChange} />
           </div>
 
           <div className="flex justify-end mt-6">
@@ -251,7 +251,7 @@ const Rooms = () => {
                 <SortTh ctx={sortedRooms} k="bldg" get={(r) => `${r.building}/${r.floor}`} className="px-5 py-3">Bldg / Floor</SortTh>
                 <SortTh ctx={sortedRooms} k="lock_type" className="px-5 py-3">Lock</SortTh>
                 <SortTh ctx={sortedRooms} k="max_cards" className="px-5 py-3">Max Cards</SortTh>
-                <SortTh ctx={sortedRooms} k="lock_no" className="px-5 py-3">Lock No</SortTh>
+                <SortTh ctx={sortedRooms} k="card_code" className="px-5 py-3">Card code</SortTh>
                 <SortTh ctx={sortedRooms} k="status" className="px-5 py-3">Status</SortTh>
                 <SortTh ctx={sortedRooms} k="is_active" className="px-5 py-3">Active</SortTh>
                 <th className="px-5 py-3 text-right">Actions</th>
@@ -286,7 +286,7 @@ const Rooms = () => {
                     </span>
                   </td>
                   <td className="px-5 py-3">{r.lock_type === "key" ? "—" : r.max_cards}</td>
-                  <td className="px-5 py-3 text-slate-400">{r.lock_no || "—"}</td>
+                  <td className="px-5 py-3 text-slate-400 font-mono" title={r.lock_no ? "From the Lock No" : "Building 01, floor 01 + room number (the doors' programming) - the Bldg / Floor column is display only"}>{r.card_code || "—"}</td>
                   <td className="px-5 py-3">
                     <span className={`px-3 py-1 rounded-full text-xs font-medium ${STATUS_COLORS[r.status] || "bg-slate-600/80"}`}>
                       {r.status}
@@ -404,7 +404,7 @@ const Rooms = () => {
                   onChange={(e) => setEditingRoom({ ...editingRoom, floor: e.target.value })} />
                 <InputField label="Max Cards" type="number" value={editingRoom.max_cards}
                   onChange={(e) => setEditingRoom({ ...editingRoom, max_cards: e.target.value })} />
-                <InputField label="Lock No" value={editingRoom.lock_no || ""}
+                <InputField label="Lock No - door code BBFFRR (empty = 01 01 + room no.)" value={editingRoom.lock_no || ""}
                   onChange={(e) => setEditingRoom({ ...editingRoom, lock_no: e.target.value })} />
                 <div className="flex flex-col">
                   <label className="mb-2 text-sm font-semibold text-slate-300">Lock Type</label>
