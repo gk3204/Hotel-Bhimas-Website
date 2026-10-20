@@ -830,7 +830,27 @@ def pending_items(booking: Booking) -> list:
     ⚠️ These are ROWS, not rooms: an unsplit line carries `quantity` rooms. Use `pending_rooms`
     for anything a human counts.
     """
-    return [i for i in (booking.booking_items or []) if i.checked_in_at is None]
+    # v8e: a line released as "never arrived" at the last room's check-out carries a departure
+    # stamp and no arrival - it is closed, not still to come.
+    return [i for i in (booking.booking_items or []) if i.checked_in_at is None and i.checked_out_at is None]
+
+
+def voucher_guest_phones(db, booking_ids) -> dict:
+    """{booking_id: phone} - the GUEST's own number as printed on the OTA voucher (v8e).
+
+    Yatra / Travelguru vouchers print "Guest Phone Number +91 ..." and the parser keeps it (v6m.2);
+    Go-MMT masks the guest and leaves the draft's phone empty. Only a number that came from that
+    field is the guest's - a placeholder or a relay number never reaches `OtaDraftBooking.phone`
+    (`_keep_parsed_phone`)."""
+    ids = [int(b) for b in booking_ids if b]
+    if not ids:
+        return {}
+    from models import OtaDraftBooking
+    rows = (db.query(OtaDraftBooking.linked_booking_id, OtaDraftBooking.phone)
+            .filter(OtaDraftBooking.linked_booking_id.in_(ids),
+                    OtaDraftBooking.kind == "confirmation",
+                    OtaDraftBooking.phone.isnot(None)).all())
+    return {bid: ph for bid, ph in rows if ph}
 
 
 def pending_rooms(booking: Booking) -> int:
@@ -1641,7 +1661,11 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                     status_code=400,
                     detail="That is the placeholder the OTA booking id generated, not a phone number — "
                            "ask the guest for their own mobile.")
-            if stored_phone and _ph.same_number(lead_phone, stored_phone):
+            # v8e: ...unless the voucher printed it as the GUEST's own number. Yatra does; the desk
+            # refused the correct number and staff changed a digit to get past it (prod #741).
+            if stored_phone and _ph.same_number(lead_phone, stored_phone) and not any(
+                    _ph.same_number(lead_phone, p)
+                    for p in voucher_guest_phones(db, [booking.booking_id]).values()):
                 raise HTTPException(
                     status_code=400,
                     detail="That is the number the OTA sent with the booking, which reaches the channel "
@@ -2099,6 +2123,51 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         raise HTTPException(status_code=500, detail="Check-in failed")
 
 
+def _release_never_arrived(db: Session, booking: Booking, folios: list, user) -> list:
+    """v8e: the last room in the building is leaving and other rooms of the booking never came.
+
+    Only once their first night has passed (check-in date before today) - until then the rest of
+    the party may still turn up and the booking stays open for them. Each never-arrived line is
+    closed with a departure stamp and no arrival, so the booking can complete and its bill settle;
+    the room nights a GROUP bill posted for it at the first check-in are reversed, and so is a
+    desk discount of exactly that amount (the workaround used on #732 before this existed).
+    Per-room bills are left alone: their money was never pooled. Returns what was released."""
+    lines = [i for i in booking.booking_items if i.checked_in_at is None and i.checked_out_at is None]
+    if not lines or booking.check_in >= clock.business_today() or folio_resolver.is_per_room(booking):
+        return []
+    ids = {i.booking_item_id for i in lines}
+    fids = [f.id for f in folios]
+    voided = 0.0
+    if fids:
+        for c in db.query(FolioCharge).filter(FolioCharge.folio_id.in_(fids),
+                                              FolioCharge.booking_item_id.in_(ids),
+                                              FolioCharge.type == "room",
+                                              FolioCharge.void.is_(False),
+                                              FolioCharge.reversal_of_id.is_(None)).all():
+            _void_charge_row(db, c, "Room never arrived - released at the last check-out", user)
+            voided = round(voided + float(c.amount or 0), 2)
+        if voided > 0:
+            match = next((x for x in db.query(FolioCharge).filter(
+                FolioCharge.folio_id.in_(fids), FolioCharge.type == "discount",
+                FolioCharge.void.is_(False), FolioCharge.reversal_of_id.is_(None)).all()
+                if abs(float(x.amount or 0) + voided) < 0.01), None)
+            if match is not None:
+                _void_charge_row(db, match, "Discount for a room that never arrived - reversed with it", user)
+    _ts = clock.now_utc()
+    out = []
+    for i in lines:
+        i.checked_out_at = _ts
+        out.append({"booking_item_id": i.booking_item_id,
+                    "room_type": i.room_type.name if i.room_type else None,
+                    "quantity": int(i.quantity or 1)})
+    for f in folios:
+        _recompute(db, f)
+    db.flush()
+    logger.info(f"checkout #{booking.booking_id}: released never-arrived lines {sorted(ids)}, "
+                f"reversed Rs {voided:,.2f}")
+    return out
+
+
 @router.post("/checkout")
 def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
               user=Depends(require_reception_or_admin)):
@@ -2157,7 +2226,15 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
             leaving = list(_in_house)
         if not leaving:
             raise HTTPException(status_code=409, detail="No rooms on this booking are in-house")
-        partial = len(leaving) < len([i for i in booking.booking_items if i.checked_out_at is None])
+        # v8e (owner, room 23 / #732): "partial" means a room IN THE HOTEL stays behind. It used to
+        # count every line not yet checked out - including a room that never arrived - so the last
+        # guest in the building was charged "their share" of a group bill and refused although the
+        # bill was settled.
+        _in_house_ids = {i.booking_item_id for i in booking.booking_items if i.is_checked_in}
+        partial = bool(_in_house_ids - {i.booking_item_id for i in leaving})
+        _released = []
+        if not partial:
+            _released = _release_never_arrived(db, booking, _folios, user)
 
         # The balance that must be clear. For a PARTIAL departure it is that room's own subtotal,
         # not the family's whole bill — asking the room going home on Tuesday to settle the rooms
@@ -2351,7 +2428,7 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
 
         write_audit(db, user, "reception.checkout", "booking", booking.booking_id,
                     before=before,
-                    after={"override": override_used, "override_reason": data.override_reason,
+                    after={"released_never_arrived": _released, "override": override_used, "override_reason": data.override_reason,
                            "pay_later": pay_later, "due_amount": due_total,
                            "cards_invalidated": len(cards),
                            # v4b4: recorded whether or not the gate is armed, so "how often does
@@ -4039,6 +4116,11 @@ def _build_desk_board(db: Session):
     # which is the guest PROFILE and persists between stays - so every returning guest was
     # reported as already identified on a booking nobody had checked into yet, and the wizard
     # duly stopped asking for the ID that the scans gate then refused the check-in for.
+    from utils import phone as _ph_mod
+    _voucher_phones = voucher_guest_phones(
+        db, [r[0] for r in db.query(Booking.booking_id).filter(
+            Booking.status.in_(("confirmed", "checked_in")),
+            Booking.ota_booking_id.isnot(None)).all()])
     _lead_on_file_ids = {
         row[0] for row in db.query(BookingGuest.booking_id).filter(
             BookingGuest.is_primary.is_(True),
@@ -4047,6 +4129,8 @@ def _build_desk_board(db: Session):
 
     def _arrival_row(b):
         paid, folio_id, folio_balance = _paid_and_folio(b.booking_id)
+        _vph = _voucher_phones.get(b.booking_id)
+        _shown_phone = guest_display_phone(b)
         try:
             ev = arrival_evaluation(db, b, _now, rules=_rules)
             preview = _arrival_public(ev)
@@ -4061,7 +4145,10 @@ def _build_desk_board(db: Session):
             "guest_id": b.guest_id,
             "alternate_note": _alt,
             "guest_name": b.display_guest_name or None,
-            "phone": guest_display_phone(b),   # v6m: blank for an OTA placeholder
+            "phone": _shown_phone,   # v6m: blank for an OTA placeholder
+            # v8e: true when that phone is the guest's own number as printed on the voucher (Yatra),
+            # so the desk accepts it instead of refusing it as "the number the OTA sent".
+            "phone_is_guests": bool(_vph and _shown_phone and _ph_mod.same_number(_shown_phone, _vph)),
             # Website bookings carry a real email; surfaced so the desk pre-fills it at check-in.
             "email": guest_display_email(b),   # v6m: blank for the OTA's own address
             "check_in": str(b.check_in),
@@ -4512,6 +4599,12 @@ async def upload_guest_scan(booking_id: int, file: UploadFile = File(...),
     if not secure_id_store.allowed_mime(file.content_type):
         raise HTTPException(status_code=400, detail="Unsupported file type (use JPG/PNG/WEBP/PDF)")
     data = await file.read()
+    # v8d: refuse what cannot be an ID. 13 production check-ins (2-4 Oct) carry the same 16 x 81 px
+    # scrap of a screenshot as both "front" and "back", attached to satisfy "scans required".
+    from utils.image_size import too_small_for_an_id
+    _small = too_small_for_an_id(data, file.content_type)
+    if _small:
+        raise HTTPException(status_code=400, detail=_small)
     # v8d: encrypt + write to object storage OFF the event loop. This is an `async def`, so the
     # blocking boto3 put used to freeze the whole worker for as long as the write took (up to ~40 s
     # with the retries) - every other desk request on that worker waited behind the ID scan.
