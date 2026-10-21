@@ -131,7 +131,7 @@ const CashShiftSettings = () => {
         {detail && (
           <div className="fixed inset-0 bg-black/70 z-50 flex items-start justify-center p-4 overflow-y-auto"
                onClick={() => setDetail(null)}>
-            <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-5xl mt-10 p-5"
+            <div className="my-auto bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-5xl mt-10 p-5"
                  onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between mb-3">
                 <h3 className="text-lg font-bold text-[#E5C07B]">

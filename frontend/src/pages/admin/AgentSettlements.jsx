@@ -217,8 +217,8 @@ const AgentSettlements = () => {
 
         {/* DETAIL MODAL */}
         {detailFor && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-3xl border border-slate-700 shadow-2xl max-h-[85vh] overflow-y-auto">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-5 sm:p-8 rounded-2xl w-full max-w-3xl border border-slate-700 shadow-2xl max-h-[85dvh] overflow-y-auto">
               <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">📄 {detailFor.agent_name}</h2>
               {!detail ? (
                 <p className="text-slate-400 py-8">Loading…</p>
@@ -282,8 +282,8 @@ const AgentSettlements = () => {
 
         {/* PAYOUT MODAL */}
         {payoutFor && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-5 sm:p-8 rounded-2xl w-full max-w-md border border-slate-700 shadow-2xl">
               <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">💸 Record Payout</h2>
               <p className="text-slate-400 text-sm mb-6">{payoutFor.agent_name} — outstanding {fmt(payoutFor.outstanding)}</p>
               <div className="space-y-4">

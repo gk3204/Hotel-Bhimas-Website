@@ -272,8 +272,8 @@ const GuestDirectory = () => {
 
         {/* Profile modal */}
         {selected && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl w-full max-w-3xl text-white border border-slate-700 shadow-2xl max-h-[90vh] overflow-y-auto">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl w-full max-w-3xl text-white border border-slate-700 shadow-2xl max-h-[90dvh] overflow-y-auto">
               <div className="flex items-center justify-between p-6 border-b border-slate-700">
                 <div>
                   <h2 className="text-2xl font-bold text-[#E5C07B]">{selected.guest.name}</h2>

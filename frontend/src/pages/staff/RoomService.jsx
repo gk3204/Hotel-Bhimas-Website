@@ -570,8 +570,8 @@ export default function RoomService() {
 
       {/* Cancel an order (v4b5): reason always, owner code when the gate is armed. */}
       {cancelTarget && (
-        <div className="fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center p-4">
-          <div className="w-full max-w-md rounded-2xl bg-slate-800 border border-slate-700 p-5">
+        <div className="fixed inset-0 overflow-y-auto z-50 bg-black/70 flex items-end sm:items-center justify-center p-4">
+          <div className="my-auto w-full max-w-md rounded-2xl bg-slate-800 border border-slate-700 p-5">
             <h3 className="text-lg font-bold text-white">
               Cancel {cancelTarget.kot_no || `#${cancelTarget.id}`}?
             </h3>

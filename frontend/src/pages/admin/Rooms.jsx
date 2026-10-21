@@ -318,8 +318,8 @@ const Rooms = () => {
 
         {/* HISTORY MODAL (FE-8) */}
         {historyRoom && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4" onClick={() => setHistoryRoom(null)}>
-            <div className="bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-3xl max-h-[88vh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
+          <div className="fixed inset-0 overflow-y-auto bg-black/60 flex items-start justify-center z-40 p-4" onClick={() => setHistoryRoom(null)}>
+            <div className="my-auto bg-slate-800 border border-slate-700 rounded-2xl w-full max-w-3xl max-h-[88dvh] overflow-y-auto" onClick={(e) => e.stopPropagation()}>
               <div className="flex items-center justify-between p-6 border-b border-slate-700 sticky top-0 bg-slate-800">
                 <h2 className="text-2xl font-bold text-[#E5C07B]">Room {historyRoom.room_number} — history</h2>
                 <button onClick={() => setHistoryRoom(null)} className="text-slate-400 hover:text-white text-xl" title="Close">✕</button>
@@ -370,8 +370,8 @@ const Rooms = () => {
 
         {/* EDIT MODAL */}
         {editingRoom && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4">
-            <div className="bg-slate-800 border border-slate-700 rounded-2xl p-8 w-full max-w-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/60 flex items-start justify-center z-40 p-4">
+            <div className="my-auto bg-slate-800 border border-slate-700 rounded-2xl p-5 sm:p-8 w-full max-w-2xl">
               <h2 className="text-2xl font-bold mb-6 text-[#E5C07B]">Edit Room {editingRoom.room_number}</h2>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 <InputField label="Room Number" value={editingRoom.room_number}

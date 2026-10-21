@@ -85,45 +85,21 @@ const REPORTS = {
     label: "Cashier Summary",
     path: "cashier-summary",
     range: true,   // v7h: one day, or the dates you pick
-    note: "Front-office collections for the dates picked, grouped by payment mode with Guest check-out bills / Advance receipts / Paid-outs, plus unsettled and nil-amount checkouts, every invoice raised, and the rooms in house.",
+    note: "Front-office collections for the dates picked: one row per receipt / voucher in receipt-number order (RCPT, then refunds RFND, expenses EXP and prepaid memos PRE), its amount in its payment-mode column (Cash, UPI, Card, Bank ...; paid-outs negative), then unsettled and nil-amount checkouts, every invoice raised, and the rooms in house.",
     fetch: (p) => api.getCashierSummary(p),
+    // v8h (owner): payment modes as COLUMNS, ordered by receipt number - the server builds the
+    // same table for the PDF / CSV / shift report, so the page shows exactly that
     project: (d) => {
-      const rows = [];
-      (d.modes || []).forEach((m) => {
-        rows.push({ kind: "section", label: m.label });
-        (m.sections || []).forEach((sec) => {
-          rows.push({ kind: "section", label: `  ${sec.label}` });
-          // v7n: a Source column; the server sends each section in document-number order
-          sec.rows.forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room,
-            [x.guest, x.booking_id ? `#${x.booking_id}` : ""].filter(Boolean).join(" · "), x.source || "",
-            x.receipt ? fmt(x.receipt) : "", x.payment ? fmt(x.payment) : "", balCell(x),
-            x.cr_no, x.remarks || "", x.user || ""]));
-        });
-        rows.push({ kind: "subtotal", cells: [`Total (${m.label})`, "", "", "", "", "",
-          fmt(m.receipt), fmt(m.payment), "", "", m.memo ? "MEMO - not in grand total" : "", ""] });
-      });
-      if ((d.unsettled || []).length) rows.push({ kind: "section", label: "Unsettled Checkout Bills" });
-      (d.unsettled || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "", "UNSETTLED", x.user || ""]));
-      // v7s (owner): agent bills the guest pays later - shown as DUE, not balance
-      if ((d.due_bills || []).length) rows.push({ kind: "section", label: `Due Bills - Pay Later (${d.due_bills.length}) - ${fmt(d.due_bills_total)}` });
-      (d.due_bills || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", x.source || "", "", "",
-        `DUE ${fmt(x.due)}`, "", `PAY LATER${x.agent ? ` - ${x.agent}` : ""}${x.due_outstanding ? "" : " (since paid)"}`, x.user || ""]));
-      if ((d.nil_checkouts || []).length) rows.push({ kind: "section", label: "Checkout Bills With Nil Amount" });
-      (d.nil_checkouts || []).forEach((x) => rows.push([x.bill_no, x.date || "", x.time || "", x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "", "NIL", x.user || ""]));
-      // v7h: every invoice raised in the period
-      if ((d.invoices || []).length) rows.push({ kind: "section", label: `Invoices Raised (${d.invoices.length}) - ${fmt(d.invoices_total)}` });
-      (d.invoices || []).forEach((x) => rows.push([x.bill_no, x.date, x.time, x.room, x.guest || "", x.source || "", "", "", balCell(x), "",
-        `INVOICE ${fmt(x.amount)}${x.prepaid ? ` (prepaid ${fmt(x.prepaid)})` : ""}`, x.user || ""]));
-      // v7e: rooms in house (end of the day / now)
-      if ((d.in_house || []).length) rows.push({ kind: "section", label: `Rooms In House (${d.in_house.length})` });
-      (d.in_house || []).forEach((x) => rows.push([`#${x.booking_id}`, (x.checked_in || "").split(" ")[0], (x.checked_in || "").split(" ")[1] || "",
-        x.room, x.guest || "", x.source || "", "", "", fmt(x.balance), "", `IN HOUSE - out ${x.check_out || ""}`, ""]));
+      const t = d.table || { columns: [], rows: [], totals: [] };
+      const money = new Set(t.columns.map((c, i) => [c, i]).filter(([c]) =>
+        !["Receipt / Vou", "Bill", "Date", "Time", "Room", "Guest", "Source", "Type", "Balance", "CR No", "Remarks", "User"].includes(c))
+        .map(([, i]) => i));
+      const cell = (v, i) => (money.has(i) && typeof v === "number" ? fmt(v) : v ?? "");
       return {
-        columns: ["Bill/Vou", "Date", "Time", "Room", "Guest", "Source", "Receipt", "Payment", "Balance",
-          "CR No", "Remarks", "User"],
-        rows,
-        totals: ["GRAND TOTAL", "", "", "", "", "", fmt(d.grand.receipt), fmt(d.grand.payment), "", "",
-          `net ${fmt(d.grand.net)}`, ""],
+        columns: t.columns,
+        rows: t.rows.map((r) => (Array.isArray(r) ? r.map(cell)
+          : { kind: "section", label: r.section })),
+        totals: (t.totals || []).map(cell),
       };
     },
   },

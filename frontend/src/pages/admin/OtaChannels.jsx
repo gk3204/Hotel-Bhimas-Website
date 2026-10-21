@@ -774,7 +774,7 @@ const DraftsTab = ({ showToast }) => {
 
       {confirmFor && createPortal(
         <div className="fixed inset-0 z-[100] flex items-start sm:items-center justify-center bg-black/60 p-4 overflow-y-auto">
-          <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg p-6 my-8 max-h-[90vh] overflow-y-auto">
+          <div className="bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl w-full max-w-lg p-6 my-8 max-h-[90dvh] overflow-y-auto">
             <h3 className="text-xl font-bold text-[#E5C07B] mb-1">Confirm OTA booking</h3>
             <p className="text-slate-400 text-sm mb-2">
               {CHANNEL_LABEL[confirmFor.channel_code]} · {confirmFor.ota_booking_id || "no OTA id"} — creates a real

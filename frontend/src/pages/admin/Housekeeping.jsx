@@ -215,8 +215,8 @@ export default function Housekeeping() {
 
         {/* INSPECT MODAL (ALT-7): the inspector confirms, names both parties, adds comments */}
         {inspectTarget && (
-          <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-40 p-4" onClick={() => setInspectTarget(null)}>
-            <div className="bg-slate-800 border border-slate-700 rounded-2xl p-7 w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
+          <div className="fixed inset-0 overflow-y-auto bg-black/60 flex items-start justify-center z-40 p-4" onClick={() => setInspectTarget(null)}>
+            <div className="my-auto bg-slate-800 border border-slate-700 rounded-2xl p-7 w-full max-w-lg" onClick={(e) => e.stopPropagation()}>
               <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">Inspect Room {inspectTarget.room_number}</h2>
               <p className="text-slate-400 text-sm mb-5">
                 Confirm the room is ready for re-sale. You are signing this off; it is recorded.

@@ -222,8 +222,8 @@ const Rooms = () => {
 
       {/* ================= MODAL ================= */}
       {showModal && activeRoom && (
-        <div className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-50 p-4 animate-fade">
-          <div className="bg-white max-w-3xl w-full max-h-[90vh] overflow-y-auto rounded-3xl shadow-2xl relative flex flex-col">
+        <div className="fixed inset-0 overflow-y-auto bg-black/60 backdrop-blur-sm flex items-start justify-center z-50 p-4 animate-fade">
+          <div className="my-auto bg-white max-w-3xl w-full max-h-[90dvh] overflow-y-auto rounded-3xl shadow-2xl relative flex flex-col">
 
             <button
               onClick={() => setShowModal(false)}

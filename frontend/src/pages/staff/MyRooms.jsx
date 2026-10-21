@@ -274,8 +274,8 @@ function MinibarModal({ room, onClose, onDone, onError }) {
   };
 
   return (
-    <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-      <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-2xl w-full max-w-sm border border-slate-700 shadow-2xl">
+    <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+      <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-6 rounded-2xl w-full max-w-sm border border-slate-700 shadow-2xl">
         <h2 className="text-xl font-bold mb-4 text-[#E5C07B] flex items-center gap-2">
           <FaWineBottle /> Minibar — Room {room.room_number}
         </h2>

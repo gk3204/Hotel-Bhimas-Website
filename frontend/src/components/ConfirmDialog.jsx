@@ -40,12 +40,12 @@ export function ConfirmProvider({ children }) {
     <ConfirmContext.Provider value={{ confirm, notify }}>
       {children}
       {state && (
-        <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+        <div className="fixed inset-0 overflow-y-auto z-[100] flex items-start justify-center p-4">
           <div
             className="absolute inset-0 bg-black/60 backdrop-blur-sm"
             onClick={() => settle(state.mode === "notify" ? undefined : false)}
           />
-          <div className="relative w-full max-w-md bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl p-6">
+          <div className="my-auto relative w-full max-w-md bg-slate-800 border border-slate-700 rounded-2xl shadow-2xl p-6">
             <div className="flex items-start gap-4">
               <div
                 className={`shrink-0 h-11 w-11 rounded-full flex items-center justify-center ${

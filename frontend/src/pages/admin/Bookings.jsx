@@ -659,8 +659,8 @@ const Bookings = () => {
 
         {/* ── VIEW MODAL ── */}
         {selectedBooking && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl w-full max-w-2xl max-h-[90vh] overflow-hidden flex flex-col text-white border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 rounded-2xl w-full max-w-2xl max-h-[90dvh] overflow-hidden flex flex-col text-white border border-slate-700 shadow-2xl">
 
               {/* Modal Header */}
               <div className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] p-6 flex-shrink-0">
@@ -878,8 +878,8 @@ const Bookings = () => {
 
         {/* v6m: admin edit dialog */}
         {edit && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-7 rounded-2xl w-full max-w-2xl text-white border border-slate-700 shadow-2xl max-h-[92vh] overflow-y-auto">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-7 rounded-2xl w-full max-w-2xl text-white border border-slate-700 shadow-2xl max-h-[92dvh] overflow-y-auto">
               <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">Edit booking #{edit.booking.booking_id}</h2>
               <p className="text-sm text-slate-400 mb-4">
                 {edit.booking.guest_name} · {edit.booking.check_in} → {edit.booking.check_out} · {edit.booking.status}.
@@ -979,8 +979,8 @@ const Bookings = () => {
         {/* ── ADMIN CANCELLATION MODAL ── */}
         {/* v5m: admin re-date dialog */}
         {redate && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-5 sm:p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
               <h2 className="text-2xl font-bold mb-2 text-[#E5C07B]">Re-date arrival</h2>
               <p className="text-sm text-slate-400 mb-5">
                 Booking #{redate.booking.booking_id} - {redate.booking.guest_name} - booked {redate.booking.check_in} to {redate.booking.check_out}.
@@ -1029,8 +1029,8 @@ const Bookings = () => {
         )}
 
         {adminCancelBookingId && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-5 sm:p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
               <div className="text-red-400 text-3xl mb-4">⚠️</div>
               <h2 className="text-2xl font-bold mb-6 text-[#E5C07B]">
                 Cancel Booking
@@ -1352,9 +1352,9 @@ function OccupantsCard({ bookingId }) {
       {scanError && <p className="text-red-300 text-sm mt-3">{scanError}</p>}
 
       {scan && (
-        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-[60] p-6"
+        <div className="fixed inset-0 overflow-y-auto bg-black/70 flex items-start justify-center z-[60] p-6"
              onClick={closeScan}>
-          <div className="bg-slate-800 border border-slate-600 rounded-xl p-4 max-w-3xl max-h-full overflow-auto"
+          <div className="my-auto bg-slate-800 border border-slate-600 rounded-xl p-4 max-w-3xl max-h-full overflow-auto"
                onClick={(e) => e.stopPropagation()}>
             <div className="flex items-center justify-between mb-3">
               <h4 className="font-bold text-[#E5C07B]">
@@ -1371,7 +1371,7 @@ function OccupantsCard({ bookingId }) {
                       className="w-[70vw] h-[70vh] bg-white rounded" />
             ) : (
               <img src={scan.url} alt={`ID scan (${scan.side || "front"}) for ${scan.name}`}
-                   className="max-w-full max-h-[70vh] rounded" />
+                   className="max-w-full max-h-[70dvh] rounded" />
             )}
           </div>
         </div>

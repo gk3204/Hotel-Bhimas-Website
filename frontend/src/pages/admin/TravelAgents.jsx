@@ -239,8 +239,8 @@ const TravelAgents = () => {
 
         {/* EDIT MODAL */}
         {editing && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-5 sm:p-8 rounded-2xl w-full max-w-md border border-slate-700 shadow-2xl">
               <h2 className="text-2xl font-bold mb-6 text-[#E5C07B]">✏️ Edit Agent</h2>
               <div className="space-y-4">
                 <Field label="Agent Name" value={editing.name} onChange={(e) => setEditing({ ...editing, name: e.target.value })} />
@@ -259,8 +259,8 @@ const TravelAgents = () => {
 
         {/* RATE-CARD MODAL */}
         {ratesFor && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-2xl border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-5 sm:p-8 rounded-2xl w-full max-w-2xl border border-slate-700 shadow-2xl">
               <h2 className="text-2xl font-bold mb-1 text-[#E5C07B]">🏷️ Negotiated Rates — {ratesFor.name}</h2>
               <p className="text-slate-400 text-sm mb-6">Per-night rates (GST-exclusive). Leave dates blank for an always-on rate.</p>
 
@@ -317,8 +317,8 @@ const TravelAgents = () => {
 
         {/* DELETE CONFIRM */}
         {confirmDeleteId && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-sm border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-5 sm:p-8 rounded-2xl w-full max-w-sm border border-slate-700 shadow-2xl">
               <h2 className="text-xl font-bold mb-3 text-red-300">Delete this agent?</h2>
               <p className="text-slate-400 mb-6">This removes the agent and its rate cards. Agents referenced by bookings can't be deleted — deactivate them instead.</p>
               <div className="flex justify-end gap-4">

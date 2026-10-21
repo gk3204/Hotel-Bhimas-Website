@@ -1325,6 +1325,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             elif is_checkout:
                 inv = _get_invoice(db, folio.id) if folio else None
                 mm["checkout"].append({**base, "bill_no": (inv.invoice_no if inv else f"F{folio.id}" if folio else "—"),
+                                       "receipt_no": f"RCPT-{p.payment_id}",   # v8h: listed by receipt number
                                        "receipt": round(amt, 2), "payment": 0.0,
                                        "remarks": (p.collect_method or "").upper() or "CHECKOUT"})
             else:
@@ -1575,63 +1576,106 @@ def _is_checkout_receipt(p, b, db=None, _cache=None) -> bool:
 _SETTLE_WINDOW = timedelta(hours=1)        # v7t (owner): 1 h before the actual check-out
 
 
-def _cashier_table(data):
-    """Flatten the grouped cashier summary into (columns, rows, totals) for the CSV/PDF export —
-    mode + section header rows, then detail rows, then a per-mode total, then unsettled / nil sections."""
-    cols = ["Bill/Vou", "Date", "Time", "Room", "Guest", "Source", "Receipt", "Payment", "Balance",
-            "CR No", "Remarks", "User"]
+# v8h (owner, 21 Oct): "payment source like UPI, cash, bank as COLUMNS rather than split by rows, and
+# order all bills by receipt number". One row per receipt / voucher, its amount in its mode's column
+# (paid-outs negative), a Total column, and everything in receipt-number order: RCPT-n first, then
+# the refund vouchers (RFND), the expenses (EXP) and the prepaid memos (PRE).
+_CASHIER_KIND = {"checkout": "Check-out", "due": "Due received", "advance": "Advance",
+                 "paidout": "Paid out", "prepaid": "Prepaid (memo)"}
+_SERIES_RANK = {"RCPT": 0, "RFND": 1, "EXP": 2, "PRE": 3}
+# the column heading and left-to-right order of each payment mode (memo modes last, never in Total)
+_CASHIER_MODE_COLS = {"cash": "Cash", "upi": "UPI", "card": "Card", "bank": "Bank",
+                      "online": "Online", "other": "Other", "prepaid": "Prepaid (memo)"}
+_CASHIER_MODE_ORDER = list(_CASHIER_MODE_COLS)
 
-    def _sub(label):
+
+def _mode_col(m):
+    return _CASHIER_MODE_COLS.get(m["mode"]) or (m["label"] + (" (memo)" if m.get("memo") else ""))
+
+
+def _receipt_order_key(no):
+    import re
+    m = re.match(r"([A-Za-z]+)", str(no or ""))
+    return (_SERIES_RANK.get(m.group(1).upper() if m else "", 4), doc_number_key(no))
+
+
+def _cashier_table(data):
+    """The cashier summary as (columns, rows, totals) for the PDF / CSV / web / shift report: one row
+    per receipt or voucher with the payment modes as COLUMNS (v8h), then the unsettled / due / nil /
+    invoices / in-house sections. A memo mode (money prepaid to the channel) has its own column and
+    is never added to the Total."""
+    modes = sorted(data["modes"], key=lambda m: (bool(m.get("memo")), _CASHIER_MODE_ORDER.index(m["mode"])
+                                                 if m["mode"] in _CASHIER_MODE_ORDER else 99, m["mode"]))
+    mode_cols = [_mode_col(m) for m in modes]
+    lead = ["Receipt / Vou", "Bill", "Date", "Time", "Room", "Guest", "Source", "Type"]
+    tail = ["Total", "Balance", "CR No", "Remarks", "User"]
+    cols = lead + mode_cols + tail
+    ix = {c: i for i, c in enumerate(cols)}
+
+    def _row(**kw):
         r = [""] * len(cols)
-        r[0] = label
+        for k, v in kw.items():
+            r[ix[k]] = v
         return r
-    rows = []
-    for md in data["modes"]:
-        rows.append({"section": md["label"]})
+
+    money = []
+    for md in modes:
+        col = _mode_col(md)
         for sec in md["sections"]:
-            rows.append({"section": f"   {sec['label']}"})
             for x in sec["rows"]:
+                amt = round(float(x.get("receipt") or 0) - float(x.get("payment") or 0), 2)
+                rec = x.get("receipt_no") or x["bill_no"]
                 guest = " · ".join(str(v) for v in (x.get("guest"), f"#{x['booking_id']}" if x.get("booking_id") else None) if v)
-                rows.append([x["bill_no"], x["date"], x["time"], x["room"], guest, x.get("source") or "",
-                             x["receipt"] or "", x["payment"] or "", _bal_cell(x), x["cr_no"],
-                             x["remarks"] or "", x["user"] or ""])
-        tr = _sub(f"Total ({md['label']})")
-        tr[6], tr[7] = md["receipt"], md["payment"]
-        if md.get("memo"):
-            tr[10] = "MEMO - not in grand total"
-        rows.append({"subtotal": tr})
+                r = _row(**{"Receipt / Vou": rec, "Bill": x["bill_no"] if x["bill_no"] != rec else "",
+                            "Date": x["date"], "Time": x["time"], "Room": x["room"], "Guest": guest,
+                            "Source": x.get("source") or "", "Type": _CASHIER_KIND.get(sec["key"], sec["label"]),
+                            col: amt, "Total": "" if md.get("memo") else amt, "Balance": _bal_cell(x),
+                            "CR No": x.get("cr_no") or "", "Remarks": x.get("remarks") or "",
+                            "User": x.get("user") or ""})
+                money.append((_receipt_order_key(rec), r))
+    rows = [r for _k, r in sorted(money, key=lambda t: t[0])]
+
+    def _sec(label, items):
+        rows.append({"section": label})
+        rows.extend(items)
+
     if data["unsettled"]:
-        rows.append({"section": "Unsettled Checkout Bills"})
-        for x in data["unsettled"]:
-            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "",
-                         x.get("source") or "", "", "", x["balance"], "", "UNSETTLED", x.get("user") or ""])
+        _sec("Unsettled Checkout Bills", [_row(**{"Bill": x["bill_no"], "Date": x.get("date", ""), "Time": x.get("time", ""),
+                                                  "Room": x["room"], "Guest": x["guest"] or "", "Source": x.get("source") or "",
+                                                  "Balance": x["balance"], "Remarks": "UNSETTLED", "User": x.get("user") or ""})
+                                            for x in data["unsettled"]])
     if data.get("due_bills"):
         # v7s (owner): agent bills the guest will pay later - DUE, not balance
-        rows.append({"section": f"Due Bills - Pay Later ({len(data['due_bills'])}) - Rs {data.get('due_bills_total', 0):,.2f}"})
-        for x in data["due_bills"]:
-            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "",
-                         x.get("source") or "", "", "", f"DUE {x['due']:,.2f}", "",
-                         "PAY LATER" + (f" - {x['agent']}" if x.get("agent") else "")
-                         + ("" if x.get("due_outstanding") else " (since paid)"), x.get("user") or ""])
+        _sec(f"Due Bills - Pay Later ({len(data['due_bills'])}) - Rs {data.get('due_bills_total', 0):,.2f}",
+             [_row(**{"Bill": x["bill_no"], "Date": x.get("date", ""), "Time": x.get("time", ""), "Room": x["room"],
+                      "Guest": x["guest"] or "", "Source": x.get("source") or "", "Balance": f"DUE {x['due']:,.2f}",
+                      "Remarks": "PAY LATER" + (f" - {x['agent']}" if x.get("agent") else "")
+                                 + ("" if x.get("due_outstanding") else " (since paid)"),
+                      "User": x.get("user") or ""}) for x in data["due_bills"]])
     if data["nil_checkouts"]:
-        rows.append({"section": "Checkout Bills With Nil Amount"})
-        for x in data["nil_checkouts"]:
-            rows.append([x["bill_no"], x.get("date", ""), x.get("time", ""), x["room"], x["guest"] or "",
-                         x.get("source") or "", "", "", x["balance"], "", "NIL", x.get("user") or ""])
+        _sec("Checkout Bills With Nil Amount", [_row(**{"Bill": x["bill_no"], "Date": x.get("date", ""), "Time": x.get("time", ""),
+                                                        "Room": x["room"], "Guest": x["guest"] or "", "Source": x.get("source") or "",
+                                                        "Balance": x["balance"], "Remarks": "NIL", "User": x.get("user") or ""})
+                                                  for x in data["nil_checkouts"]])
     if data.get("invoices"):
-        rows.append({"section": f"Invoices Raised ({len(data['invoices'])}) - Rs {data.get('invoices_total', 0):,.2f}"})
-        for x in data["invoices"]:
-            rem = f"INVOICE Rs {x['amount']:,.2f}" + (f" (prepaid {x['prepaid']:,.2f})" if x.get("prepaid") else "")
-            rows.append([x["bill_no"], x["date"], x["time"], x["room"], x.get("guest") or "", x.get("source") or "",
-                         "", "", _bal_cell(x), "", rem, x.get("user") or ""])
+        _sec(f"Invoices Raised ({len(data['invoices'])}) - Rs {data.get('invoices_total', 0):,.2f}",
+             [_row(**{"Bill": x["bill_no"], "Date": x["date"], "Time": x["time"], "Room": x["room"],
+                      "Guest": x.get("guest") or "", "Source": x.get("source") or "", "Balance": _bal_cell(x),
+                      "Remarks": f"INVOICE Rs {x['amount']:,.2f}" + (f" (prepaid {x['prepaid']:,.2f})" if x.get("prepaid") else ""),
+                      "User": x.get("user") or ""}) for x in data["invoices"]])
     if data.get("in_house"):
-        rows.append({"section": f"Rooms In House ({len(data['in_house'])})"})
-        for x in data["in_house"]:
+        def _ih(x):
             _d, _t = (x.get("checked_in") or " ").split(" ", 1) if x.get("checked_in") else ("", "")
-            rows.append([f"#{x['booking_id']}", _d, _t, x["room"], x.get("guest") or "", x.get("source") or "",
-                         "", "", x["balance"], "", f"IN HOUSE - out {x.get('check_out') or ''}", ""])
+            return _row(**{"Bill": f"#{x['booking_id']}", "Date": _d, "Time": _t, "Room": x["room"],
+                           "Guest": x.get("guest") or "", "Source": x.get("source") or "", "Balance": x["balance"],
+                           "Remarks": f"IN HOUSE - out {x.get('check_out') or ''}"})
+        _sec(f"Rooms In House ({len(data['in_house'])})", [_ih(x) for x in data["in_house"]])
+
     g = data["grand"]
-    totals = ["GRAND TOTAL", "", "", "", "", "", g["receipt"], g["payment"], "", "", f"net {g['net']}", ""]
+    totals = _row(**{"Receipt / Vou": "GRAND TOTAL", "Total": g["net"],
+                     "Remarks": f"in {g['receipt']:,.2f} / out {g['payment']:,.2f}"})
+    for m in modes:
+        totals[ix[_mode_col(m)]] = m["net"] if not m.get("memo") else m["receipt"]
     return cols, rows, totals
 
 
@@ -2758,6 +2802,7 @@ def cashier_summary_report(day: str | None = Query(None), from_: str | None = Qu
         d2 = d
     data = cashier_summary_data(db, d, d2)
     cols, rows, totals = _cashier_table(data)
+    data["table"] = {"columns": cols, "rows": rows, "totals": totals}   # v8h: the web shows this exact table
     meta = {("Day" if d == d2 else "Period"): (f"{d:%d-%m-%Y}" if d == d2 else f"{d:%d-%m-%Y} to {d2:%d-%m-%Y}"),
             "Unsettled bills": len(data["unsettled"]), "Invoices": len(data.get("invoices", [])), **_meta()}
     return _export_or_json(format, data, title="Front-Office Cashier Summary", columns=cols,

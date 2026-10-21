@@ -51,7 +51,7 @@ const Header = () => {
 
       {/* Right Side Drawer */}
       <div
-        className={`fixed top-0 right-0 h-full w-64 bg-[#0F172A] z-50
+        className={`fixed top-0 right-0 h-full overflow-y-auto w-64 bg-[#0F172A] z-50
         transform transition-transform duration-300 ease-in-out
         ${menuOpen ? "translate-x-0" : "translate-x-full"}`}
       >

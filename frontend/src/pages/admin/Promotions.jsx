@@ -315,8 +315,8 @@ const Promotions = () => {
 
         {/* EDIT MODAL */}
         {editing && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-gradient-to-br from-slate-800 to-slate-900 p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-gradient-to-br from-slate-800 to-slate-900 p-5 sm:p-8 rounded-2xl w-full max-w-md text-white border border-slate-700 shadow-2xl">
               <h2 className="text-2xl font-bold mb-6 text-[#E5C07B]">✏️ Edit Promotion</h2>
               <div className="space-y-4">
                 <Field label="Promotion Name">
@@ -397,8 +397,8 @@ const Promotions = () => {
 
         {/* DELETE CONFIRM */}
         {confirmDeleteId && (
-          <div className="fixed inset-0 bg-black/70 backdrop-blur-sm flex items-center justify-center z-50 p-4">
-            <div className="bg-slate-800 p-8 rounded-2xl w-full max-w-sm text-white border border-slate-700 shadow-2xl">
+          <div className="fixed inset-0 overflow-y-auto bg-black/70 backdrop-blur-sm flex items-start justify-center z-50 p-4">
+            <div className="my-auto bg-slate-800 p-5 sm:p-8 rounded-2xl w-full max-w-sm text-white border border-slate-700 shadow-2xl">
               <h3 className="text-xl font-bold mb-4">Delete this promotion?</h3>
               <p className="text-slate-400 mb-6">This action cannot be undone.</p>
               <div className="flex justify-end gap-4">
