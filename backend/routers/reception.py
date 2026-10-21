@@ -653,6 +653,16 @@ def lock_room_no(room: Room) -> int:
     return rr
 
 
+def lock_room_or_none(room: Room):
+    """v8g: the room number on the door's lock, or None for a room a card cannot be cut for. The
+    desk builds a card code itself for extra / lost cards and offline check-ins - it must use the
+    lock's number (rooms.lock_no) exactly as the server does, not the room's own number."""
+    try:
+        return lock_room_no(room) if (room.lock_type or "card") != "key" else None
+    except HTTPException:
+        return None
+
+
 def _room_code(room: Room) -> str:
     """BBFFRRAA code written to the card (area fixed at 99 for this property) - the LOCK's code."""
     rr = lock_room_no(room)
@@ -3040,6 +3050,18 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
                   "folio_balance": float(folio.balance or 0)}
 
         item.room_id = new_room.room_id
+        # v8g (owner): the invoice printed the OLD room after a shift. Room nights are posted at
+        # check-in as "Room 29 · Double Deluxe Ac x1 — 18 Oct", and the invoice prints each line as
+        # written. The nights from today on are this room's now; nights already slept in the old
+        # room keep its number. Only the label moves - the type and the price are untouched.
+        _shift_date = clock.now_local().date()
+        _old_tag, _new_tag = f"Room {old_room.room_number} · ", f"Room {new_room.room_number} · "
+        for _c in db.query(FolioCharge).filter(FolioCharge.booking_item_id == item.booking_item_id,
+                                               FolioCharge.type == "room",
+                                               FolioCharge.void.is_(False),
+                                               FolioCharge.reversal_of_id.is_(None)).all():
+            if _c.charge_date and _c.charge_date >= _shift_date and (_c.description or "").startswith(_old_tag):
+                _c.description = _new_tag + _c.description[len(_old_tag):]
         if is_alt_sale:
             # v4b7: an ALTERNATE-type sale is not a re-sale. The guest keeps the type (and the
             # price) they booked; only the physical room differs, which is the hotel's
@@ -4206,6 +4228,7 @@ def _build_desk_board(db: Session):
                 "room_number": i.room.room_number,
                 "building": lock_building_floor(i.room)[0],   # v8c: what the desk encodes with
                 "floor": lock_building_floor(i.room)[1],
+                "lock_room": lock_room_or_none(i.room),       # v8g
                 "max_cards": i.room.max_cards,
                 "active_cards": int(_active_cards_by_room.get(i.room.room_id, 0)),
                 "lock_type": i.room.lock_type,
@@ -4322,6 +4345,7 @@ def _build_desk_board(db: Session):
                         "room_number": room.room_number,
                         "building": lock_building_floor(room)[0],   # v8c: what the desk encodes with
                         "floor": lock_building_floor(room)[1],
+                        "lock_room": lock_room_or_none(room),       # v8g
                         "max_cards": room.max_cards,
                         "active_cards": int(_active_cards_by_room.get(room.room_id, 0)),
                         "lock_type": room.lock_type,   # key rooms skip card read/erase at checkout
@@ -4391,6 +4415,7 @@ def _build_desk_board(db: Session):
         "alt_room_type_name": _rt_names.get(r.alt_room_type_id),
         "building": lock_building_floor(r)[0],   # v8c: the desk builds the card code from these
         "floor": lock_building_floor(r)[1],
+        "lock_room": lock_room_or_none(r),       # v8g
         "max_cards": r.max_cards,
         "lock_type": r.lock_type,
     } for r, rt in db.query(Room, RoomType).outerjoin(

@@ -307,6 +307,20 @@ def _room_subtotals(charges, rooms_by_item, rooms_by_id) -> list:
     return out
 
 
+def _expected_checkout(booking, folio):
+    """This bill's expected check-out moment (local ISO), or None before the stay has begun."""
+    if not booking or not booking.checked_in_at:
+        return None
+    try:
+        from routers.reception import booking_checkout_moment
+        item = next((i for i in booking.booking_items if folio.booking_item_id
+                     and i.booking_item_id == folio.booking_item_id), None)
+        m = booking_checkout_moment(booking, item=item)
+        return m.isoformat() if m else None
+    except Exception:
+        return None
+
+
 def _folio_detail(db: Session, folio: Folio):
     """Shared response builder: folio + booking/guest summary + all lines + GST totals."""
     from routers.payments import prepaid_slice      # local: payments imports this module
@@ -357,6 +371,10 @@ def _folio_detail(db: Session, folio: Folio):
         "check_in_time": str(booking.check_in_time) if booking and booking.check_in_time else None,
         "checked_in_at": booking.checked_in_at.isoformat() if booking and booking.checked_in_at else None,
         "checked_out_at": clock.to_local(booking.checked_out_at).isoformat() if booking and booking.checked_out_at else None,
+        # v8g (owner): the folio header shows when the guest is EXPECTED to leave - the same moment
+        # that sets the card expiry (24h from arrival, or the fixed check-out hour), per room for a
+        # per-room bill. None before arrival.
+        "expected_check_out": _expected_checkout(booking, folio),
         "booking_status": booking.status if booking else None,
         # v4b6: so the bill header can say "Complimentary" before anyone asks for money.
         "comp_mode": (getattr(booking, "comp_mode", "none") or "none") if booking else "none",

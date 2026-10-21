@@ -106,8 +106,12 @@ def no_show(booking_id: int, data: NoShowRequest = Body(default=NoShowRequest())
     # v7i (owner, after prod #637): reception marked a PREPAID Yatra stay a no-show and re-sold the
     # guest a walk-in, so the guest paid twice. A no-show at the desk now needs the owner's code;
     # an admin login decides on its own. The code must have been issued for THIS booking.
+    # v8g (owner, 21 Oct): ...except an OTA booking - the channel itself reports the no-show and
+    # settles it, so the desk marks it without a code (still only after the expected arrival, and
+    # still audited). Walk-in / website / agent bookings keep the owner's code.
+    from services import ota_service
     otp = None
-    if (user or {}).get("role") != "admin":
+    if (user or {}).get("role") != "admin" and not ota_service.is_ota_source(b.booking_source, db):
         otp = consume_otp_for_booking(db, data.otp_id, data.otp_code, "no_show", b.booking_id, user)
     mark_no_show(db, b, user, reason=data.reason, client="desktop",
                  approval_otp_id=(otp.id if otp is not None else None))
