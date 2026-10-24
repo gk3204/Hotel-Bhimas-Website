@@ -4054,6 +4054,55 @@ def reverse_overstay(booking_id: int, data: ReverseOverstayRequest,
         raise HTTPException(status_code=500, detail="Reversing the overstay charge failed")
 
 
+# ---- Arrival report (owner, 21 Oct): everyone due on one date, unconfirmed included ----
+@router.get("/arrival-report", dependencies=[Depends(require_reception_or_admin)])
+def arrival_report(day: str | None = Query(None, alias="date", description="YYYY-MM-DD; default today"),
+                   format: str = Query("json"), db: Session = Depends(get_db)):
+    """One row per room due on `date`, with an advisory suggested room (services/room_suggest.py).
+    `format=pdf` prints it through the same table PDF as every other report."""
+    from services.arrival_report import build_arrival_report
+    from routers.reports import _export_or_json, _meta
+    try:
+        d = date.fromisoformat(day) if day else clock.business_today()
+    except ValueError:
+        raise HTTPException(status_code=400, detail="date must be YYYY-MM-DD")
+    data = build_arrival_report(db, d)
+    # Printed on paper: short cells, a second line where a cell needs one ("\n" breaks the line).
+    cols = ["Exp. in", "Status", "Guest", "Room type", "Suggested", "Source / Ref", "Out", "Nts", "Pax",
+            "Total", "Prepaid", "Paid", "Balance"]
+    short = {"ota_draft": "OTA draft", "ota_draft_flagged": "OTA draft (flagged)",
+             "payment_pending": "payment pending"}
+
+    def _money(v):
+        return "" if v is None else f"{v:,.0f}"
+
+    def _out(s_):
+        try:
+            return f"{date.fromisoformat(s_):%d %b}"
+        except (TypeError, ValueError):
+            return ""
+    rows = []
+    for r in data["rows"]:
+        status = r["status_label"] + (f"\n{short[r['unconfirmed_reason']]}" if r["unconfirmed_reason"] else "")
+        room = (f"In {r['room_number']}" if r["status"] == "arrived"
+                else (r["suggested_room"] or "-") + (f"\n{r['suggested_reason']}" if r["suggested_reason"] else ""))
+        ref = r["ota_booking_id"] or (f"#{r['booking_id']}" if r["booking_id"] else f"draft {r['draft_id']}")
+        rows.append([
+            (r["expected_time"] or "") + ("\nOTA" if r["expected_note"] else ""), status,
+            (r["guest_name"] or "") + (f"\n{r['phone']}" if r["phone"] else ""),
+            (r["room_type_name"] or "") + (f"\n{r['room_index']} of {r['rooms_total']}" if r["rooms_total"] > 1 else ""),
+            room, f"{r['agent_name'] or r['source_label']}\n{ref}",
+            _out(r["check_out"]), r["nights"] or "", f"{r['adults']}+{r['children']}" if r["money_row"] else "",
+            _money(r["grand_total"]), _money(r["prepaid_amount"]), _money(r["paid_total"]), _money(r["balance_due"]),
+        ])
+    s = data["summary"]
+    totals = ["Total", f"{s['unconfirmed_bookings']} unconf.", f"{s['bookings']} bookings", f"{s['rooms']} rooms",
+              "", "", "", "", f"{s['adults']}+{s['children']}", "", "", "", _money(s["balance_due"])]
+    meta = {"Arrival date": f"{d:%d-%m-%Y}", **_meta()}
+    return _export_or_json(format, data, title="Arrival Report", columns=cols, rows=rows,
+                           totals_row=totals, meta=meta, filename=f"arrivals-{d}")
+
+
 # ---- Desk board: arrivals + in-house + vacant rooms (also the desktop's offline cache) ----
 @router.get("/board")
 def desk_board(db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):

@@ -117,6 +117,19 @@ def out_of_service_count(db, room_type_id):
 HOLDING_DRAFT_STATUSES = ("pending", "flagged")
 
 
+def live_ota_booking_ids(db, ota_ids) -> set:
+    """The OTA ids among `ota_ids` that already have a live booking. A draft for one of these is
+    counted (and listed) through that booking, never a second time. Shared by `ota_draft_holds` and
+    the arrival report so the two cannot disagree about which drafts are still unconfirmed."""
+    ids = {i for i in (ota_ids or ()) if i}
+    if not ids:
+        return set()
+    return {r[0] for r in db.query(Booking.ota_booking_id).filter(
+        Booking.ota_booking_id.in_(ids),
+        Booking.status.in_(RESERVED_STATUSES + ["checked_out"]),
+    ).all()}
+
+
 def ota_draft_holds(db, check_in, check_out, exclude_ota_booking_id=None):
     """Rooms held by unconfirmed OTA confirmation drafts overlapping [check_in, check_out).
 
@@ -144,13 +157,7 @@ def ota_draft_holds(db, check_in, check_out, exclude_ota_booking_id=None):
         return {}, 0
 
     # A draft whose OTA id already has a live booking is counted through that booking.
-    ids = {d.ota_booking_id for d in drafts if d.ota_booking_id}
-    live = set()
-    if ids:
-        live = {r[0] for r in db.query(Booking.ota_booking_id).filter(
-            Booking.ota_booking_id.in_(ids),
-            Booking.status.in_(RESERVED_STATUSES + ["checked_out"]),
-        ).all()}
+    live = live_ota_booking_ids(db, {d.ota_booking_id for d in drafts if d.ota_booking_id})
 
     holds, unmapped = {}, 0
     for d in drafts:
