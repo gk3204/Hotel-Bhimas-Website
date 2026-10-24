@@ -107,25 +107,16 @@ const REPORTS = {
     label: "Check-Out Summary",
     path: "checkout-summary",
     range: true,   // v8a (owner): any date range
-    note: "One row per bill checked out on the day — room rent and food each with the CGST / SGST inside them, laundry, misc, discount, the bill's total CGST / SGST, advance (taken before check-out), balance (paid at check-out), refund, due (agent bills left to pay later) and bill amount.",
+    note: "One row per bill checked out: its source and booking ID (the OTA's own id), room rent, food, laundry, misc and discount WITHOUT GST with the CGST / SGST beside them, the bill amount, then how it was paid - prepaid to the OTA, advance (before check-out), balance (at check-out), refund and due (agent bills left to pay later). Rent + Food + Laundry + Misc - Discount + GST = Bill Amt = Prepaid + Advance + Balance - Refund + Due.",
     fetch: (p) => api.getCheckoutSummary(p),
-    project: (d) => ({
-      // v7m (owner): room rent and food each show their CGST / SGST
-      // v7o (owner): check-in and check-out date + time
-      columns: ["Bill", "Rooms", "Check-in", "Check-out", "Room Rent", "Room CGST", "Room SGST", "Food",
-        "Food CGST", "Food SGST", "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance",
-        "Balance", "Refund", "Due", "Bill Amt", "By"],
-      // v7s (owner): Balance = paid at check-out; Due = left to pay later (agent bookings)
-      rows: d.rows.map((r) => [r.bill_no, r.rooms, r.checked_in_at || "", r.checked_out_at || "",
-        fmt(r.room_rent), fmt(r.room_cgst), fmt(r.room_sgst), fmt(r.food), fmt(r.food_cgst), fmt(r.food_sgst),
-        fmt(r.laundry), fmt(r.misc), fmt(r.discount), fmt(r.cgst), fmt(r.sgst), fmt(r.advance), fmt(r.balance),
-        fmt(r.refund), fmt(r.due), fmt(r.bill_amount), r.checked_out_by || ""]),
-      totals: ["TOTAL", "", "", "", fmt(d.totals.room_rent), fmt(d.totals.room_cgst), fmt(d.totals.room_sgst),
-        fmt(d.totals.food), fmt(d.totals.food_cgst), fmt(d.totals.food_sgst), fmt(d.totals.laundry),
-        fmt(d.totals.misc), fmt(d.totals.discount), fmt(d.totals.cgst), fmt(d.totals.sgst),
-        fmt(d.totals.advance), fmt(d.totals.balance), fmt(d.totals.refund), fmt(d.totals.due),
-        fmt(d.totals.bill_amount), ""],
-    }),
+    // v8k (owner): the server's own table - Source / Booking ID, amounts without GST, Bill Amt
+    // before Prepaid (OTA) / Advance / Balance / Refund / Due. Same as the PDF, CSV and e-mail.
+    project: (d) => {
+      const t = d.table || { columns: [], rows: [], totals: [] };
+      const text = new Set(["Bill", "Rooms", "Source", "Booking ID", "Check-in", "Check-out", "By"]);
+      const cell = (v, i) => (!text.has(t.columns[i]) && typeof v === "number" ? fmt(v) : v ?? "");
+      return { columns: t.columns, rows: t.rows.map((r) => r.map(cell)), totals: (t.totals || []).map(cell) };
+    },
   },
   "sales/daily": {
     label: "Daily Sales",

@@ -1727,6 +1727,18 @@ def checkout_summary_data(db, day, day_to=None):
             share = round(abs(discount) * g / _gross, 2) if _gross and discount else 0.0
             return _gst_split(sel, discount=share) if sel else {"cgst_total": 0.0, "sgst_total": 0.0}
         _rs, _fs = _part(("room",)), _part(("food", "minibar"))
+
+        # v8k (owner, 24 Oct): "room rent and food should be their amounts WITHOUT gst, as the gst is
+        # shown separately". Each amount column is its taxable value before the discount, and the
+        # discount is the taxable value it took off, so on every row
+        #   rent + food + laundry + misc - discount + total CGST + total SGST = bill amount.
+        def _net(types):
+            sel = [(c.gst_percent, c.amount) for c in charges if c.type in types]
+            return round(_gst_split(sel)["taxable_total"], 2) if sel else 0.0
+        _nets = {"room_rent_net": _net(("room",)), "food_net": _net(("food", "minibar")),
+                 "laundry_net": _net(("laundry",)), "misc_net": _net(("misc", "extra_bed", "extra_person"))}
+        _all = tuple({c.type for c in charges if c.type not in ("payment", "discount")})
+        _nets["discount_net"] = round(max(0.0, _net(_all) - taxable), 2) if discount else 0.0
         # v7s (owner): "a Balance column - when the advance is less, the guest pays the balance at
         # check-out; when more advance was taken the balance is 0 and a refund is done". The money
         # taken before the guest left splits into ADVANCE (at check-in / during the stay) and
@@ -1755,8 +1767,16 @@ def checkout_summary_data(db, day, day_to=None):
         # v7o (owner): when the room(s) on this bill checked in (local wall clock, the earliest)
         _cin = min((it.checked_in_at for it in _its if it is not None and it.checked_in_at), default=None) \
             or b.checked_in_at
+        # v8k (owner): the booking's source, and the OTA's own booking id (others: our booking no)
+        from utils import booking_source as _booking_source
+        _src = _booking_source.source_label(db, b)
+        _ref = (b.ota_booking_id or "").strip() or f"#{b.booking_id}"
+        # v8k (owner, INV/2026-27/00331): money the guest paid the OTA before arriving. It settles
+        # part of the bill but is not a desk receipt, so without it Advance + Balance looked short.
+        prepaid = round(float(b.prepaid_amount or 0), 2) if _n == 0 else 0.0
         rows.append({
             "bill_no": (inv.invoice_no if inv else f"F{f.id}"),
+            "source": _src, "booking_ref": _ref, "prepaid": prepaid, **_nets,
             "checked_in_at": _cin.strftime("%d/%m/%y %H:%M") if _cin else "",
             # v7d (owner): when they left and which reception user checked them out
             "checked_out_at": _co.strftime("%d/%m/%y %H:%M") if _co else "",
@@ -1773,7 +1793,8 @@ def checkout_summary_data(db, day, day_to=None):
             "bill_amount": round(float(f.total or 0), 2),
         })
     keys = ("room_rent", "sgst", "cgst", "food", "laundry", "misc", "discount", "total",
-            "advance", "balance", "refund", "due", "bill_amount", "room_cgst", "room_sgst", "food_cgst", "food_sgst")
+            "advance", "balance", "refund", "due", "bill_amount", "room_cgst", "room_sgst", "food_cgst", "food_sgst",
+            "prepaid", "room_rent_net", "food_net", "laundry_net", "misc_net", "discount_net")
     totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
     return {"day": str(day), "day_to": str(day_to or day), "rows": rows, "totals": totals}
 
@@ -1783,18 +1804,23 @@ def checkout_summary_table(data):
     show the CGST and SGST inside them; the bill's total CGST / SGST (every line, after discount)
     stays as it was."""
     # v7o (owner): check-in and check-out date + time beside the rooms
-    cols = ["Bill", "Rooms", "Check-in", "Check-out", "Room Rent", "Room CGST", "Room SGST", "Food",
-            "Food CGST", "Food SGST", "Laundry", "Misc", "Discount", "Total CGST", "Total SGST", "Advance",
-            "Balance", "Refund", "Due", "Bill Amt", "By"]
-    # v7s (owner): Balance = paid at check-out; Due = left to pay later (agent bookings)
-    rows = [[r["bill_no"], r["rooms"], r.get("checked_in_at", ""), r.get("checked_out_at", ""), r["room_rent"],
-             r["room_cgst"], r["room_sgst"], r["food"], r["food_cgst"], r["food_sgst"], r["laundry"], r["misc"],
-             r["discount"], r["cgst"], r["sgst"], r["advance"], r.get("balance", 0.0), r["refund"],
-             r.get("due", 0.0), r["bill_amount"], r.get("checked_out_by", "")] for r in data["rows"]]
+    # v8k (owner, 24 Oct): Source + Booking ID (the OTA's own id); amounts WITHOUT GST (the GST has
+    # its own columns); Bill Amt BEFORE the money columns; Prepaid (paid to the OTA) beside Advance.
+    # Each row: Rent + Food + Laundry + Misc - Discount + Total CGST + Total SGST = Bill Amt, and
+    #           Prepaid + Advance + Balance - Refund + Due = Bill Amt.
+    cols = ["Bill", "Rooms", "Source", "Booking ID", "Check-in", "Check-out", "Room Rent", "Room CGST",
+            "Room SGST", "Food", "Food CGST", "Food SGST", "Laundry", "Misc", "Discount", "Total CGST",
+            "Total SGST", "Bill Amt", "Prepaid (OTA)", "Advance", "Balance", "Refund", "Due", "By"]
+    rows = [[r["bill_no"], r["rooms"], r.get("source", ""), r.get("booking_ref", ""), r.get("checked_in_at", ""),
+             r.get("checked_out_at", ""), r["room_rent_net"], r["room_cgst"], r["room_sgst"], r["food_net"],
+             r["food_cgst"], r["food_sgst"], r["laundry_net"], r["misc_net"], r["discount_net"], r["cgst"], r["sgst"],
+             r["bill_amount"], r.get("prepaid", 0.0), r["advance"], r.get("balance", 0.0), r["refund"],
+             r.get("due", 0.0), r.get("checked_out_by", "")] for r in data["rows"]]
     t = data["totals"]
-    totals = ["TOTAL", "", "", "", t["room_rent"], t["room_cgst"], t["room_sgst"], t["food"], t["food_cgst"],
-              t["food_sgst"], t["laundry"], t["misc"], t["discount"], t["cgst"], t["sgst"], t["advance"],
-              t.get("balance", 0.0), t["refund"], t.get("due", 0.0), t["bill_amount"], ""]
+    totals = ["TOTAL", "", "", "", "", "", t["room_rent_net"], t["room_cgst"], t["room_sgst"], t["food_net"],
+              t["food_cgst"], t["food_sgst"], t["laundry_net"], t["misc_net"], t["discount_net"], t["cgst"], t["sgst"],
+              t["bill_amount"], t.get("prepaid", 0.0), t["advance"], t.get("balance", 0.0), t["refund"],
+              t.get("due", 0.0), ""]
     return cols, rows, totals
 
 
@@ -2856,6 +2882,7 @@ def checkout_summary_report(day: str | None = Query(None), from_: str | None = Q
         raise HTTPException(status_code=400, detail="Pick at most 92 days")
     data = checkout_summary_data(db, d, d_to)
     cols, rows, totals = checkout_summary_table(data)
+    data["table"] = {"columns": cols, "rows": rows, "totals": totals}   # v8k: the web shows this exact table
     meta = ({"Day": f"{d:%d-%m-%Y}"} if d == d_to else {"Period": f"{d:%d-%m-%Y} to {d_to:%d-%m-%Y}"})
     meta.update(_meta())
     return _export_or_json(format, data, title="Check-Out Summary", columns=cols, rows=rows,
