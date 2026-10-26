@@ -14,7 +14,7 @@ from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-da
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
-APP_BUILD = "v8k"   # v8f-v8h + v8i (arrival report, merged) + v8k
+APP_BUILD = "v8l"   # v8l: website check-in time AM/PM + check-out shown (on v8k)
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router

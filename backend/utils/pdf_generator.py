@@ -131,18 +131,21 @@ def generate_booking_pdf(booking_data, payment_data):
     room_types_list = [item['room_type_name'] for item in booking_data['booking_items']]
     room_types_str = ", ".join(room_types_list) if room_types_list else "N/A"
 
-    arrival_time = booking_data.get('check_in_time')
-    arrival_display = arrival_time[:5] if arrival_time else "N/A"  # "HH:MM:SS" -> "HH:MM"
+    # v8l (owner): the booked time starts the 24-hour stay - print both moments in AM / PM
+    from utils.stay_times import stay_moments
+    _ci, _co = stay_moments(booking_data['check_in'], booking_data['check_out'],
+                            booking_data.get('check_in_time'), date_fmt="%d-%m-%Y")
 
     booking_table_data = [
         ["Booking ID", str(booking_data['booking_id'])],
         ["Source", booking_data.get("source_label") or "Website"],   # v6m.13 (owner, item 6)
         ["Room Type(s)", room_types_str],
-        ["Check-in", booking_data['check_in'].strftime("%d-%m-%Y")],
-        ["Expected Arrival Time", arrival_display],
-        ["Check-out", booking_data['check_out'].strftime("%d-%m-%Y")],
+        ["Check-in", _ci],
+        ["Check-out", _co],
         ["Status", booking_data['status'].upper()],
     ]
+    if booking_data.get('check_in_time'):
+        booking_table_data.append(["Please note", "24 hours per night from the check-in time"])
 
     booking_table = Table(booking_table_data, colWidths=[150, 330])
     booking_table.setStyle(TableStyle([

@@ -61,11 +61,15 @@ def send_booking_email(booking_data, pdf_path):
         "https://hotelbhimas.in/logo-final.png"
     )
 
-    check_in_str = booking_data['check_in'].strftime("%d %B %Y")
-    check_out_str = booking_data['check_out'].strftime("%d %B %Y")
-    arrival_time = booking_data.get('check_in_time')
-    arrival_str = arrival_time[:5] if arrival_time else None  # "HH:MM:SS" -> "HH:MM"
+    # v8l (owner): the booked time starts the 24-hour stay - say when check-out is, in AM / PM
+    from utils.stay_times import stay_moments
+    check_in_str, check_out_str = stay_moments(booking_data['check_in'], booking_data['check_out'],
+                                               booking_data.get('check_in_time'))
+    stay_note = ("Your stay is 24 hours per night from the check-in time. If that time is wrong, "
+                 "please call us before you travel.") if booking_data.get('check_in_time') else ""
     nights = (booking_data['check_out'] - booking_data['check_in']).days
+    stay_note_html = ('<tr><td colspan="2" style="color:#8a5a00; font-size:12px; padding-top:6px;">'
+                      + stay_note + '</td></tr>') if stay_note else ""
 
     # ✅ FIX: Richer TextPart that mirrors HTML (reduces spam score)
     text_body = f"""Hotel Bhimas - Booking Confirmation
@@ -75,9 +79,10 @@ Dear {booking_data['guest_name']},
 Your booking has been successfully confirmed. Please find the details below.
 
 Booking ID   : {booking_data['booking_id']}
-Check-in     : {check_in_str}{f" (Arrival ~{arrival_str})" if arrival_str else ""}
+Check-in     : {check_in_str}
 Check-out    : {check_out_str}
 Nights       : {nights}
+{stay_note}
 Total Paid   : Rs. {booking_data['grand_total']}
 
 A PDF copy of your booking confirmation is attached to this email.
@@ -150,12 +155,12 @@ Email: hotelbhimas@gmail.com
               </tr>
               <tr style="border-bottom:1px solid #e8e8e8; background:#ffffff;">
                 <td style="color:#888888; font-size:13px;">Check-in</td>
-                <td style="color:#222222; font-size:14px;">{check_in_str}{f" &nbsp;(Arrival ~{arrival_str})" if arrival_str else ""}</td>
+                <td style="color:#222222; font-size:14px;">{check_in_str}</td>
               </tr>
               <tr style="border-bottom:1px solid #e8e8e8;">
                 <td style="color:#888888; font-size:13px;">Check-out</td>
                 <td style="color:#222222; font-size:14px;">{check_out_str}</td>
-              </tr>
+              </tr>{stay_note_html}
               <tr style="border-bottom:1px solid #e8e8e8; background:#ffffff;">
                 <td style="color:#888888; font-size:13px;">Duration</td>
                 <td style="color:#222222; font-size:14px;">{nights} Night{'s' if nights != 1 else ''}</td>

@@ -131,6 +131,28 @@ const Booking = () => {
     }));
   };
 
+  // v8l (owner, 26 Oct): the arrival time STARTS the guest's 24-hour stay - a guest who typed 03:00
+  // meaning 3 PM was charged a second night. A plain AM / PM list, and the check-out moment shown
+  // the moment a time is picked, so a slip is visible before paying.
+  const ARRIVAL_SLOTS = Array.from({ length: 48 }, (_, i) => {
+    const h = Math.floor(i / 2), m = i % 2 ? "30" : "00";
+    const h12 = h % 12 === 0 ? 12 : h % 12;
+    const part = h < 12 ? "AM" : "PM";
+    const hint = h < 5 ? "night" : h < 12 ? "morning" : h < 17 ? "afternoon" : h < 21 ? "evening" : "night";
+    return { value: `${String(h).padStart(2, "0")}:${m}`, label: `${h12}:${m} ${part} (${hint})` };
+  });
+  const fmtSlot = (dateStr, timeStr) => {
+    if (!dateStr || !timeStr) return "";
+    const [h, m] = timeStr.split(":").map(Number);
+    const d = new Date(`${dateStr}T00:00:00`);
+    const day = d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" });
+    return `${day}, ${h % 12 === 0 ? 12 : h % 12}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+  };
+  const stayWindow = formData.check_in && formData.check_out && formData.check_in_time
+    ? { from: fmtSlot(formData.check_in, formData.check_in_time), to: fmtSlot(formData.check_out, formData.check_in_time),
+        early: Number(formData.check_in_time.split(":")[0]) < 8 }
+    : null;
+
   const calculateNights = () => {
     if (!formData.check_in || !formData.check_out) return 0;
 
@@ -455,16 +477,20 @@ const Booking = () => {
                   </div>
 
                   <div>
-                    <label className="block text-sm font-semibold text-gray-700 mb-2">Expected Arrival Time *</label>
-                    <input
-                      type="time"
+                    <label className="block text-sm font-semibold text-gray-700 mb-2">Check-In Time *</label>
+                    <select
                       name="check_in_time"
                       value={formData.check_in_time}
                       onChange={handleChange}
                       required
-                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg focus:outline-none focus:border-purple-600 focus:ring-2 focus:ring-purple-600/20 transition"
-                    />
-                    <p className="text-xs text-gray-500 mt-1">Let us know roughly when you'll arrive so reception can prepare.</p>
+                      className="w-full px-4 py-3 border-2 border-gray-200 rounded-lg bg-white focus:outline-none focus:border-purple-600 focus:ring-2 focus:ring-purple-600/20 transition"
+                    >
+                      <option value="">Select your check-in time</option>
+                      {ARRIVAL_SLOTS.map((s) => <option key={s.value} value={s.value}>{s.label}</option>)}
+                    </select>
+                    <p className="text-xs text-gray-500 mt-1">
+                      Your stay is <b>24 hours per night from this time</b> — please pick when you will actually arrive.
+                    </p>
                   </div>
                 </div>
 
@@ -473,6 +499,17 @@ const Booking = () => {
                     <p className="text-purple-800 text-sm font-medium">
                       ✅ {calculateNights()} nights selected
                     </p>
+                    {stayWindow && (
+                      <p className="text-purple-900 text-sm mt-1">
+                        Your stay: <b>check-in {stayWindow.from}</b> → <b>check-out {stayWindow.to}</b>
+                      </p>
+                    )}
+                  </div>
+                )}
+                {stayWindow?.early && (
+                  <div className="mt-3 p-3 bg-amber-50 border border-amber-300 rounded-lg text-amber-900 text-sm">
+                    ⚠️ You picked an <b>early-morning</b> time ({fmtSlot(formData.check_in, formData.check_in_time).split(", ")[1]}),
+                    so check-out is also early morning. If you will arrive in the afternoon or evening, choose a PM time.
                   </div>
                 )}
               </div>
@@ -743,6 +780,12 @@ const Booking = () => {
                         <span>Nights:</span>
                         <span className="font-semibold">{priceInfo.nights}</span>
                       </div>
+                      {stayWindow && (
+                        <div className="text-gray-700 mb-1">
+                          <div className="flex justify-between"><span>Check-in:</span><span className="font-semibold">{stayWindow.from}</span></div>
+                          <div className="flex justify-between"><span>Check-out:</span><span className="font-semibold">{stayWindow.to}</span></div>
+                        </div>
+                      )}
                       <div className="flex justify-between text-gray-700 mb-3">
                         <span>Cost per Night:</span>
                         <span className="font-semibold">
