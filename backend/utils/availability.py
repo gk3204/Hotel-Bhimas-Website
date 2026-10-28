@@ -253,6 +253,25 @@ def _nights(check_in, check_out):
         d = d + timedelta(days=1)
 
 
+def overbook_room(rt, user, shortfall: int) -> bool:
+    """v8m (owner, 28 Oct): may this booking take `shortfall` rooms beyond what the type has free?
+    Only when the admin switched overbooking on for the type, only up to its limit (counted on the
+    tightest night, so rooms already over - an overstay - use the allowance up), and only for a
+    person at the desk: the website and the automatic OTA mail import (user None) never overbook."""
+    if shortfall <= 0:
+        return True
+    if rt is None or not getattr(rt, "allow_overbooking", False) or not user:
+        return False
+    return shortfall <= int(getattr(rt, "overbook_limit", 1) or 1)
+
+
+def overbook_extra(rt, available_raw: int) -> int:
+    """How many more rooms reception may book than the free count shows (0 when it is off)."""
+    if rt is None or not getattr(rt, "allow_overbooking", False):
+        return 0
+    return max(0, int(getattr(rt, "overbook_limit", 1) or 1) + min(0, int(available_raw)))
+
+
 def free_rooms(db, room_type_id, check_in, check_out, *, total=None, exclude_ota_booking_id=None,
                exclude_booking_id=None, lock=False, cache=None) -> dict:
     """v7v (owner, 17 Oct: "6 Four Bed Non-AC rooms but the desk shows 1, and the OTA booking is declined

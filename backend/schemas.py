@@ -64,6 +64,8 @@ class RoomTypeUpdateDetails(BaseModel):
     is_ac: Optional[bool] = None   # FE-10
     is_active: Optional[bool] = None
     show_on_website: Optional[bool] = None   # v5: null = leave unchanged
+    allow_overbooking: Optional[bool] = None             # v8m
+    overbook_limit: Optional[int] = Field(None, ge=1, le=10)   # v8m: rooms beyond capacity, per night
 
     @field_validator('price_per_night')
     @classmethod

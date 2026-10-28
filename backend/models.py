@@ -40,6 +40,9 @@ class RoomType(Base):
     is_active = Column(Boolean, default=True, index=True)
     # v5: sellable at desk/OTA/agents but only shown on the public website when True.
     show_on_website = Column(Boolean, nullable=False, default=True, index=True)
+    # v8m (owner): reception may book up to `overbook_limit` rooms beyond what is free (migration 060)
+    allow_overbooking = Column(Boolean, nullable=False, default=False, server_default="false")
+    overbook_limit = Column(Integer, nullable=False, default=1, server_default="1")
     created_at = Column(TIMESTAMP, server_default=func.now())
 
 class Room(Base):

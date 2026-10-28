@@ -74,6 +74,9 @@ const RoomTypes = () => {
         total_rooms: editingRoom.total_rooms,
         is_ac: !!editingRoom.is_ac,
         show_on_website: !!editingRoom.show_on_website,
+        // v8m (owner): reception may book beyond the rooms free, up to the limit
+        allow_overbooking: !!editingRoom.allow_overbooking,
+        overbook_limit: Math.min(10, Math.max(1, parseInt(editingRoom.overbook_limit, 10) || 1)),
       });
 
       setEditingRoom(null);
@@ -211,6 +214,12 @@ const RoomTypes = () => {
                             ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/30"
                             : "bg-slate-500/20 text-slate-400 border-slate-500/30"
                         }`}>{room.show_on_website ? "On website" : "Hidden"}</span>
+                        {room.allow_overbooking && (
+                          <span className="ml-2 px-2 py-0.5 rounded-full text-[10px] font-bold border bg-amber-500/20 text-amber-300 border-amber-500/30"
+                            title="Reception may book beyond the rooms free, up to this many rooms per night">
+                            Overbooking +{room.overbook_limit || 1}
+                          </span>
+                        )}
                       </td>
                       <td className="px-6 py-4 text-[#E5C07B] font-bold">₹{room.price_per_night}</td>
                       <td className="px-6 py-4 text-slate-300">{room.gst_percent}%</td>
@@ -338,6 +347,30 @@ const RoomTypes = () => {
                   onChange={(e) => setEditingRoom({ ...editingRoom, show_on_website: e.target.checked })} />
                 <span>Show on public website (still bookable at the desk when off)</span>
               </label>
+
+              {/* v8m (owner, 28 Oct): overbooking, handled by reception */}
+              <div className="mt-5 p-4 rounded-xl border border-amber-500/30 bg-amber-500/5">
+                <label className="inline-flex items-center gap-2 text-slate-200 cursor-pointer font-semibold">
+                  <input type="checkbox" checked={!!editingRoom.allow_overbooking}
+                    onChange={(e) => setEditingRoom({ ...editingRoom, allow_overbooking: e.target.checked,
+                      overbook_limit: editingRoom.overbook_limit || 1 })} />
+                  <span>Allow overbooking</span>
+                </label>
+                <p className="text-xs text-slate-400 mt-1">
+                  When on, reception can still book (or extend a stay in) this room type when it shows full - for example
+                  when a guest is due out before the next arrival. The booking is marked OVERBOOKED and reception arranges
+                  the room. The website never overbooks.
+                </p>
+                {editingRoom.allow_overbooking && (
+                  <div className="mt-3 flex items-center gap-3">
+                    <label className="text-sm text-slate-300">Up to</label>
+                    <input type="number" min={1} max={10} value={editingRoom.overbook_limit || 1}
+                      onChange={(e) => setEditingRoom({ ...editingRoom, overbook_limit: e.target.value })}
+                      className="w-20 px-3 py-2 rounded-lg bg-slate-900 border border-slate-600 text-white" />
+                    <span className="text-sm text-slate-300">extra room(s) per night</span>
+                  </div>
+                )}
+              </div>
 
               <div className="flex justify-end gap-4 mt-8">
                 <button

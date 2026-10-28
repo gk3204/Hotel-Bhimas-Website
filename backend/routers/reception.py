@@ -130,6 +130,9 @@ def desk_availability(
             # still find through this type's alternates
             "alt_lent": lent,
             "alt_free": int(_fr["alt_free"]),
+            # v8m (owner): rooms reception may still book beyond "available" (overbooking switched on)
+            "overbook_allowed": bool(rt.allow_overbooking) and not blk,
+            "overbook_extra": 0 if blk else availability.overbook_extra(rt, int(_fr["available"])),
             "available": available,
             "blocked": bool(blk),
             "block_reason": blk.reason if blk else None,
@@ -203,6 +206,7 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
         rt_map = {}
         _alt_notes = []   # v7b
         _alt_approved = False   # v7g
+        _overbooked = []   # v8m
         for item in data.rooms:
             rt = db.query(RoomType).filter(
                 RoomType.room_type_id == item.room_type_id,
@@ -232,7 +236,19 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
             held = int(_fr["held"])
             _plan = {"lenders": _fr["lenders"]}
             available = int(_fr["available"])
-            if item.quantity > available:
+            # v8m (owner): overbooking switched on for this type - reception takes the booking and
+            # arranges the room (a departure, an upgrade). Marked on the booking and audited.
+            # (an admin's OTA confirm, which goes into a real ALTERNATE room with no code, does that first)
+            _alt_room_first = (_ALLOW_ALTERNATE.get() and (user or {}).get("role") == "admin"
+                               and int(_fr["alt_free"]) > 0
+                               and item.quantity <= max(0, available) + int(_fr["alt_free"]))
+            if (item.quantity > available and not _alt_room_first
+                    and availability.overbook_room(rt, user, item.quantity - available)):
+                _overbooked.append({"room_type": rt.name, "rooms": item.quantity - max(0, available),
+                                    "night": str(_fr.get("night") or data.check_in)})
+                _alt_notes.append(f"OVERBOOKED: {item.quantity - max(0, available)} x {rt.name} beyond the rooms free "
+                                  f"on {_fr.get('night') or data.check_in} - reception to arrange a room")
+            elif item.quantity > available:
                 alt = int(_fr["alt_free"])
                 fits_alt = alt > 0 and item.quantity <= max(0, available) + alt
                 # v7g (owner): any source may book into an ALTERNATE room type when its own is full -
@@ -445,8 +461,13 @@ def create_desk_booking(data: DeskBookingCreate, db: Session = Depends(get_db),
                            "rooms": len(data.rooms), "grand_total": round(total_room, 2),
                            "agent_id": agent.id if agent else None,
                            "commission_amount": commission_amount,
-                           "company_id": booking.company_id, "bill_to": booking.bill_to},
+                           "company_id": booking.company_id, "bill_to": booking.bill_to,
+                           "overbooked": _overbooked or None},     # v8m
                     client="desktop", commit=True)
+        if _overbooked:   # v8m: its own entry, so the owner can list every overbooking
+            write_audit(db, user, "booking.overbooked", "booking", booking.booking_id,
+                        after={"lines": _overbooked, "check_in": str(data.check_in),
+                               "check_out": str(data.check_out)}, client="desktop", commit=True)
 
         # Best-effort WhatsApp booking confirmation (prompt 15) — must not break booking.
         # The system already renders a confirmation PDF for the online flow; the desk sends the
@@ -3246,7 +3267,13 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
             free = int(availability.free_rooms(db, rt_id, old_co, new_co, total=(rt.total_rooms if rt else 0),
                                                lock=True, exclude_booking_id=booking.booking_id,
                                                exclude_ota_booking_id=booking.ota_booking_id)["available"])
-            if free < qty:
+            if free < qty and availability.overbook_room(rt, user, qty - free):
+                # v8m (owner): overbooking switched on for this type - the desk arranges the room
+                write_audit(db, user, "booking.overbooked", "booking", booking.booking_id,
+                            after={"lines": [{"room_type": name, "rooms": qty - max(0, free),
+                                              "night": f"{old_co} to {new_co}"}], "extension": True},
+                            client="desktop")
+            elif free < qty:
                 raise HTTPException(
                     status_code=409,
                     detail=f"No {name} capacity for {old_co:%d-%m-%Y} to {new_co:%d-%m-%Y} "
