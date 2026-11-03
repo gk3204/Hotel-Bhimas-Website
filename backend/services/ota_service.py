@@ -2086,10 +2086,30 @@ def _load_room_lines(d) -> list | None:
         return None
     try:
         lines = json.loads(raw)
-        return lines if isinstance(lines, list) and lines else None
     except Exception:
         logger.warning("draft %s has unreadable room_lines", getattr(d, "id", "?"))
         return None
+    if not (isinstance(lines, list) and lines):
+        return None
+    return _top_up_room_lines(lines, getattr(d, "rooms", None), getattr(d, "room_type_hint", None))
+
+
+def _top_up_room_lines(lines: list, voucher_rooms, hint) -> list:
+    """v8n (owner, 3 Nov - Goibibo GH75161276741416): the voucher said 10 rooms, the lines held 6.
+    Drafts parsed before v6m (4 Oct) lost every room type whose name starts with a digit ("4 Bedded
+    Non AC Family Room (Room 1)"), and their stored copy is cut at 4,000 characters, so they cannot be
+    re-read. When the lines fall short of the voucher's own room count and the voucher's room type
+    (the hint, read from its first "1 x <type>" line) is not among them, the missing rooms are that
+    type. Anything less clear is left for the desk to see."""
+    try:
+        total = int(voucher_rooms or 0)
+        have = sum(int(ln.get("rooms") or 0) for ln in lines if isinstance(ln, dict))
+    except (TypeError, ValueError):
+        return lines
+    norm = lambda s: re.sub(r"\s+", " ", str(s or "")).strip().lower()  # noqa: E731
+    if total <= have or not norm(hint) or any(norm(ln.get("hint")) == norm(hint) for ln in lines if isinstance(ln, dict)):
+        return lines
+    return [{"hint": hint, "rooms": total - have}] + list(lines)
 
 
 def serialize_draft(d: OtaDraftBooking, db=None) -> dict:
