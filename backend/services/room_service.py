@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from services import folio_resolver
 from models import (Booking, BookingItem, Folio, FolioCharge, Guest, GuestRequest,
                     InvoiceCounter, MenuItem, Room, StockItem)
-from utils import ordering
+from utils import clock, ordering
 from utils.audit import _resolve_user_id
 
 logger = logging.getLogger(__name__)
@@ -230,6 +230,12 @@ def _order_note(r: GuestRequest) -> str | None:
     return payload.get("note")
 
 
+def _local_iso(dt) -> str | None:
+    """v8p (owner, 5 Nov): orders are stored in UTC; the KOT and the bill print the hotel's clock.
+    Sent raw they printed 5h30m behind (an 8:30 pm order showed 15:00)."""
+    return clock.to_local(dt).isoformat() if dt else None
+
+
 def kot_payload(db: Session, r: GuestRequest) -> dict:
     """What the kitchen docket prints: what to cook, for which room, and nothing else.
     Deliberately carries NO prices — a KOT is a cooking instruction, not a bill."""
@@ -238,7 +244,7 @@ def kot_payload(db: Session, r: GuestRequest) -> dict:
         "order_id": r.id,
         "kot_no": r.kot_no,
         "room_number": room.room_number if room else None,
-        "placed_at": (r.created_at.isoformat() if r.created_at else None),
+        "placed_at": _local_iso(r.created_at),
         "source": r.source,
         "note": _order_note(r),
         "items": [{"name": ln.get("name"), "qty": ln.get("qty")} for ln in _order_lines(r)],
@@ -273,8 +279,8 @@ def bill_payload(db: Session, r: GuestRequest) -> dict:
         "booking_id": r.booking_id,
         "room_number": room.room_number if room else None,
         "guest_name": guest.name if guest else None,
-        "placed_at": (r.created_at.isoformat() if r.created_at else None),
-        "delivered_at": (r.updated_at.isoformat() if r.updated_at else None),
+        "placed_at": _local_iso(r.created_at),
+        "delivered_at": _local_iso(r.updated_at),
         "note": _order_note(r),
         "items": lines,
         "subtotal": round(subtotal, 2),   # before GST

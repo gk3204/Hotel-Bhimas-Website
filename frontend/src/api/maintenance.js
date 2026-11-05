@@ -52,6 +52,12 @@ export async function createTicket(data) {
   return handle(res);
 }
 
+// v8p: one tap closes a General (AC on/off) ticket.
+export async function generalDone(id) {
+  const res = await fetch(`${BASE_URL}/maintenance/tickets/${id}/done`, { method: "POST", headers: authHeaders() });
+  return handle(res);
+}
+
 export async function assignTicket(id, data) {
   const res = await fetch(`${BASE_URL}/maintenance/tickets/${id}/assign`, {
     method: "POST",

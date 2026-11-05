@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { FaClipboardList, FaPlus, FaBell, FaBellSlash } from "react-icons/fa";
-import { getTickets, getTicket, updateTicketStatus, addTicketItem, claimTicket } from "../../api/maintenance";
+import { getTickets, getTicket, updateTicketStatus, addTicketItem, claimTicket, generalDone } from "../../api/maintenance";
 import usePoll from "../../utils/usePoll";
 import useContinuousAlert from "../../utils/useContinuousAlert";
 
@@ -51,11 +51,19 @@ export default function MyTickets() {
   // Keep the list live so a newly-assigned job alerts even if the tech leaves the screen open.
   usePoll(() => load(true), 20000);
 
-  // Continuous alert while any job is unattended — open (unclaimed) or assigned-but-not-started.
-  // It stops the moment the tech taps Claim/Start (status -> in_progress) = "taken up".
+  // v8p (owner): AC on/off jobs are GENERAL tickets, everything else is PRIORITY. Finished ones
+  // drop off this page (the sign-off happens on the Maintenance board).
+  const live = useMemo(() => tickets.filter((t) => !["resolved", "closed"].includes(t.status)), [tickets]);
+  const priority = useMemo(() => live.filter((t) => t.lane !== "general"), [live]);
+  const general = useMemo(() => live.filter((t) => t.lane === "general"), [live]);
+
+  // Continuous alert while a PRIORITY job is unattended (open, or assigned-but-not-started), and
+  // for a General AC job only in its first 15 minutes - so a guest's AC still gets switched on,
+  // but an old AC job never rings all day. It stops the moment the job is taken up.
   const pending = useMemo(
-    () => tickets.filter((t) => t.status === "open" || t.status === "assigned").length,
-    [tickets],
+    () => priority.filter((t) => t.status === "open" || t.status === "assigned").length
+      + general.filter((t) => (t.age_minutes ?? 0) <= 15).length,
+    [priority, general],
   );
   const { muted, setMuted, audioBlocked } = useContinuousAlert(pending, "mt_alert_muted");
 
@@ -78,6 +86,19 @@ export default function MyTickets() {
       await claimTicket(t.id);
       showToast(`Ticket #${t.id} is yours — start work when ready`);
       await load();
+    } catch (e) {
+      showToast(e.message, "error");
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const done = async (t) => {
+    setBusyId(t.id);
+    try {
+      await generalDone(t.id);
+      showToast(`Ticket #${t.id} done`);
+      await load(true);
     } catch (e) {
       showToast(e.message, "error");
     } finally {
@@ -114,18 +135,21 @@ export default function MyTickets() {
           {muted ? <FaBellSlash /> : <FaBell />} {muted ? "Alerts off" : "Alerts on"}
         </button>
       </div>
-      <p className="text-slate-400 mb-2 text-sm">Jobs assigned to you, plus open ones you can claim. Housekeeping signs off your work before a ticket is resolved.</p>
+      <p className="text-slate-400 mb-2 text-sm">Priority jobs first (faults and complaints) — housekeeping signs off your work. General AC on/off jobs close with one tap.</p>
       {audioBlocked && !muted && (
         <p className="text-amber-300 text-xs mb-4">🔔 Tap anywhere once to enable the alert sound for new jobs.</p>
       )}
 
       {loading ? (
         <div className="p-10 text-center text-slate-400">Loading…</div>
-      ) : tickets.length === 0 ? (
+      ) : live.length === 0 ? (
         <div className="p-10 text-center text-slate-400">Nothing to do right now.</div>
       ) : (
+        <>
+        <h2 className="text-lg font-bold text-red-300 mt-4 mb-2">Priority tickets ({priority.length})</h2>
+        {priority.length === 0 && <div className="p-4 text-slate-400 text-sm">No priority jobs.</div>}
         <div className="space-y-3">
-          {tickets.map((t) => {
+          {priority.map((t) => {
             const busy = busyId === t.id;
             const d = detail[t.id];
             // v4b8: the technician is done at `work_done` — the sign-off is somebody else's.
@@ -182,6 +206,24 @@ export default function MyTickets() {
             );
           })}
         </div>
+
+        <h2 className="text-lg font-bold text-slate-200 mt-6 mb-2">General tickets — AC on / off ({general.length})</h2>
+        {general.length === 0 && <div className="p-4 text-slate-400 text-sm">No AC jobs.</div>}
+        <div className="space-y-2">
+          {general.map((t) => (
+            <div key={t.id} className="bg-slate-800/60 border border-slate-700 rounded-xl px-4 py-3 flex items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="font-semibold">{t.issue}</div>
+                <div className="text-slate-400 text-xs">#{t.id} · {t.age_minutes < 60 ? `${t.age_minutes} min ago` : `${Math.floor(t.age_minutes / 60)} h ago`}</div>
+              </div>
+              <button disabled={busyId === t.id} onClick={() => done(t)}
+                className="bg-green-700 hover:bg-green-800 px-4 py-2 rounded-lg text-sm font-bold disabled:opacity-50 shrink-0">
+                Done
+              </button>
+            </div>
+          ))}
+        </div>
+        </>
       )}
 
       {toast && (

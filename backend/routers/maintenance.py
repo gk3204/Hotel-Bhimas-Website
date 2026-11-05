@@ -112,6 +112,20 @@ def _is_overdue(t: MaintenanceTicket) -> bool:
     return _age_days(t) > OVERDUE_DAYS.get(t.priority, 4)
 
 
+# v8p (owner, 5 Nov): the automatic "Turn on/off AC" jobs are GENERAL tickets; everything else a
+# person raised (staff, desk, guest complaint) is a PRIORITY ticket. 540 of 547 tickets in 30 days
+# were AC jobs, so the real faults were buried and the technician's alert never stopped.
+AC_REF_PREFIXES = ("ac-on-", "ac-off-")
+
+
+def ticket_lane(t: MaintenanceTicket) -> str:
+    return "general" if (t.client_ref or "").startswith(AC_REF_PREFIXES) else "priority"
+
+
+def _age_minutes(t: MaintenanceTicket) -> int:
+    return int((datetime.utcnow() - t.created_at).total_seconds() // 60) if t.created_at else 0
+
+
 def _item_dict(db: Session, i: TicketItem) -> dict:
     return {
         "id": i.id, "ticket_id": i.ticket_id, "item": i.item,
@@ -139,6 +153,7 @@ def _ticket_dict(db: Session, t: MaintenanceTicket, with_items=True) -> dict:
         "resolved_at": t.resolved_at.isoformat() if t.resolved_at else None,
         "verified_at": t.verified_at.isoformat() if t.verified_at else None,
         "age_days": _age_days(t), "overdue": _is_overdue(t),
+        "lane": ticket_lane(t), "age_minutes": _age_minutes(t),
     }
     if with_items:
         items = db.query(TicketItem).filter(TicketItem.ticket_id == t.id).order_by(TicketItem.id).all()
@@ -164,6 +179,17 @@ def _raise_ac_ticket(db: Session, booking_id, room, *, turning_on: bool, commit=
     dup = db.query(MaintenanceTicket).filter(MaintenanceTicket.client_ref == client_ref).first()
     if dup:
         return dup
+    # v8p: the opposite AC job for this room is moot now - an AC-on for a guest who has left, or an
+    # AC-off for a room a new guest just took. Close it so the General list only holds live jobs.
+    stale = db.query(MaintenanceTicket).filter(
+        MaintenanceTicket.room_id == room.room_id,
+        MaintenanceTicket.client_ref.like(("ac-on-%" if not turning_on else "ac-off-%")),
+        MaintenanceTicket.status.notin_(TERMINAL_STATUSES)).all()
+    for old_t in stale:
+        old_t.status = "resolved"
+        old_t.resolved_at = datetime.utcnow()
+        old_t.resolution_notes = ("Closed automatically - the guest checked out" if not turning_on
+                                  else "Closed automatically - a new guest checked in")
     t = MaintenanceTicket(
         room_id=room.room_id, category="appliance",
         issue=f"Turn {kind} AC — Room {room.room_number}",
@@ -279,6 +305,8 @@ def list_tickets(status: str = Query(None), category: str = Query(None),
         "total": len(out),
         "open": sum(1 for d in out if d["status"] not in TERMINAL_STATUSES),
         "overdue": sum(1 for d in out if d["overdue"]),
+        "priority_open": sum(1 for d in out if d["lane"] == "priority" and d["status"] not in TERMINAL_STATUSES),
+        "general_open": sum(1 for d in out if d["lane"] == "general" and d["status"] not in TERMINAL_STATUSES),
     }
     return {"tickets": out, "summary": summary}
 
@@ -396,6 +424,33 @@ def update_status(ticket_id: int, data: TicketStatusUpdate, db: Session = Depend
     write_audit(db, user, "maintenance.status", "maintenance_ticket", t.id,
                 before={"status": before}, after={"status": t.status, "note": data.note},
                 client="web", commit=True)
+    return _ticket_dict(db, t)
+
+
+@router.post("/tickets/{ticket_id}/done")
+def general_done(ticket_id: int, db: Session = Depends(get_db),
+                 user=Depends(require_roles("admin", "housekeeper", "maintenance"))):
+    """v8p: one tap closes a GENERAL (AC on/off) ticket - no claim / start / sign-off. A technician
+    may not close a job that is assigned to a colleague. Priority tickets keep the full flow."""
+    t = _get_ticket(db, ticket_id)
+    if ticket_lane(t) != "general":
+        raise HTTPException(status_code=409,
+                            detail="Only an AC on/off ticket can be closed in one tap - start the work instead")
+    if t.status in TERMINAL_STATUSES:
+        raise HTTPException(status_code=409, detail=f"Ticket is {t.status}")
+    me = _resolve_user_id(db, user)
+    if user.get("role") == "maintenance" and t.assignee not in (None, me):
+        raise HTTPException(status_code=403, detail="Not your ticket")
+    before = {"status": t.status, "assignee": t.assignee}
+    now = datetime.utcnow()
+    if t.assignee is None:
+        t.assignee, t.assigned_at = me, now
+    t.status = "resolved"
+    t.resolved_at = now
+    t.verified_by, t.verified_at = me, now
+    db.commit()
+    write_audit(db, user, "maintenance.general_done", "maintenance_ticket", t.id,
+                before=before, after={"status": t.status, "assignee": t.assignee}, client="web", commit=True)
     return _ticket_dict(db, t)
 
 

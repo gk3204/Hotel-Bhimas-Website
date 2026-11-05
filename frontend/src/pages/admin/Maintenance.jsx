@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from "react";
-import { FaSyncAlt, FaCheckDouble, FaCheck } from "react-icons/fa";
+import { FaSyncAlt, FaCheckDouble, FaCheck, FaWrench } from "react-icons/fa";
 import { PageShell , SortTh } from "../../components/admin/BackofficeUI";
 import { useTableSort } from "../../utils/tableSort";
 import {
@@ -10,7 +10,10 @@ import {
   approveItem,
   purchaseItem,
   getMaintenanceStaff,
+  generalDone,
 } from "../../api/maintenance";
+import { getRooms as getHkRooms } from "../../api/housekeeping";
+import RaiseTicketModal from "../../components/RaiseTicketModal";
 import { prettyCategory, useCategoryList } from "../../utils/useCategoryList";
 
 const inputCls =
@@ -45,9 +48,15 @@ const STATUS_LABEL = {
 };
 
 export default function Maintenance() {
-  const [tickets, setTickets] = useState([]);
+  const [allTickets, setTickets] = useState([]);
+  // v8p (owner): AC on/off jobs are General tickets, everything else Priority - one tab each.
+  const [lane, setLane] = useState("priority");
+  const tickets = allTickets.filter((t) => !lane || (t.lane || "priority") === lane);
   // v5s: click any header to sort; a third click returns to the API's order.
   const sortedTickets = useTableSort(tickets);
+  // v8p (owner): the supervisor (housekeeper login) raises tickets from here too.
+  const [raiseOpen, setRaiseOpen] = useState(false);
+  const [rooms, setRooms] = useState([]);
   const [summary, setSummary] = useState({});
   const [staff, setStaff] = useState([]);
   const [filters, setFilters] = useState({ status: "", category: "", overdue: false });
@@ -84,7 +93,23 @@ export default function Maintenance() {
 
   useEffect(() => {
     getMaintenanceStaff().then(setStaff).catch(() => {});
+    getHkRooms().then((d) => {
+      const list = Array.isArray(d) ? d : d?.rooms || [];
+      setRooms(list.filter((r) => r.room_id).map((r) => ({ room_id: r.room_id, room_number: r.room_number })));
+    }).catch(() => {});
   }, []);
+
+  const doDone = async (t) => {
+    setBusy(true);
+    try {
+      await generalDone(t.id);
+      showToast(`Ticket #${t.id} done`);
+      await load();
+    } catch (e) {
+      showToast(e.message, "error");
+    }
+    setBusy(false);
+  };
 
   const toggleDetail = async (id) => {
     if (detail[id]) {
@@ -137,8 +162,25 @@ export default function Maintenance() {
     <PageShell
       icon="🔧"
       title="Maintenance"
-      subtitle="Assign tickets to a technician, approve required parts, and sign off the finished work. Purchased parts post to the shift ledger."
+      subtitle="Raise and assign tickets, approve required parts, and sign off the finished work. Purchased parts post to the shift ledger."
+      right={
+        <button onClick={() => setRaiseOpen(true)}
+          className="bg-[#E5C07B] hover:bg-[#D4AF37] text-slate-900 font-bold px-5 py-2.5 rounded-lg flex items-center gap-2">
+          <FaWrench /> Raise ticket
+        </button>
+      }
     >
+        <RaiseTicketModal open={raiseOpen} rooms={rooms} onClose={() => setRaiseOpen(false)}
+          onRaised={() => { showToast("Ticket raised"); setLane("priority"); load(); }} />
+
+        <div className="flex gap-2 mb-4">
+          {[["priority", "Priority tickets", summary.priority_open], ["general", "General — AC on/off", summary.general_open], ["", "All", summary.open]].map(([k, label, n]) => (
+            <button key={k || "all"} onClick={() => setLane(k)}
+              className={`px-4 py-2 rounded-lg text-sm font-semibold border ${lane === k ? "bg-[#E5C07B]/20 border-[#E5C07B]/50 text-[#E5C07B]" : "bg-slate-800/60 border-slate-700 text-slate-300"}`}>
+              {label} <span className="ml-1 opacity-80">({n ?? 0} open)</span>
+            </button>
+          ))}
+        </div>
 
         {/* Filters + summary */}
         <div className="bg-gradient-to-r from-slate-800/50 to-slate-700/50 border border-slate-700 p-5 rounded-2xl shadow-xl mb-6 backdrop-blur flex flex-wrap items-end gap-4">
@@ -210,7 +252,12 @@ export default function Maintenance() {
                         </td>
                         <td className="px-5 py-4 text-right">
                           <div className="flex items-center gap-2 justify-end">
-                            {(t.status === "open" || t.status === "assigned") && (
+                            {t.lane === "general" && !["resolved", "closed"].includes(t.status) && (
+                              <button disabled={busy} onClick={() => doDone(t)} className="bg-green-700 hover:bg-green-800 px-3 py-1.5 rounded-lg text-sm font-semibold disabled:opacity-50">
+                                Done
+                              </button>
+                            )}
+                            {t.lane !== "general" && (t.status === "open" || t.status === "assigned") && (
                               <select
                                 defaultValue={t.assignee || ""}
                                 onChange={(e) => doAssign(t, e.target.value)}

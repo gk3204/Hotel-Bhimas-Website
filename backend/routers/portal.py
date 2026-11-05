@@ -37,7 +37,7 @@ from models import (Booking, BookingItem, Folio, FolioCharge, Guest, GuestPortal
 from schemas import (CabRequest, CheckoutRequestBody, MenuAvailabilityUpdate, MenuItemCreate,
                      MenuItemUpdate, PortalConfigUpdate, PortalSessionRequest, RequestActionRequest,
                      RoomServiceOrder, WakeupRequest, WifiRequestBody)
-from utils import ordering
+from utils import clock, ordering
 from utils import settings as app_settings
 from utils.audit import _resolve_user_id, write_audit
 from utils.auth_utils import require_admin, require_reception_or_admin
@@ -209,8 +209,9 @@ def _request_dict(db: Session, r: GuestRequest, with_room: bool = False) -> dict
         "type": r.type, "status": r.status, "payload": payload, "note": r.note,
         "amount": float(r.amount) if r.amount is not None else None,
         "folio_charge_id": r.folio_charge_id, "source": r.source,
-        "created_at": str(r.created_at) if r.created_at else None,
-        "updated_at": str(r.updated_at) if r.updated_at else None,
+        # v8p: in the hotel's clock (stored UTC) - the order board, the portal and the admin list show it
+        "created_at": str(clock.to_local(r.created_at)) if r.created_at else None,
+        "updated_at": str(clock.to_local(r.updated_at)) if r.updated_at else None,
     }
     if with_room:
         d["room_number"] = _room_number(db, r.room_id)
