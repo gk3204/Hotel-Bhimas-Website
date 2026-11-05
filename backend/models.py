@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, BigInteger, String, Numeric, Date, Time, ForeignKey, DateTime, TIMESTAMP, Boolean, Float, Index, UniqueConstraint, Text
+from sqlalchemy import Column, Integer, BigInteger, String, Numeric, Date, Time, ForeignKey, DateTime, TIMESTAMP, Boolean, Float, Index, UniqueConstraint, Text, LargeBinary
 from sqlalchemy.sql import func
 from database import Base
 from sqlalchemy.orm import relationship
@@ -1201,6 +1201,52 @@ class OtaSettlementLine(Base):
     match_status = Column(String(20), nullable=False, default="unknown_booking")
     linked_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)   # NULL = matched automatically
     created_at = Column(TIMESTAMP, server_default=func.now())
+
+
+class OtaTaxStatement(Base):
+    """One Go-MMT monthly statement mail (P1 batch 3, migration 062): TDS, TCS, a commission invoice
+    or a commission credit memo, with the attached files kept for the CA. services/ota_statements.py."""
+    __tablename__ = "ota_tax_statements"
+    id = Column(Integer, primary_key=True, index=True)
+    kind = Column(String(16), nullable=False)              # tds | tcs | commission | credit_memo
+    period = Column(Date, nullable=False)                  # first day of the statement's month
+    ota_account_code = Column(String(30), nullable=True)
+    message_id = Column(String(200), nullable=True)
+    subject = Column(String(300), nullable=True)
+    mail_date = Column(DateTime, nullable=True)
+    source = Column(String(10), nullable=False, default="mail")     # mail | upload
+    file_name = Column(String(200), nullable=True)
+    file_data = Column(LargeBinary, nullable=True)
+    pdf_name = Column(String(200), nullable=True)
+    pdf_data = Column(LargeBinary, nullable=True)
+    doc_no = Column(String(60), nullable=True)             # commission invoice / credit memo number
+    row_count = Column(Integer, nullable=False, default=0)
+    other_rows = Column(Integer, nullable=False, default=0)
+    total_base = Column(Numeric(14, 2), nullable=True)
+    total_gst = Column(Numeric(14, 2), nullable=True)
+    total_amount = Column(Numeric(14, 2), nullable=True)
+    superseded = Column(Boolean, nullable=False, default=False)
+    created_at = Column(TIMESTAMP, server_default=func.now())
+
+
+class OtaTaxStatementLine(Base):
+    """One booking row of a statement. `amount` is positive for TDS/TCS deducted and for commission
+    charged; negative for a credit memo (and for a TDS/TCS reversal row)."""
+    __tablename__ = "ota_tax_statement_lines"
+    id = Column(Integer, primary_key=True, index=True)
+    statement_id = Column(Integer, ForeignKey("ota_tax_statements.id", ondelete="CASCADE"), nullable=False, index=True)
+    ota_booking_id = Column(String(80), nullable=False, index=True)
+    pnr = Column(String(120), nullable=True)
+    guest_name = Column(String(120), nullable=True)
+    booking_date = Column(Date, nullable=True)
+    check_in = Column(Date, nullable=True)
+    check_out = Column(Date, nullable=True)
+    brand = Column(String(30), nullable=True)
+    doc_no = Column(String(60), nullable=True, index=True)
+    base_amount = Column(Numeric(14, 2), nullable=True)
+    gst_amount = Column(Numeric(14, 2), nullable=True)
+    amount = Column(Numeric(14, 2), nullable=False)
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=True)
 
 
 class OtaDraftBooking(Base):

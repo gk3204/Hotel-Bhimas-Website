@@ -1736,7 +1736,7 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
     # before the voucher logic (which would only discard it as a noise subject).
     from services import ota_payments
     pay = ota_payments.ingest_mail(db, raw, commit=commit)
-    if pay.get("payment"):
+    if pay.get("payment") or pay.get("statement"):     # batch 3: TDS/TCS/commission statements too
         return pay
     fields = parse_email_bytes(raw, force_channel=force_channel)
     if fields is None:
@@ -2042,7 +2042,7 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None, f
     ensure_channels(db)
     processed = created = errors = skipped_past = 0
     drafts = []
-    payments = {"stored": 0, "skipped": 0, "relinked": 0}   # P1 Go-MMT payment mails
+    payments = {"stored": 0, "skipped": 0, "relinked": 0, "statements": 0}   # P1 Go-MMT payment + statement mails
     from services import ota_payments
     conn = None
     # v6m.2: fix what the old Yatra parser left behind (wrapped cancellation ids, "Guest Email
@@ -2083,9 +2083,12 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None, f
                                          future_only=future_only, drafts_only=drafts_only)
                 processed += 1
                 if res.get("payment"):
-                    # a "Forward as attachment" mail carries many payments
+                    # a "Forward as attachment" mail carries many payments (and maybe statements)
                     payments["stored"] += res.get("stored_count", 1 if res.get("stored") else 0)
                     payments["skipped"] += res.get("skipped_count", 0 if res.get("stored") else 1)
+                    payments["statements"] += res.get("statements_stored", 0)
+                elif res.get("statement") and res.get("stored"):
+                    payments["statements"] += 1
                 if res.get("skipped") and res.get("reason") == "past check-in":
                     skipped_past += 1
                 if res.get("created"):

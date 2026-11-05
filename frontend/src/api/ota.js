@@ -138,3 +138,36 @@ export const linkPaymentLine = (lineId, bookingId) =>
   post(`/ota/payments/lines/${lineId}/link`, { booking_id: bookingId });
 export const ignorePaymentLine = (lineId) => post(`/ota/payments/lines/${lineId}/ignore`);
 export const importPayments = (since) => post(`/ota/payments/import${qs({ since })}`);
+
+// --- P1 batch 3: monthly TDS / TCS / commission statements ---
+export const getStatementMonths = (months = 12) => get(`/ota/statements/months${qs({ months })}`);
+export const getStatementMonth = (period) => get(`/ota/statements/month/${period}`);
+
+/** Download a statement file as Go-MMT sent it (needs the auth header, so not a plain link). */
+export async function downloadStatementFile(id, part, name) {
+  const token = localStorage.getItem("adminToken");
+  const res = await fetch(`${BASE_URL}/ota/statements/${id}/file${qs({ part })}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) await handle(res);
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = name || `statement-${id}.${part}`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+/** A Go-MMT payment or statement mail saved as .eml (Gmail: ⋮ → Download message). */
+export async function uploadOtaMail(file) {
+  const token = localStorage.getItem("adminToken");
+  const body = new FormData();
+  body.append("file", file);
+  return handle(await fetch(`${BASE_URL}/ota/payments/upload-mail`, {
+    method: "POST",
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    body,
+  }));
+}

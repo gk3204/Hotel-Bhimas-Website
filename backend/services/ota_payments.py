@@ -301,11 +301,22 @@ def rematch_open_lines(db, cfg=None) -> int:
 # ---------------------------------------------------------------------------
 # Intake
 # ---------------------------------------------------------------------------
-def ingest_mail(db, raw: bytes, commit=False) -> dict:
-    """The poller's entry point: a payment mail, or a mail carrying payment mails as attachments.
-    Returns {"payment": False} for anything else so the voucher logic carries on."""
+def _ingest_one(db, raw: bytes, commit=False, source="mail") -> dict:
+    """A Go-MMT payment mail, else a Go-MMT monthly statement (batch 3), else {"payment": False}."""
     res = ingest_payment_email(db, raw, commit=commit)
     if res.get("payment"):
+        return res
+    from services import ota_statements
+    st = ota_statements.ingest_statement_email(db, raw, source=source, commit=commit)
+    return st if st is not None else res
+
+
+def ingest_mail(db, raw: bytes, commit=False, source="mail") -> dict:
+    """The poller's entry point: a payment mail, a statement mail, or a mail carrying either as
+    attachments. Returns {"payment": False} for anything else so the voucher logic carries on.
+    A result with "payment" or "statement" set means the mail was ours."""
+    res = _ingest_one(db, raw, commit=commit, source=source)
+    if res.get("payment") or res.get("statement"):
         return res
     return ingest_forwarded_payments(db, raw, commit=commit) or res
 
@@ -327,14 +338,17 @@ def ingest_forwarded_payments(db, raw: bytes, commit=False) -> dict | None:
         logger.info("OTA payment: attachments from %s ignored (not an allowed forwarder)", sender or "?")
         return None
     out = {"payment": True, "forwarded": 0, "stored": False, "stored_count": 0, "skipped_count": 0,
-           "results": []}
+           "statements_stored": 0, "statements_skipped": 0, "results": []}
     for m in inner:
-        r = ingest_payment_email(db, m.as_bytes(), commit=commit)
-        if not r.get("payment"):
+        r = _ingest_one(db, m.as_bytes(), commit=commit)
+        if r.get("payment"):
+            out["stored_count" if r.get("stored") else "skipped_count"] += 1
+        elif r.get("statement"):
+            out["statements_stored" if r.get("stored") else "statements_skipped"] += 1
+        else:
             continue
         out["forwarded"] += 1
-        out["stored_count" if r.get("stored") else "skipped_count"] += 1
-        out["results"].append({k: r.get(k) for k in ("utr", "amount", "stored", "reason", "lines")})
+        out["results"].append({k: r.get(k) for k in ("utr", "amount", "kind", "period", "stored", "reason", "lines")})
     out["stored"] = out["stored_count"] > 0
     if not out["forwarded"]:
         return None
@@ -855,14 +869,18 @@ def detect_alerts(db, make_alert, today=None) -> None:
     overdue = _alert_overdue(db, make_alert, cfg, today)
     waiting = _alert_unconfirmed(db, make_alert, today)
     problems = _alert_problems(db, make_alert)
+    from services import ota_statements
+    missing = ota_statements.detect_alerts(db, make_alert, today=today)     # batch 3: statements not received
     live = {ALERT_UNCONFIRMED: waiting, ALERT_PROBLEM: problems}
-    for a in db.query(FraudAlert).filter(FraudAlert.status == "open",
-                                         FraudAlert.type.in_((ALERT_OVERDUE, ALERT_UNCONFIRMED, ALERT_PROBLEM))).all():
+    for a in db.query(FraudAlert).filter(FraudAlert.status == "open", FraudAlert.type.in_(
+            (ALERT_OVERDUE, ALERT_UNCONFIRMED, ALERT_PROBLEM, ota_statements.ALERT_MISSING))).all():
         try:
-            pid = json.loads(a.detail or "{}").get("payment_id")
+            info = json.loads(a.detail or "{}")
         except (TypeError, ValueError):
-            pid = None
+            info = {}
+        pid = info.get("payment_id")
         if (a.type == ALERT_OVERDUE and a.booking_id not in overdue) or \
+                (a.type == ota_statements.ALERT_MISSING and info.get("dedupe_key") not in missing) or \
                 (a.type in live and pid not in live[a.type]):
             a.status, a.reviewed_at = "dismissed", _now_naive()
             a.review_note = "Auto-closed: the payment has since arrived / been confirmed."

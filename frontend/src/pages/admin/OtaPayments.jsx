@@ -11,6 +11,7 @@ import {
   getPaymentSummary, getPayments, getPayment, getPaymentBookings, getPaymentExceptions,
   getPaymentCandidates, receivePayment, undoPaymentReceipt, addPayment, linkPaymentLine,
   ignorePaymentLine, importPayments, getBookingPaymentState,
+  getStatementMonths, getStatementMonth, downloadStatementFile, uploadOtaMail,
 } from "../../api/ota";
 import { exportCsv } from "../../utils/exportCsv";
 
@@ -161,10 +162,11 @@ const OtaPayments = () => {
       </div>
       {summary.error && <ErrorBox error={summary.error} />}
 
-      <Tabs tabs={[["payments", "Payments"], ["bookings", "Bookings"], ["exceptions", "Exceptions"]]} active={tab} onChange={setTab} />
+      <Tabs tabs={[["payments", "Payments"], ["bookings", "Bookings"], ["exceptions", "Exceptions"], ["tax", "TDS / TCS"]]} active={tab} onChange={setTab} />
       {tab === "payments" && <PaymentsTab version={version} refresh={refresh} showToast={showToast} />}
       {tab === "bookings" && <BookingsTab version={version} />}
       {tab === "exceptions" && <ExceptionsTab version={version} refresh={refresh} showToast={showToast} />}
+      {tab === "tax" && <TaxTab version={version} refresh={refresh} showToast={showToast} />}
 
       {adding && <AddPaymentModal onClose={() => setAdding(false)} onSaved={() => { setAdding(false); refresh(); showToast("Payment added"); }} />}
     </PageShell>
@@ -478,6 +480,182 @@ function ExceptionsTab({ version, refresh, showToast }) {
           onDone={() => { setLinking(null); refresh(); showToast("Line linked"); }} />
       )}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------- TDS / TCS (batch 3)
+const KIND_SHORT = { tds: "TDS", tcs: "TCS", commission: "Commission invoice", credit_memo: "Credit memo" };
+
+/** A pre-filled e-mail asking Go-MMT for a statement that never came. No address: the owner's mail
+ *  app asks for it (their Go-MMT account manager). */
+function askMmtHref(kind, label) {
+  const what = { tds: "TDS statement", tcs: "TCS statement", commission: "monthly commission invoice / statement" }[kind];
+  const subject = `Hotel Bhimas Tirupati (HTLDOM014889) - ${what} for ${label} not received`;
+  const body = `Dear Go-MMT team,\n\nWe have not received the ${what} for bookings in ${label} for Hotel Bhimas, ` +
+    `Tirupati (vendor code HTLDOM014889). Please send it to this address.\n\nRegards,\nHotel Bhimas`;
+  return `mailto:?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+}
+
+function TaxCell({ m, k }) {
+  const t = m[k];
+  if (!t.received) {
+    if (!m.due) return <span className="text-slate-500 text-xs">due by {m.due_on}</span>;
+    return (
+      <div>
+        <Chip tone="danger">Not received</Chip>
+        <a className="block text-xs text-[#E5C07B] underline mt-1" href={askMmtHref(k, m.label)}>Ask Go-MMT</a>
+      </div>
+    );
+  }
+  return (
+    <div>
+      <div className="font-semibold">{money(t.statement)}</div>
+      <div className="text-xs text-slate-400">
+        {t.bookings} booking(s)
+        {t.with_voucher > 0
+          ? <> · vouchers {money(t.voucher)} for {t.with_voucher} (statement {money(t.statement_with_voucher)})</>
+          : <> · no voucher figures</>}
+      </div>
+      {t.differs > 0 && <Chip tone="warn">{t.differs} differ</Chip>}
+    </div>
+  );
+}
+
+function TaxTab({ version, refresh, showToast }) {
+  const [rep, reload] = useLoad(() => getStatementMonths(12), [version]);
+  const [open, setOpen] = useState(null);
+  const [uploading, setUploading] = useState(false);
+  const months = rep.data?.months || [];
+  const upload = async (e) => {
+    const f = e.target.files?.[0];
+    e.target.value = "";
+    if (!f) return;
+    setUploading(true);
+    try {
+      const r = await uploadOtaMail(f);
+      showToast(r.statement
+        ? (r.stored ? `${KIND_SHORT[r.kind]} for ${r.period?.slice(0, 7)} saved (${r.rows} bookings)` : `Not saved: ${r.reason}`)
+        : (r.stored || r.stored_count ? "Payment saved" : `Not saved: ${r.reason || "already recorded"}`));
+      refresh();
+    } catch (err) { showToast(`❌ ${err.message}`); }
+    setUploading(false);
+  };
+  const dl = (s, part) => downloadStatementFile(s.id, part, part === "pdf" ? s.pdf_name : s.file_name)
+    .catch((err) => showToast(`❌ ${err.message}`));
+  return (
+    <Card title={<>Go-MMT statements by month <InfoTip text="TDS (0.1%, 194-O) and TCS (0.5%, GST) Go-MMT deducted, as its monthly statements say, against the figures on each booking's voucher. For filing, Form 26AS and the GST portal's TCS credit are final; this is the booking-by-booking check." /></>}>
+      <FilterRow>
+        <label className={`cursor-pointer ${uploading ? "opacity-50" : ""}`}>
+          <span className="inline-block bg-slate-800/60 border border-slate-600 hover:bg-slate-700/60 px-4 py-2 rounded-lg font-semibold">
+            {uploading ? "Reading…" : "Upload a Go-MMT mail (.eml)"}
+          </span>
+          <input type="file" accept=".eml,message/rfc822" className="hidden" onChange={upload} disabled={uploading} />
+        </label>
+        <span className="text-xs text-slate-400">For a statement or payment mail that reached your main inbox only (Gmail: ⋮ → Download message).</span>
+      </FilterRow>
+      {rep.loading ? <Spinner className="p-10" /> : rep.error ? <ErrorBox error={rep.error} onRetry={reload} /> : !months.length ? (
+        <Empty text="No Go-MMT statements yet. They arrive by mail each month; use Import history to read past ones." />
+      ) : (
+        <Table head={<><Th>Month</Th><Th>TDS deducted</Th><Th>TCS collected</Th><Th>Commission</Th><Th>Files</Th><Th></Th></>}>
+          {months.map((m) => (
+            <tr key={m.period} className="hover:bg-slate-800/40">
+              <Td className="font-semibold whitespace-nowrap">{m.label}</Td>
+              <Td><TaxCell m={m} k="tds" /></Td>
+              <Td><TaxCell m={m} k="tcs" /></Td>
+              <Td>
+                {m.commission.received ? (
+                  <div>
+                    <div className="font-semibold">{money(m.commission.total)}</div>
+                    <div className="text-xs text-slate-400">{money(m.commission.commission)} + GST {money(m.commission.gst)}</div>
+                    <div className="text-xs text-slate-500 font-mono">{m.commission.invoices.join(", ")}</div>
+                  </div>
+                ) : m.due ? (
+                  <div><Chip tone="danger">Not received</Chip>
+                    <a className="block text-xs text-[#E5C07B] underline mt-1" href={askMmtHref("commission", m.label)}>Ask Go-MMT</a></div>
+                ) : <span className="text-slate-500 text-xs">due by {m.due_on}</span>}
+                {m.commission.credit_memos !== 0 && <div className="text-xs text-emerald-300 mt-1">Credit memos {money(m.commission.credit_memos)}</div>}
+              </Td>
+              <Td>
+                <div className="flex flex-col gap-1">
+                  {m.files.map((s) => (
+                    <div key={s.id} className="flex flex-wrap gap-1 items-center text-xs">
+                      <span className="text-slate-400">{KIND_SHORT[s.kind]}</span>
+                      {s.file_name && <button className="underline text-[#E5C07B]" onClick={() => dl(s, "xlsx")}>xlsx</button>}
+                      {s.pdf_name && <button className="underline text-[#E5C07B]" onClick={() => dl(s, "pdf")}>pdf</button>}
+                    </div>
+                  ))}
+                  {!m.files.length && <span className="text-slate-500 text-xs">—</span>}
+                </div>
+              </Td>
+              <Td right>{m.files.length > 0 && <GhostButton onClick={() => setOpen(m)}>Bookings</GhostButton>}</Td>
+            </tr>
+          ))}
+        </Table>
+      )}
+      {open && <TaxMonthModal m={open} onClose={() => setOpen(null)} />}
+    </Card>
+  );
+}
+
+const CHECK_CHIP = {
+  ok: ["Matches voucher", "ok"], differs: ["Differs", "warn"], no_voucher: ["No voucher figure", "neutral"],
+  not_in_statement: ["Not in statement", "neutral"],
+};
+
+function TaxMonthModal({ m, onClose }) {
+  const [st] = useLoad(() => getStatementMonth(m.period.slice(0, 7)), [m.period]);
+  const [onlyProblems, setOnlyProblems] = useState(false);
+  const rows = (st.data?.rows || []).filter((r) => !onlyProblems || r.flags.length);
+  const csv = () => exportCsv(`go-mmt-statements-${m.period.slice(0, 7)}.csv`, rows, [
+    { header: "OTA booking ID", value: (r) => r.ota_booking_id },
+    { header: "PMS booking", value: (r) => r.booking_id },
+    { header: "Guest", value: (r) => r.guest_name },
+    { header: "Check-in", value: (r) => r.check_in },
+    { header: "Check-out", value: (r) => r.check_out },
+    { header: "TDS statement", value: (r) => r.tds },
+    { header: "TDS voucher", value: (r) => r.tds_voucher },
+    { header: "TDS check", value: (r) => r.tds_check },
+    { header: "TCS statement", value: (r) => r.tcs },
+    { header: "TCS voucher", value: (r) => r.tcs_voucher },
+    { header: "TCS check", value: (r) => r.tcs_check },
+    { header: "Commission incl GST", value: (r) => r.commission },
+    { header: "GST on commission", value: (r) => r.commission_gst },
+    { header: "Credit memo", value: (r) => r.credit_memo },
+    { header: "Flags", value: (r) => r.flags.join(" ") },
+  ]);
+  const Check = ({ v }) => { const [l, t] = CHECK_CHIP[v] || [v, "neutral"]; return <Chip tone={t}>{l}</Chip>; };
+  return (
+    <Modal title={`Go-MMT statements - ${m.label}`} onClose={onClose} wide>
+      <div className="flex flex-wrap gap-3 items-center mb-3 text-sm">
+        <label className="flex items-center gap-1 text-slate-300">
+          <input type="checkbox" checked={onlyProblems} onChange={(e) => setOnlyProblems(e.target.checked)} /> Only bookings to check
+        </label>
+        <GhostButton onClick={csv} disabled={!rows.length}>CSV</GhostButton>
+        <span className="text-xs text-slate-400">"Not in PMS" = a Go-MMT booking this hotel's PMS has no record of.</span>
+      </div>
+      {st.loading ? <Spinner className="p-8" /> : st.error ? <ErrorBox error={st.error} /> : !rows.length ? <Empty text="Nothing to show." /> : (
+        <div className="max-h-[60vh] overflow-y-auto">
+          <Table head={<><Th>Booking</Th><Th>Stay</Th><Th right>TDS</Th><Th right>TCS</Th><Th right>Commission</Th><Th>Check</Th></>}>
+            {rows.map((r) => (
+              <tr key={r.ota_booking_id}>
+                <Td className="font-mono text-xs">{r.ota_booking_id}<div className="text-slate-500 font-sans">{r.booking_id ? `#${r.booking_id}` : "not in PMS"} · {r.guest_name || "—"}</div></Td>
+                <Td className="whitespace-nowrap text-xs">{r.check_in} → {r.check_out}</Td>
+                <Td right>{r.tds_check === "not_in_statement" ? "—" : money(r.tds)}{r.tds_voucher != null && r.tds_check !== "not_in_statement" && <div className="text-xs text-slate-500">voucher {money(r.tds_voucher)}</div>}</Td>
+                <Td right>{r.tcs_check === "not_in_statement" ? "—" : money(r.tcs)}{r.tcs_voucher != null && r.tcs_check !== "not_in_statement" && <div className="text-xs text-slate-500">voucher {money(r.tcs_voucher)}</div>}</Td>
+                <Td right>{r.commission ? money(r.commission) : "—"}{r.credit_memo ? <div className="text-xs text-emerald-300">memo {money(r.credit_memo)}</div> : null}</Td>
+                <Td>
+                  <div className="flex flex-col gap-1 items-start">
+                    {r.tds_check !== "not_in_statement" && <span className="text-xs">TDS <Check v={r.tds_check} /></span>}
+                    {r.tcs_check !== "not_in_statement" && <span className="text-xs">TCS <Check v={r.tcs_check} /></span>}
+                    {r.booking_status === "cancelled" && <Chip tone="neutral">Cancelled</Chip>}
+                  </div>
+                </Td>
+              </tr>
+            ))}
+          </Table>
+        </div>
+      )}
+    </Modal>
   );
 }
 

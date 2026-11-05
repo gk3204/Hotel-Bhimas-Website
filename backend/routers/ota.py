@@ -16,7 +16,7 @@ import re
 from datetime import date, datetime, time, timedelta
 from typing import Dict, List, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
@@ -26,7 +26,7 @@ from models import Booking, OtaSettlement, OtaSettlementLine, OtaDraftBooking, R
 from schemas import OtaChannelUpdate, OtaSettlementCreate, OtaDraftConfirm, DeskBookingCreate, BookingItemCreate
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
-from services import ota_service, ota_payments
+from services import ota_service, ota_payments, ota_statements
 
 logger = logging.getLogger(__name__)
 
@@ -330,9 +330,10 @@ def import_payments(since: str = Query(..., description="YYYY-MM-DD - read Go-MM
     recorded is skipped by Message-ID and by UTR. Also reads TCS/TDS into drafts saved before P1."""
     d = _parse_date(since, "since")
     res = ota_service.poll_mailbox(db, limit=limit, since=d, from_addr=ota_payments.PAYMENT_SENDER)
-    # plus "Forward as attachment" mails from the hotel's own inbox (ota_payment_forwarders)
+    # plus batch 3's monthly TDS / TCS / commission statements, and "Forward as attachment" mails from
+    # the hotel's own inbox (ota_payment_forwarders)
     from utils.settings import get_ota_payment_config
-    for fwd in get_ota_payment_config(db)["forwarders"]:
+    for fwd in [ota_statements.STATEMENT_SENDER] + get_ota_payment_config(db)["forwarders"]:
         more = ota_service.poll_mailbox(db, limit=limit, since=d, from_addr=fwd)
         res["processed"] = (res.get("processed") or 0) + (more.get("processed") or 0)
         for k, v in (more.get("payments") or {}).items():
@@ -345,6 +346,64 @@ def import_payments(since: str = Query(..., description="YYYY-MM-DD - read Go-MM
                 after={"since": since, "limit": limit, "processed": res.get("processed"),
                        "payments": res.get("payments"), "voucher_taxes_filled": taxes},
                 commit=True)
+    return res
+
+
+# --- P1 batch 3: Go-MMT monthly TDS / TCS / commission statements (services/ota_statements.py) ---
+def _period(s):
+    try:
+        return datetime.strptime(s, "%Y-%m").date()
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="Month must be YYYY-MM")
+
+
+@router.get("/statements/months")
+def statement_months(months: int = Query(12, ge=1, le=36),
+                     db: Session = Depends(get_db), user=Depends(require_admin)):
+    """One row per month: TDS / TCS statement vs vouchers, commission, and what is still missing."""
+    return ota_statements.month_report(db, months=months)
+
+
+@router.get("/statements/month/{period}")
+def statement_month(period: str, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """One month booking by booking (period = YYYY-MM)."""
+    return ota_statements.month_detail(db, _period(period))
+
+
+@router.get("/statements/{statement_id}/file")
+def statement_file(statement_id: int, part: str = Query("xlsx", pattern="^(xlsx|pdf)$"),
+                   db: Session = Depends(get_db), user=Depends(require_admin)):
+    """The statement exactly as Go-MMT sent it - the spreadsheet, or the invoice / credit-memo PDF."""
+    s = db.query(ota_statements.OtaTaxStatement).filter(ota_statements.OtaTaxStatement.id == statement_id).first()
+    if s is None:
+        raise HTTPException(status_code=404, detail="Statement not found")
+    data, name = (s.pdf_data, s.pdf_name) if part == "pdf" else (s.file_data, s.file_name)
+    if not data:
+        raise HTTPException(status_code=404, detail="That file was not attached")
+    media = "application/pdf" if part == "pdf" else \
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    safe = re.sub(r"[^A-Za-z0-9._-]+", "_", name or f"statement-{s.id}.{part}")
+    return Response(content=bytes(data), media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="{safe}"'})
+
+
+@router.post("/payments/upload-mail")
+async def upload_mail(file: UploadFile = File(...), db: Session = Depends(get_db), user=Depends(require_admin)):
+    """A Go-MMT payment or statement mail saved as .eml (Gmail: ⋮ -> Download message) - for mail that
+    never reached the PMS mailbox. Goes through exactly the same reading as mail from the poller."""
+    raw = await file.read()
+    if not raw or len(raw) > 15 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Choose a .eml file under 15 MB")
+    res = ota_payments.ingest_mail(db, raw, source="upload")
+    if not (res.get("payment") or res.get("statement")):
+        db.rollback()
+        raise HTTPException(status_code=400, detail="This is not a Go-MMT payment or statement mail")
+    if res.get("payment"):
+        ota_payments.rematch_open_lines(db)
+    write_audit(db, user, "ota.mail_uploaded", "ota", None,
+                after={k: res.get(k) for k in ("payment", "statement", "kind", "period", "utr", "stored", "reason",
+                                               "stored_count", "statements_stored")}, client="web")
+    db.commit()
     return res
 
 
