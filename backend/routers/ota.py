@@ -20,11 +20,11 @@ from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import Booking, OtaSettlement, OtaDraftBooking, RoomType
+from models import Booking, OtaSettlement, OtaSettlementLine, OtaDraftBooking, RoomType
 from schemas import OtaChannelUpdate, OtaSettlementCreate, OtaDraftConfirm, DeskBookingCreate, BookingItemCreate
 from utils.auth_utils import require_admin, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
-from services import ota_service
+from services import ota_service, ota_payments
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +176,95 @@ def list_settlements(from_: str = Query(None, alias="from"), to: str = Query(Non
     rows = [ota_service.serialize_settlement(s)
             for s in q.order_by(OtaSettlement.created_at.desc()).all()]
     return {"from": str(dfrom), "to": str(dto), "rows": rows}
+
+
+# ============================================================
+# P1 Go-MMT payment tracking (services/ota_payments.py). Batch 1 = intake + read; the screen and
+# Confirm received / Undo arrive in batch 2. Admin only - this is money.
+# ============================================================
+@router.get("/payments")
+def list_payments(from_: str = Query(None, alias="from"), to: str = Query(None),
+                  db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Go-MMT payments by payment date, newest first, with their booking counts."""
+    dfrom, dto = _range(from_, to, default_days=90)
+    pays = (db.query(OtaSettlement)
+            .filter(OtaSettlement.utr.isnot(None),
+                    OtaSettlement.payment_date >= dfrom, OtaSettlement.payment_date <= dto)
+            .order_by(OtaSettlement.payment_date.desc(), OtaSettlement.id.desc()).all())
+    lines = {}
+    if pays:
+        for x in (db.query(OtaSettlementLine)
+                  .filter(OtaSettlementLine.settlement_id.in_([s.id for s in pays])).all()):
+            lines.setdefault(x.settlement_id, []).append(x)
+    rows = []
+    for s in pays:
+        r = ota_payments.serialize_payment(s, lines.get(s.id, []))
+        r.pop("lines", None)
+        rows.append(r)
+    return {"from": str(dfrom), "to": str(dto), "rows": rows,
+            "total": round(sum(r["amount"] for r in rows), 2)}
+
+
+@router.get("/payments/bookings")
+def payment_states(from_: str = Query(None, alias="from"), to: str = Query(None),
+                   state: str = Query(None, description="pending | done | received | not_applicable"),
+                   overdue: bool = Query(None),
+                   db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Every Goibibo / MakeMyTrip booking checking out in [from, to] with its payment state."""
+    dfrom, dto = _range(from_, to, default_days=30)
+    bs = (db.query(Booking)
+          .filter(Booking.booking_source.in_(ota_payments.GO_MMT_CHANNELS),
+                  Booking.check_out >= dfrom, Booking.check_out <= dto)
+          .order_by(Booking.check_out.desc(), Booking.booking_id.desc()).all())
+    states = ota_payments.ota_payment_states(db, bs)
+    rows = []
+    for b in bs:
+        st = states.get(b.booking_id)
+        if st is None or (state and st["state"] != state) or (overdue is not None and st["overdue"] != overdue):
+            continue
+        rows.append({**st, "guest_name": b.guest_name, "booking_source": b.booking_source,
+                     "status": b.status, "check_in": str(b.check_in), "check_out": str(b.check_out)})
+    counts = {}
+    for st in states.values():
+        counts[st["state"]] = counts.get(st["state"], 0) + 1
+    counts["overdue"] = sum(1 for st in states.values() if st["overdue"])
+    return {"from": str(dfrom), "to": str(dto), "counts": counts, "rows": rows}
+
+
+@router.get("/payments/{payment_id}")
+def get_payment(payment_id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    s = db.query(OtaSettlement).filter(OtaSettlement.id == payment_id).first()
+    if s is None:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    lines = (db.query(OtaSettlementLine).filter(OtaSettlementLine.settlement_id == s.id)
+             .order_by(OtaSettlementLine.id).all())
+    return ota_payments.serialize_payment(s, lines)
+
+
+@router.post("/payments/import")
+def import_payments(since: str = Query(..., description="YYYY-MM-DD - read Go-MMT payment mails on/after this date"),
+                    limit: int = Query(1000, ge=1, le=5000),
+                    db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Backfill Go-MMT payment mails (read or unread, left unread). Idempotent - a payment already
+    recorded is skipped by Message-ID and by UTR. Also reads TCS/TDS into drafts saved before P1."""
+    d = _parse_date(since, "since")
+    res = ota_service.poll_mailbox(db, limit=limit, since=d, from_addr=ota_payments.PAYMENT_SENDER)
+    # plus "Forward as attachment" mails from the hotel's own inbox (ota_payment_forwarders)
+    from utils.settings import get_ota_payment_config
+    for fwd in get_ota_payment_config(db)["forwarders"]:
+        more = ota_service.poll_mailbox(db, limit=limit, since=d, from_addr=fwd)
+        res["processed"] = (res.get("processed") or 0) + (more.get("processed") or 0)
+        for k, v in (more.get("payments") or {}).items():
+            res.setdefault("payments", {}).setdefault(k, 0)
+            res["payments"][k] += v
+    taxes = ota_payments.fill_voucher_taxes(db)
+    db.commit()
+    res["voucher_taxes_filled"] = taxes
+    write_audit(db, user, "ota.payments_import", "ota_settlement", None,
+                after={"since": since, "limit": limit, "processed": res.get("processed"),
+                       "payments": res.get("payments"), "voucher_taxes_filled": taxes},
+                commit=True)
+    return res
 
 
 # ============================================================

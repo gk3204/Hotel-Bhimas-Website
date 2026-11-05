@@ -1149,10 +1149,58 @@ class OtaSettlement(Base):
     period_start = Column(Date, nullable=True)
     period_end = Column(Date, nullable=True)
     reference = Column(String(80), nullable=True)   # bank/statement/OTA settlement reference
-    amount = Column(Numeric(10, 2), nullable=False)  # actual amount received
+    amount = Column(Numeric(12, 2), nullable=False)  # actual amount received
     notes = Column(String(500), nullable=True)
     created_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
     created_at = Column(TIMESTAMP, server_default=func.now(), index=True)
+    # --- P1 (migration 061): one Go-MMT bank transfer, booking by booking ---
+    # A "MMT Payment(Wire) Confirmation" mail (source='mail') or an admin entry (source='manual').
+    # `state` is done (the OTA says it paid) or received (an admin saw the credit in the bank).
+    # Lines are in OtaSettlementLine; services/ota_payments.py owns all of this.
+    payment_date = Column(Date, nullable=True, index=True)
+    utr = Column(String(40), nullable=True)               # the mail's "Transaction No"
+    ota_account_code = Column(String(30), nullable=True)  # HTLDOM014889 = Hotel Bhimas
+    bank_name = Column(String(80), nullable=True)
+    bank_account = Column(String(40), nullable=True)
+    lines_total = Column(Numeric(12, 2), nullable=True)
+    source = Column(String(10), nullable=False, default="manual")   # mail | manual
+    message_id = Column(String(200), nullable=True)
+    raw_source = Column(Text, nullable=True)
+    state = Column(String(12), nullable=False, default="done")      # done | received
+    flags = Column(String(200), nullable=True)            # comma list: totals_mismatch, bank_account_mismatch
+    received_at = Column(DateTime, nullable=True)
+    received_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    received_on = Column(Date, nullable=True)             # the bank credit date the admin saw
+    received_amount = Column(Numeric(12, 2), nullable=True)
+    received_note = Column(String(500), nullable=True)
+    undone_at = Column(DateTime, nullable=True)
+    undone_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)
+    undo_reason = Column(String(500), nullable=True)
+
+
+class OtaSettlementLine(Base):
+    """One booking inside a Go-MMT payment (P1, migration 061). `booking_id` is NULL until the
+    OTA's Booking ID is found in the PMS; `expected_amount` is the voucher's payable at match time."""
+    __tablename__ = "ota_settlement_lines"
+    id = Column(Integer, primary_key=True, index=True)
+    settlement_id = Column(Integer, ForeignKey("ota_settlements.id", ondelete="CASCADE"), nullable=False, index=True)
+    channel_code = Column(String(20), nullable=False)      # makemytrip | goibibo (from the row's Brand)
+    ota_booking_id = Column(String(80), nullable=False, index=True)
+    pnr = Column(String(120), nullable=True)
+    guest_name = Column(String(120), nullable=True)
+    hotel_name = Column(String(120), nullable=True)
+    check_in = Column(Date, nullable=True)
+    check_out = Column(Date, nullable=True)
+    original_cost = Column(Numeric(12, 2), nullable=True)
+    amount_paid = Column(Numeric(12, 2), nullable=False)
+    booking_type = Column(String(30), nullable=True)       # "Booked" in every sample so far
+    brand = Column(String(30), nullable=True)              # MMTINDIA | GOIBIBO
+    booking_id = Column(Integer, ForeignKey("bookings.booking_id"), nullable=True, index=True)
+    expected_amount = Column(Numeric(12, 2), nullable=True)
+    # matched | amount_diff | unknown_booking | cancelled_booking | other_property | before_tracking
+    match_status = Column(String(20), nullable=False, default="unknown_booking")
+    linked_by = Column(Integer, ForeignKey("users.user_id"), nullable=True)   # NULL = matched automatically
+    created_at = Column(TIMESTAMP, server_default=func.now())
 
 
 class OtaDraftBooking(Base):
@@ -1181,6 +1229,8 @@ class OtaDraftBooking(Base):
     commission_percent = Column(Numeric(5, 2), nullable=True)  # snapshot of the channel commission at parse time
     commission_amount = Column(Numeric(10, 2), nullable=True)  # ACTUAL commission (incl GST) read from the voucher
     net_payout = Column(Numeric(10, 2), nullable=True)         # ACTUAL "Payable to Property" read from the voucher
+    tcs_amount = Column(Numeric(10, 2), nullable=True)         # P1: voucher "TCS @ 0.5%" (migration 061)
+    tds_amount = Column(Numeric(10, 2), nullable=True)         # P1: voucher "TDS @ 0.1%" (migration 061)
     message_id = Column(String(200), nullable=True, index=True)  # email Message-ID, for IMAP-level dedupe
     raw_source = Column(String, nullable=True)             # raw email text snippet (audit / manual fallback)
     # v5r: how many ROOMS the voucher is for. Without this every OTA booking was created as one room

@@ -117,6 +117,17 @@ DESK_PAY_GATEWAY_KEY = "desk_pay_gateway"
 OTA_AUTO_CONFIRM_MODE_KEY = "ota_auto_confirm_mode"              # off | single_only | all
 OTA_AUTO_CONFIRM_VARIANCE_KEY = "ota_auto_confirm_max_variance_percent"
 
+# P1 Go-MMT payment tracking (owner, 4-5 Nov). Read by services/ota_payments.py only.
+OTA_PAYMENT_ACCOUNTS_KEY = "ota_payment_accounts"            # JSON {"HTLDOM014889": "this", ...: "ignore"}
+OTA_PAYMENT_HOTEL_NAME_KEY = "ota_payment_hotel_name"        # every payment row must name this hotel
+OTA_PAYMENT_BANK_ACCOUNT_KEY = "ota_payment_bank_account"    # the account Go-MMT must pay into
+OTA_PAYMENT_OVERDUE_DAYS_KEY = "ota_payment_overdue_days"    # unpaid N days after checkout = overdue
+OTA_PAYMENT_TOLERANCE_KEY = "ota_payment_tolerance"          # ₹ per booking (Go-MMT rounds to the rupee)
+OTA_PAYMENT_TRACKING_START_KEY = "ota_payment_tracking_start"  # YYYY-MM-DD; blank = first OTA stay in the PMS
+# Comma list of the hotel's own addresses allowed to send Go-MMT payment mails in as Gmail "Forward as
+# attachment" (the history backfill). Blank = attachments are never read - anyone can send a mail.
+OTA_PAYMENT_FORWARDERS_KEY = "ota_payment_forwarders"
+
 # Front-desk policy (v5n; seeded in migration 045). How much KYC the desk must capture before a
 # check-in can complete, and the date from which an unarrived booking becomes an automatic no-show.
 CHECKIN_ID_SCOPE_KEY = "checkin_id_scope"              # lead | per_room | all_adults
@@ -436,6 +447,36 @@ def get_ota_config(db) -> dict:
     return {
         "auto_confirm_mode": mode,
         "max_variance_percent": _as_float(get_setting(db, OTA_AUTO_CONFIRM_VARIANCE_KEY, "5"), 5.0),
+    }
+
+
+# Go-MMT pays two properties from one mailbox: HTLDOM014889 is Hotel Bhimas, HTLDOM014793 is Bhimas
+# Paradise (owner, notes.txt 4 Nov). An account code not listed here is ignored too, never guessed.
+_OTA_PAYMENT_ACCOUNTS_DEFAULT = {"HTLDOM014889": "this", "HTLDOM014793": "ignore"}
+
+
+def get_ota_payment_config(db) -> dict:
+    """P1 Go-MMT payment tracking policy (see services/ota_payments.py)."""
+    try:
+        accounts = json.loads(get_setting(db, OTA_PAYMENT_ACCOUNTS_KEY) or "null") or _OTA_PAYMENT_ACCOUNTS_DEFAULT
+        if not isinstance(accounts, dict):
+            accounts = _OTA_PAYMENT_ACCOUNTS_DEFAULT
+    except (TypeError, ValueError):
+        accounts = _OTA_PAYMENT_ACCOUNTS_DEFAULT
+    start = (get_setting(db, OTA_PAYMENT_TRACKING_START_KEY) or "").strip()
+    try:
+        start = datetime.strptime(start, "%Y-%m-%d").date() if start else None
+    except ValueError:
+        start = None
+    return {
+        "accounts": {str(k).strip().upper(): str(v).strip().lower() for k, v in accounts.items()},
+        "hotel_name": (get_setting(db, OTA_PAYMENT_HOTEL_NAME_KEY) or "Hotel Bhimas").strip(),
+        "bank_account": re.sub(r"\D", "", get_setting(db, OTA_PAYMENT_BANK_ACCOUNT_KEY) or "3124969778"),
+        "overdue_days": max(0, _as_int(get_setting(db, OTA_PAYMENT_OVERDUE_DAYS_KEY, "3"), 3)),
+        "tolerance": max(0.0, _as_float(get_setting(db, OTA_PAYMENT_TOLERANCE_KEY, "1"), 1.0)),
+        "tracking_start": start,
+        "forwarders": [a.strip().lower() for a in (get_setting(db, OTA_PAYMENT_FORWARDERS_KEY) or "").split(",")
+                       if "@" in a],
     }
 
 

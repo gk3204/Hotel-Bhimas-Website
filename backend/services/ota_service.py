@@ -366,6 +366,35 @@ def _expected_payout(db, code, dfrom, dto):
     return round(gross, 2), round(expected, 2), len(rows)
 
 
+def _actual_settled(db, code, dfrom, dto) -> float:
+    """Money received for one channel in [dfrom, dto].
+
+    P1: a Go-MMT payment mail is one transfer covering MakeMyTrip AND Goibibo bookings, so a
+    settlement with lines counts each line under its own brand's channel; a hand-entered settlement
+    (no lines) counts whole under its channel_code as before. Dated by the payment date when known -
+    a payment imported today for last month belongs to last month."""
+    from sqlalchemy import func
+    from models import OtaSettlementLine
+    day = func.coalesce(OtaSettlement.payment_date, func_date(OtaSettlement.created_at))
+    q = db.query(OtaSettlement)
+    if dfrom is not None:
+        q = q.filter(day >= dfrom)
+    if dto is not None:
+        q = q.filter(day <= dto)
+    settlements = q.all()
+    with_lines = set()
+    if settlements:
+        with_lines = {sid for (sid,) in db.query(OtaSettlementLine.settlement_id)
+                      .filter(OtaSettlementLine.settlement_id.in_([s.id for s in settlements])).distinct()}
+    total = sum(float(s.amount or 0) for s in settlements
+                if s.id not in with_lines and s.channel_code == code)
+    if with_lines:
+        total += sum(float(x.amount_paid or 0) for x in db.query(OtaSettlementLine)
+                     .filter(OtaSettlementLine.settlement_id.in_(with_lines),
+                             OtaSettlementLine.channel_code == code).all())
+    return round(total, 2)
+
+
 def reconcile_payouts(db, channel=None, dfrom=None, dto=None) -> dict:
     """Per-OTA expected payout (gross - commission) vs actual bank settlements, mismatch flagged.
 
@@ -377,12 +406,7 @@ def reconcile_payouts(db, channel=None, dfrom=None, dto=None) -> dict:
     tot_gross = tot_expected = tot_actual = 0.0
     for code in codes:
         gross, expected, n = _expected_payout(db, code, dfrom, dto)
-        q = db.query(OtaSettlement).filter(OtaSettlement.channel_code == code)
-        if dfrom is not None:
-            q = q.filter(func_date(OtaSettlement.created_at) >= dfrom)
-        if dto is not None:
-            q = q.filter(func_date(OtaSettlement.created_at) <= dto)
-        actual = round(sum(float(s.amount or 0) for s in q.all()), 2)
+        actual = _actual_settled(db, code, dfrom, dto)
         diff = round(actual - expected, 2)
         rows.append({
             "channel": code,
@@ -754,6 +778,14 @@ def _commission_net(text: str) -> dict:
         out["commission_amount"] = comm
     if net is not None:
         out["net_payout"] = net
+    # P1: the two tax deductions inside (C). Go-MMT "7. TCS @ 0.5% ₹ 23.0  8. TDS @ 0.1% ₹ 4.6" (the
+    # HTML puts the amount on the next line); Yatra "(C) TCS @0.5% (includes CGST/SGST)\t10.50" and
+    # "(D) TDS @0.1% TDS under Section 194 O\t2.10" - that "194" must not be read as the amount.
+    for key, label in (("tcs_amount", "TCS"), ("tds_amount", "TDS")):
+        amt = _num(_first([r"\b" + label + r"\s*@\s*[\d.]+\s*%\s*(?:\([^)]*\))?\s*"
+                           r"(?:TDS\s+under\s+section\s+\d+\s*[A-Z]?\b)?" + _cur + r"([\d,]+(?:\.\d+)?)"], text))
+        if amt is not None:
+            out[key] = amt
     return out
 
 
@@ -1218,6 +1250,8 @@ def _upsert_draft(db, fields: dict) -> tuple[OtaDraftBooking, bool]:
     d.amount = fields.get("amount")
     d.commission_amount = fields.get("commission_amount")
     d.net_payout = fields.get("net_payout")
+    d.tcs_amount = fields.get("tcs_amount")
+    d.tds_amount = fields.get("tds_amount")
     d.message_id = msg_id
     d.raw_source = fields.get("raw_source")
     db.flush()
@@ -1698,6 +1732,12 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
     appear as a never-arrived booking); `drafts_only` skips auto-confirm so every upcoming stay
     waits in Admin -> OTA for the desk to pick the room type and confirm. Cancellations are still
     matched to existing bookings either way."""
+    # P1: a Go-MMT bank-transfer advice is money, not a booking - it goes to the payment tracker
+    # before the voucher logic (which would only discard it as a noise subject).
+    from services import ota_payments
+    pay = ota_payments.ingest_mail(db, raw, commit=commit)
+    if pay.get("payment"):
+        return pay
     fields = parse_email_bytes(raw, force_channel=force_channel)
     if fields is None:
         return {"parsed": False, "reason": "no OTA channel detected"}
@@ -1951,7 +1991,7 @@ def repair_yatra_drafts(db, dry_run=False) -> dict:
     return out
 
 
-def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -> dict:
+def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None, from_addr=None) -> dict:
     """Connect to the configured IMAP mailbox, ingest OTA emails into drafts.
 
     Backfill (since given) defaults to future_only=True + drafts_only=True: stays already past are
@@ -2002,6 +2042,8 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
     ensure_channels(db)
     processed = created = errors = skipped_past = 0
     drafts = []
+    payments = {"stored": 0, "skipped": 0, "relinked": 0}   # P1 Go-MMT payment mails
+    from services import ota_payments
     conn = None
     # v6m.2: fix what the old Yatra parser left behind (wrapped cancellation ids, "Guest Email
     # Address" in names, no voucher rate). Idempotent - a no-op once the rows are clean.
@@ -2022,6 +2064,9 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
             criteria = ("SINCE", since.strftime("%d-%b-%Y"))
         else:
             criteria = ("UNSEEN",)
+        if from_addr:
+            # P1 payment backfill: only one sender's mail, so `limit` is not spent on vouchers.
+            criteria = criteria + ("FROM", from_addr)
         typ, data = conn.search(None, *criteria)
         if typ != "OK":
             return {"configured": True, "processed": 0, "created": 0, "error": "search failed"}
@@ -2037,6 +2082,10 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
                 res = ingest_email_bytes(db, raw, commit=False,
                                          future_only=future_only, drafts_only=drafts_only)
                 processed += 1
+                if res.get("payment"):
+                    # a "Forward as attachment" mail carries many payments
+                    payments["stored"] += res.get("stored_count", 1 if res.get("stored") else 0)
+                    payments["skipped"] += res.get("skipped_count", 0 if res.get("stored") else 1)
                 if res.get("skipped") and res.get("reason") == "past check-in":
                     skipped_past += 1
                 if res.get("created"):
@@ -2049,6 +2098,11 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
             except Exception as e:  # per-message failure shouldn't abort the batch
                 errors += 1
                 logger.warning(f"OTA IMAP: failed to process message {num!r}: {e}")
+        # P1: a payment that arrived before its voucher was confirmed links up now.
+        try:
+            payments["relinked"] = ota_payments.rematch_open_lines(db)
+        except Exception:
+            logger.exception("OTA poll: payment rematch failed")
         db.commit()
     except Exception as e:
         logger.error(f"OTA IMAP poll failed: {e}")
@@ -2075,7 +2129,7 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None) -
             except Exception:
                 pass
     return {"configured": True, "processed": processed, "created": created,
-            "errors": errors, "skipped_past": skipped_past, "drafts": drafts}
+            "errors": errors, "skipped_past": skipped_past, "drafts": drafts, "payments": payments}
 
 
 def _load_room_lines(d) -> list | None:
