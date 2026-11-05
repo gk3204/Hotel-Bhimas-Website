@@ -14,6 +14,7 @@ const ALERT_TYPES = [
   "off_hours_issuance", "off_station_issuance", "same_id_two_rooms",
   "repeated_refunds", "max_cards_exceeded", "lost_reissue_mismatch",
   "card_issue_without_approval",
+  "ota_payment_overdue", "ota_payment_unconfirmed", "ota_payment_problem",
 ];
 
 const sevChip = (s) =>

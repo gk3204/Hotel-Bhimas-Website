@@ -551,6 +551,12 @@ def serialize_payment(s: OtaSettlement, lines=None) -> dict:
         "received_on": str(s.received_on) if s.received_on else None,
         "received_amount": float(s.received_amount) if s.received_amount is not None else None,
         "received_note": s.received_note,
+        # what the bank showed minus what Go-MMT said it sent; None until received
+        "received_difference": (round(float(s.received_amount) - float(s.amount or 0), 2)
+                                 if s.received_amount is not None else None),
+        "undo_reason": s.undo_reason,
+        "undone_at": s.undone_at.isoformat() if s.undone_at else None,
+        "notes": s.notes,
         "created_at": s.created_at.isoformat() if s.created_at else None,
     }
     if lines is not None:
@@ -559,3 +565,304 @@ def serialize_payment(s: OtaSettlement, lines=None) -> dict:
         out["unmatched"] = sum(1 for x in lines if x.match_status == "unknown_booking")
         out["differences"] = sum(1 for x in lines if x.match_status in ("amount_diff", "cancelled_booking"))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 - the admin's actions (owner, 5 Nov: confirm per UTR, admin/owner only, undo with a reason)
+# ---------------------------------------------------------------------------
+class PaymentError(ValueError):
+    """A refused admin action; the message is shown to the admin as-is."""
+
+
+UNCONFIRMED_AFTER_DAYS = 7      # a 'done' payment nobody has checked in the bank for a week -> alert
+
+
+def _now_naive():
+    return clock.now_utc().replace(tzinfo=None)
+
+
+def receive_payment(db, s: OtaSettlement, *, user_id=None, received_on=None, received_amount=None,
+                    note=None) -> OtaSettlement:
+    """'Payment received': an admin saw this UTR's credit in the bank. Every booking in it turns
+    received at once. A bank amount that differs from the transfer is kept and shown, not refused -
+    the admin is reporting what the bank says."""
+    if s.state == "received":
+        raise PaymentError("This payment is already marked received.")
+    amount = round(float(received_amount), 2) if received_amount is not None else float(s.amount or 0)
+    if amount < 0:
+        raise PaymentError("The amount seen in the bank cannot be negative.")
+    s.state = "received"
+    s.received_on = received_on or s.payment_date or clock.business_today()
+    s.received_amount = amount
+    s.received_note = (note or "").strip()[:500] or None
+    s.received_at = _now_naive()
+    s.received_by = user_id
+    s.undone_at = s.undone_by = s.undo_reason = None
+    db.flush()
+    return s
+
+
+def undo_receipt(db, s: OtaSettlement, *, user_id=None, reason=None) -> OtaSettlement:
+    """Back to 'payment done'. A reason is required; the previous receipt stays in the audit log."""
+    reason = (reason or "").strip()
+    if s.state != "received":
+        raise PaymentError("Only a payment marked received can be undone.")
+    if len(reason) < 3:
+        raise PaymentError("Give a reason for undoing the receipt.")
+    s.state = "done"
+    s.received_on = s.received_amount = s.received_note = s.received_at = s.received_by = None
+    s.undone_at = _now_naive()
+    s.undone_by = user_id
+    s.undo_reason = reason[:500]
+    db.flush()
+    return s
+
+
+def _line_status(db, line, booking, cfg) -> str:
+    if booking.status == "cancelled":
+        return "cancelled_booking"
+    if booking.ota_net_payout is None:
+        return "matched"
+    owed = float(booking.ota_net_payout) - _paid_elsewhere(db, booking.booking_id, exclude_line_id=line.id)
+    return "matched" if abs(float(line.amount_paid) - owed) <= cfg["tolerance"] else "amount_diff"
+
+
+def link_line(db, line: OtaSettlementLine, booking, *, user_id=None) -> OtaSettlementLine:
+    """An admin ties a payment line to a booking by hand (the OTA id was typed differently, or the
+    booking was made without one). `linked_by` keeps automatic re-matching away from it."""
+    if not is_go_mmt(booking):
+        raise PaymentError("Only a Goibibo or MakeMyTrip booking can be linked to a Go-MMT payment.")
+    cfg = get_ota_payment_config(db)
+    line.booking_id = booking.booking_id
+    line.expected_amount = booking.ota_net_payout
+    line.linked_by = user_id
+    db.flush()
+    line.match_status = _line_status(db, line, booking, cfg)
+    db.flush()
+    return line
+
+
+def ignore_line(db, line: OtaSettlementLine, *, user_id=None) -> OtaSettlementLine:
+    """Take a line out of the exceptions (a stay from before the PMS, say). link_line undoes it."""
+    line.booking_id = None
+    line.match_status = "ignored"
+    line.linked_by = user_id
+    db.flush()
+    return line
+
+
+def _manual_rows(db, ids, amounts):
+    bookings = {b.booking_id: b for b in db.query(Booking).filter(Booking.booking_id.in_(ids)).all()}
+    missing = [i for i in ids if i not in bookings]
+    if missing:
+        raise PaymentError(f"Booking(s) not found: {', '.join(map(str, missing))}.")
+    rows = []
+    for i in ids:
+        b = bookings[i]
+        if not is_go_mmt(b):
+            raise PaymentError(f"Booking #{i} is not a Goibibo / MakeMyTrip booking.")
+        a = amounts.get(i, b.ota_net_payout)
+        if a is None:
+            raise PaymentError(f"Booking #{i} has no voucher payable - enter its amount.")
+        rows.append((b, round(float(a), 2)))
+    return rows
+
+
+def create_manual_payment(db, *, utr, payment_date, amount, booking_ids, amounts=None, note=None,
+                          user_id=None) -> OtaSettlement:
+    """'Add payment' for a transfer whose mail never arrived: the admin types the UTR, date and amount
+    and ticks the bookings it covers. Each line is the voucher's payable unless `amounts` says
+    otherwise ({booking_id: amount})."""
+    utr = re.sub(r"\s+", "", str(utr or "")).upper()
+    if not utr:
+        raise PaymentError("Enter the UTR / bank reference.")
+    if db.query(OtaSettlement).filter(OtaSettlement.utr == utr).first() is not None:
+        raise PaymentError(f"A payment with UTR {utr} is already recorded.")
+    if not payment_date:
+        raise PaymentError("Enter the payment date.")
+    try:
+        amount = round(float(amount), 2)
+    except (TypeError, ValueError):
+        raise PaymentError("Enter the amount transferred.")
+    if amount <= 0:
+        raise PaymentError("The amount must be more than zero.")
+    ids = list(dict.fromkeys(int(i) for i in (booking_ids or [])))
+    if not ids:
+        raise PaymentError("Tick at least one booking.")
+    rows = _manual_rows(db, ids, {int(k): v for k, v in (amounts or {}).items()})
+    cfg = get_ota_payment_config(db)
+    lines_total = round(sum(a for _, a in rows), 2)
+    s = OtaSettlement(
+        channel_code="makemytrip", amount=amount, lines_total=lines_total, reference=utr, utr=utr,
+        payment_date=payment_date, source="manual", state="done", created_by=user_id,
+        flags="totals_mismatch" if abs(lines_total - amount) > 0.5 else None,
+        period_start=min(b.check_in for b, _ in rows), period_end=max(b.check_in for b, _ in rows),
+        notes=((note or "").strip()[:500] or f"Added by hand, {len(rows)} booking(s)"),
+    )
+    db.add(s)
+    db.flush()
+    for b, a in rows:
+        line = OtaSettlementLine(
+            settlement_id=s.id, channel_code=b.booking_source, ota_booking_id=b.ota_booking_id or f"#{b.booking_id}",
+            guest_name=b.guest_name, check_in=b.check_in, check_out=b.check_out, amount_paid=a,
+            booking_id=b.booking_id, expected_amount=b.ota_net_payout, linked_by=user_id,
+            brand="GOIBIBO" if b.booking_source == "goibibo" else "MMTINDIA")
+        db.add(line)
+        db.flush()
+        line.match_status = _line_status(db, line, b, cfg)
+    db.flush()
+    return s
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 - what the OTA Payments screen shows
+# ---------------------------------------------------------------------------
+def _tracked_bookings(db, cfg, until=None):
+    """Go-MMT bookings whose stay has begun (MMT pays after check-in), from the tracking start."""
+    q = db.query(Booking).filter(Booking.booking_source.in_(GO_MMT_CHANNELS),
+                                 Booking.check_in <= (until or clock.business_today()))
+    start = tracking_start(db, cfg)
+    if start is not None:
+        q = q.filter(Booking.check_in >= start)
+    return q.all()
+
+
+def _sum_money(xs, f) -> float:
+    return round(sum(float(f(x) or 0) for x in xs), 2)
+
+
+def summary(db, today=None) -> dict:
+    """The four tiles: pending, overdue, done-awaiting-bank-check, received this month."""
+    cfg = get_ota_payment_config(db)
+    today = today or clock.business_today()
+    states = ota_payment_states(db, _tracked_bookings(db, cfg, today), cfg=cfg, today=today)
+    pend = [st for st in states.values() if st["state"] == "pending"]
+    over = [st for st in pend if st["overdue"]]
+    done = db.query(OtaSettlement).filter(OtaSettlement.utr.isnot(None), OtaSettlement.state == "done").all()
+    rec = (db.query(OtaSettlement)
+           .filter(OtaSettlement.state == "received", OtaSettlement.received_on >= today.replace(day=1),
+                   OtaSettlement.received_on <= today).all())
+    return {
+        "today": str(today),
+        "pending": {"count": len(pend), "expected": _sum_money(pend, lambda s: s["expected"])},
+        "overdue": {"count": len(over), "expected": _sum_money(over, lambda s: s["expected"])},
+        "awaiting_bank_check": {"count": len(done), "amount": _sum_money(done, lambda s: s.amount)},
+        "received_this_month": {"count": len(rec), "amount": _sum_money(rec, lambda s: s.received_amount)},
+        "overdue_days": cfg["overdue_days"],
+    }
+
+
+_EXCEPTION_LINES = ("unknown_booking", "amount_diff", "cancelled_booking", "other_property")
+_MONEY_FLAGS = {"short_paid", "over_paid", "paid_but_cancelled"}
+
+
+def exceptions(db, today=None) -> dict:
+    """Everything a person must look at: problem lines, flagged payments, overdue / mis-paid bookings."""
+    cfg = get_ota_payment_config(db)
+    today = today or clock.business_today()
+    lines = (db.query(OtaSettlementLine).filter(OtaSettlementLine.match_status.in_(_EXCEPTION_LINES))
+             .order_by(OtaSettlementLine.settlement_id.desc(), OtaSettlementLine.id).all())
+    sids = {x.settlement_id for x in lines}
+    pays = {s.id: s for s in db.query(OtaSettlement).filter(OtaSettlement.id.in_(sids)).all()} if sids else {}
+    out_lines = []
+    for x in lines:
+        r = serialize_line(x)
+        s = pays.get(x.settlement_id)
+        r["utr"] = s.utr if s else None
+        r["payment_date"] = str(s.payment_date) if s and s.payment_date else None
+        out_lines.append(r)
+    flagged = [serialize_payment(s) for s in db.query(OtaSettlement)
+               .filter(OtaSettlement.flags.isnot(None), OtaSettlement.flags != "")
+               .order_by(OtaSettlement.payment_date.desc()).all()]
+    bs = _tracked_bookings(db, cfg, today)
+    states = ota_payment_states(db, bs, cfg=cfg, today=today)
+    by_id = {b.booking_id: b for b in bs}
+    bad = []
+    for bid, st in states.items():
+        if st["overdue"] or (set(st["flags"]) & _MONEY_FLAGS):
+            b = by_id[bid]
+            bad.append({**st, "guest_name": b.guest_name, "booking_source": b.booking_source,
+                        "status": b.status, "check_in": str(b.check_in), "check_out": str(b.check_out)})
+    bad.sort(key=lambda r: r["check_out"])
+    return {"lines": out_lines, "payments": flagged, "bookings": bad}
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 - alerts (called from utils/fraud_detection.run_reconciliation)
+# ---------------------------------------------------------------------------
+ALERT_OVERDUE = "ota_payment_overdue"          # med  - a stay MMT has not paid N days after checkout
+ALERT_UNCONFIRMED = "ota_payment_unconfirmed"  # low  - MMT says paid, nobody checked the bank in a week
+ALERT_PROBLEM = "ota_payment_problem"          # high for a wrong bank account, else med
+
+
+def _alert_overdue(db, make_alert, cfg, today) -> set:
+    states = ota_payment_states(db, _tracked_bookings(db, cfg, today), cfg=cfg, today=today)
+    overdue = set()
+    for bid, st in states.items():
+        if not st["overdue"]:
+            continue
+        overdue.add(bid)
+        make_alert(type=ALERT_OVERDUE, severity="med", dedupe_key=f"{ALERT_OVERDUE}:booking:{bid}",
+                   booking_id=bid,
+                   detail={"ota_booking_id": st["ota_booking_id"], "expected": st["expected"],
+                           "note": f"Go-MMT has not paid this booking {cfg['overdue_days']} days after "
+                                   f"checkout - ask payments@go-mmt.com"})
+    return overdue
+
+
+def _alert_unconfirmed(db, make_alert, today) -> set:
+    cutoff = today - timedelta(days=UNCONFIRMED_AFTER_DAYS)
+    waiting = set()
+    for s in db.query(OtaSettlement).filter(OtaSettlement.utr.isnot(None), OtaSettlement.state == "done",
+                                            OtaSettlement.payment_date <= cutoff).all():
+        waiting.add(s.id)
+        make_alert(type=ALERT_UNCONFIRMED, severity="low", dedupe_key=f"{ALERT_UNCONFIRMED}:payment:{s.id}",
+                   detail={"payment_id": s.id, "utr": s.utr, "amount": float(s.amount or 0),
+                           "payment_date": str(s.payment_date),
+                           "note": "Go-MMT says this was paid over a week ago - check the bank and "
+                                   "press Confirm received on OTA Payments"})
+    return waiting
+
+
+def _alert_problems(db, make_alert) -> set:
+    bad_lines = {}
+    for x in db.query(OtaSettlementLine).filter(
+            OtaSettlementLine.match_status.in_(("unknown_booking", "amount_diff", "cancelled_booking"))).all():
+        bad_lines[x.settlement_id] = bad_lines.get(x.settlement_id, 0) + 1
+    flagged = {s.id: s for s in db.query(OtaSettlement).filter(OtaSettlement.flags.isnot(None),
+                                                               OtaSettlement.flags != "").all()}
+    problems = set(bad_lines) | set(flagged)
+    for sid in sorted(problems):
+        s = flagged.get(sid) or db.query(OtaSettlement).filter(OtaSettlement.id == sid).first()
+        if s is None:
+            continue
+        flags = [f for f in (s.flags or "").split(",") if f]
+        make_alert(type=ALERT_PROBLEM, severity="high" if "bank_account_mismatch" in flags else "med",
+                   dedupe_key=f"{ALERT_PROBLEM}:payment:{sid}",
+                   detail={"payment_id": sid, "utr": s.utr, "flags": flags,
+                           "lines_to_check": bad_lines.get(sid, 0),
+                           "note": "A Go-MMT payment needs checking on OTA Payments -> Exceptions"})
+    return problems
+
+
+def detect_alerts(db, make_alert, today=None) -> None:
+    """Raise the payment alerts through fraud_detection's de-duplicating `make_alert`, and close the
+    overdue / unconfirmed ones whose cause has gone (the booking got paid, the payment confirmed)."""
+    import json
+    from models import FraudAlert
+    cfg = get_ota_payment_config(db)
+    today = today or clock.business_today()
+    overdue = _alert_overdue(db, make_alert, cfg, today)
+    waiting = _alert_unconfirmed(db, make_alert, today)
+    problems = _alert_problems(db, make_alert)
+    live = {ALERT_UNCONFIRMED: waiting, ALERT_PROBLEM: problems}
+    for a in db.query(FraudAlert).filter(FraudAlert.status == "open",
+                                         FraudAlert.type.in_((ALERT_OVERDUE, ALERT_UNCONFIRMED, ALERT_PROBLEM))).all():
+        try:
+            pid = json.loads(a.detail or "{}").get("payment_id")
+        except (TypeError, ValueError):
+            pid = None
+        if (a.type == ALERT_OVERDUE and a.booking_id not in overdue) or \
+                (a.type in live and pid not in live[a.type]):
+            a.status, a.reviewed_at = "dismissed", _now_naive()
+            a.review_note = "Auto-closed: the payment has since arrived / been confirmed."

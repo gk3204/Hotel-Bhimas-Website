@@ -14,8 +14,10 @@ the desk can action them. Phase B (channel-manager two-way sync) is a later prom
 import logging
 import re
 from datetime import date, datetime, time, timedelta
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import or_
 from sqlalchemy.orm import Session
 
@@ -231,14 +233,93 @@ def payment_states(from_: str = Query(None, alias="from"), to: str = Query(None)
     return {"from": str(dfrom), "to": str(dto), "counts": counts, "rows": rows}
 
 
-@router.get("/payments/{payment_id}")
-def get_payment(payment_id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+# --- P1 batch 2: the OTA Payments screen. Fixed paths come before /payments/{payment_id}. ---
+class OtaPaymentReceive(BaseModel):
+    received_on: Optional[date] = None        # the bank credit date; default = the payment date
+    received_amount: Optional[float] = None   # what the bank shows; default = the transfer amount
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class OtaPaymentUndo(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class OtaPaymentManual(BaseModel):
+    utr: str = Field(..., min_length=4, max_length=40)
+    payment_date: date
+    amount: float = Field(..., gt=0)
+    booking_ids: List[int] = Field(..., min_length=1)
+    amounts: Optional[Dict[int, float]] = None   # booking_id -> amount, when not the voucher payable
+    note: Optional[str] = Field(None, max_length=500)
+
+
+class OtaPaymentLink(BaseModel):
+    booking_id: int
+
+
+def _payment_or_404(db, payment_id):
     s = db.query(OtaSettlement).filter(OtaSettlement.id == payment_id).first()
     if s is None:
         raise HTTPException(status_code=404, detail="Payment not found")
+    return s
+
+
+def _payment_out(db, s):
     lines = (db.query(OtaSettlementLine).filter(OtaSettlementLine.settlement_id == s.id)
              .order_by(OtaSettlementLine.id).all())
     return ota_payments.serialize_payment(s, lines)
+
+
+@router.get("/payments/summary")
+def payments_summary(db: Session = Depends(get_db), user=Depends(require_admin)):
+    """The four tiles on OTA Payments."""
+    return ota_payments.summary(db)
+
+
+@router.get("/payments/exceptions")
+def payments_exceptions(db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Lines that found no booking or the wrong amount, flagged payments, overdue / mis-paid bookings."""
+    return ota_payments.exceptions(db)
+
+
+@router.get("/payments/booking/{booking_id}")
+def payment_state_of_booking(booking_id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """One booking's Go-MMT payment state (the badge on the booking detail). `state` is null for a
+    booking that is not Goibibo / MakeMyTrip."""
+    b = db.query(Booking).filter(Booking.booking_id == booking_id).first()
+    if b is None:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return {"booking_id": booking_id, "state": ota_payments.ota_payment_state(db, b)}
+
+
+@router.get("/payments/candidates")
+def payment_candidates(q: str = Query(None, description="OTA id, guest name or booking number"),
+                       unpaid_only: bool = Query(True),
+                       db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Go-MMT bookings to tick on "Add payment" or pick when linking a line - unpaid first."""
+    query = db.query(Booking).filter(Booking.booking_source.in_(ota_payments.GO_MMT_CHANNELS))
+    term = (q or "").strip()
+    if term:
+        like = f"%{term}%"
+        conds = [Booking.ota_booking_id.ilike(like), Booking.guest_name.ilike(like)]
+        if term.lstrip("#").isdigit():
+            conds.append(Booking.booking_id == int(term.lstrip("#")))
+        query = query.filter(or_(*conds))
+    bs = query.order_by(Booking.check_in.desc()).limit(300).all()
+    states = ota_payments.ota_payment_states(db, bs)
+    rows = []
+    for b in bs:
+        st = states.get(b.booking_id)
+        if st is None or (unpaid_only and st["state"] != "pending"):
+            continue
+        rows.append({**st, "guest_name": b.guest_name, "booking_source": b.booking_source, "status": b.status,
+                     "check_in": str(b.check_in), "check_out": str(b.check_out)})
+    return {"rows": rows[:100]}
+
+
+@router.get("/payments/{payment_id}")
+def get_payment(payment_id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    return _payment_out(db, _payment_or_404(db, payment_id))
 
 
 @router.post("/payments/import")
@@ -265,6 +346,102 @@ def import_payments(since: str = Query(..., description="YYYY-MM-DD - read Go-MM
                        "payments": res.get("payments"), "voucher_taxes_filled": taxes},
                 commit=True)
     return res
+
+
+@router.post("/payments")
+def add_payment(data: OtaPaymentManual, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """'Add payment' - a Go-MMT transfer whose mail never arrived, typed in by an admin."""
+    try:
+        s = ota_payments.create_manual_payment(
+            db, utr=data.utr, payment_date=data.payment_date, amount=data.amount,
+            booking_ids=data.booking_ids, amounts=data.amounts, note=data.note,
+            user_id=_resolve_user_id(db, user))
+    except ota_payments.PaymentError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    out = _payment_out(db, s)
+    write_audit(db, user, "ota.payment_add", "ota_settlement", s.id, after=out, client="web")
+    db.commit()
+    return out
+
+
+@router.post("/payments/{payment_id}/receive")
+def receive_payment(payment_id: int, data: OtaPaymentReceive,
+                    db: Session = Depends(get_db), user=Depends(require_admin)):
+    """'Confirm received' - an admin saw this UTR in the bank; all its bookings turn received."""
+    s = _payment_or_404(db, payment_id)
+    before = ota_payments.serialize_payment(s)
+    try:
+        ota_payments.receive_payment(db, s, user_id=_resolve_user_id(db, user), received_on=data.received_on,
+                                     received_amount=data.received_amount, note=data.note)
+    except ota_payments.PaymentError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
+    out = _payment_out(db, s)
+    write_audit(db, user, "ota.payment_received", "ota_settlement", s.id, before=before,
+                after={k: out[k] for k in ("state", "utr", "amount", "received_on", "received_amount",
+                                          "received_difference", "received_note")}, client="web")
+    db.commit()
+    return out
+
+
+@router.post("/payments/{payment_id}/undo")
+def undo_payment_receipt(payment_id: int, data: OtaPaymentUndo,
+                         db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Undo 'received' (admin, with a reason). The bookings go back to 'payment done'."""
+    s = _payment_or_404(db, payment_id)
+    before = ota_payments.serialize_payment(s)
+    try:
+        ota_payments.undo_receipt(db, s, user_id=_resolve_user_id(db, user), reason=data.reason)
+    except ota_payments.PaymentError as e:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(e))
+    out = _payment_out(db, s)
+    write_audit(db, user, "ota.payment_receipt_undone", "ota_settlement", s.id, before=before,
+                after={"state": out["state"], "undo_reason": out["undo_reason"]}, client="web")
+    db.commit()
+    return out
+
+
+def _line_or_404(db, line_id):
+    line = db.query(OtaSettlementLine).filter(OtaSettlementLine.id == line_id).first()
+    if line is None:
+        raise HTTPException(status_code=404, detail="Payment line not found")
+    return line
+
+
+@router.post("/payments/lines/{line_id}/link")
+def link_payment_line(line_id: int, data: OtaPaymentLink,
+                      db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Tie a payment line that found no booking to the right one."""
+    line = _line_or_404(db, line_id)
+    b = db.query(Booking).filter(Booking.booking_id == data.booking_id).first()
+    if b is None:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    before = ota_payments.serialize_line(line)
+    try:
+        ota_payments.link_line(db, line, b, user_id=_resolve_user_id(db, user))
+    except ota_payments.PaymentError as e:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(e))
+    out = ota_payments.serialize_line(line)
+    write_audit(db, user, "ota.payment_line_linked", "ota_settlement_line", line.id, before=before, after=out,
+                client="web")
+    db.commit()
+    return out
+
+
+@router.post("/payments/lines/{line_id}/ignore")
+def ignore_payment_line(line_id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Take a line off the exceptions list (e.g. a stay from before the PMS). Linking it undoes this."""
+    line = _line_or_404(db, line_id)
+    before = ota_payments.serialize_line(line)
+    ota_payments.ignore_line(db, line, user_id=_resolve_user_id(db, user))
+    out = ota_payments.serialize_line(line)
+    write_audit(db, user, "ota.payment_line_ignored", "ota_settlement_line", line.id, before=before, after=out,
+                client="web")
+    db.commit()
+    return out
 
 
 # ============================================================

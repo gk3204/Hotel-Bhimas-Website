@@ -114,3 +114,27 @@ export async function importSince(since) {
   });
   return handle(res);
 }
+
+// --- P1 Go-MMT payment tracking (admin) ---
+const get = async (path) => handle(await fetch(`${BASE_URL}${path}`, { headers: authHeaders() }));
+const post = async (path, body) =>
+  handle(await fetch(`${BASE_URL}${path}`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: body === undefined ? undefined : JSON.stringify(body),
+  }));
+
+export const getPaymentSummary = () => get("/ota/payments/summary");
+export const getPayments = (params) => get(`/ota/payments${qs(params)}`);
+export const getPayment = (id) => get(`/ota/payments/${id}`);
+export const getPaymentBookings = (params) => get(`/ota/payments/bookings${qs(params)}`);
+export const getPaymentExceptions = () => get("/ota/payments/exceptions");
+export const getBookingPaymentState = (bookingId) => get(`/ota/payments/booking/${bookingId}`);
+export const getPaymentCandidates = (params) => get(`/ota/payments/candidates${qs(params)}`);
+export const receivePayment = (id, data) => post(`/ota/payments/${id}/receive`, data);
+export const undoPaymentReceipt = (id, reason) => post(`/ota/payments/${id}/undo`, { reason });
+export const addPayment = (data) => post("/ota/payments", data);
+export const linkPaymentLine = (lineId, bookingId) =>
+  post(`/ota/payments/lines/${lineId}/link`, { booking_id: bookingId });
+export const ignorePaymentLine = (lineId) => post(`/ota/payments/lines/${lineId}/ignore`);
+export const importPayments = (since) => post(`/ota/payments/import${qs({ since })}`);

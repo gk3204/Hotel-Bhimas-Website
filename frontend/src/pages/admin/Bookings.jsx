@@ -12,6 +12,7 @@ import { getRoomTypes } from "../../api/roomTypes";
 import { jwtDecode } from "jwt-decode";
 import { FaSort, FaSortUp, FaSortDown, FaEye, FaTrash, FaIdCard, FaUserSlash, FaUndo, FaCalendarAlt, FaEdit, FaPlus, FaTimes } from "react-icons/fa";
 import { prettyCategory } from "../../utils/useCategoryList";
+import { OtaPaymentBadge } from "./OtaPayments";
 
 // "2026-08-02T14:32:10" -> "14:32". Times are stored/served in Asia/Kolkata.
 const stampTime = (iso) => (iso ? String(iso).slice(11, 16) : "");
@@ -792,6 +793,9 @@ const Bookings = () => {
                           {selectedBooking.ota_booking_id}
                         </p>
                       )}
+                      {/* P1: has Go-MMT paid this one, and is it in the bank? */}
+                      <OtaPaymentBadge bookingId={selectedBooking.booking_id}
+                                       source={selectedBooking.booking_source} />
                     </div>
                     {/* v4b9 R9: paid to the CHANNEL, so it is an advance against this stay and
                         never a Payment row — only extras are collectable at the desk. */}

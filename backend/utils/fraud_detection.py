@@ -336,6 +336,13 @@ def _detect_ota_no_email(db, new_alerts, keys):
                                     "verify the booking id is genuine"})
 
 
+def _detect_ota_payments(db, new_alerts, keys):
+    """P1 batch 2: Go-MMT payment alerts - overdue bookings, payments nobody confirmed in the bank,
+    payments with problems. The rules live in services/ota_payments.detect_alerts."""
+    from services import ota_payments
+    ota_payments.detect_alerts(db, lambda **kw: _make_alert(new_alerts, keys, **kw))
+
+
 def run_reconciliation(db) -> dict:
     """Run every detector, persist new (de-duplicated) alerts, return per-type counts."""
     # v6x: report un-returned viewing / cleaning cards FIRST - the retirement below would otherwise
@@ -372,7 +379,7 @@ def run_reconciliation(db) -> dict:
     for detector in (_detect_card_anomalies, _detect_cleaning_too_long,
                      _detect_cleaning_too_fast, _detect_inspection_overdue,
                      _detect_issuance_fencing, _detect_same_id_two_rooms,
-                     _detect_repeated_refunds, _detect_ota_no_email):
+                     _detect_repeated_refunds, _detect_ota_no_email, _detect_ota_payments):
         try:
             detector(db, new_alerts, keys)
         except Exception as e:
