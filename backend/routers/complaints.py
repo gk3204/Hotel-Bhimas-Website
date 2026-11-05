@@ -21,7 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from database import SessionLocal
-from models import (Booking, BookingItem, Folio, FolioCharge, MaintenanceTicket, Room,
+from models import (Booking, BookingItem, Folio, FolioCharge, GuestRequest, MaintenanceTicket, Room,
                     TicketEscalation)
 from schemas import (ComplaintBulkResolve, ComplaintCompensate, ComplaintConfigUpdate,
                      ComplaintCreate, ComplaintEscalate, ComplaintResolve, ComplaintRespond)
@@ -71,6 +71,44 @@ def stamp_sla(ticket: MaintenanceTicket, cfg: dict, base: datetime | None = None
     pr = ticket.priority if ticket.priority in ("urgent", "high", "normal", "low") else "normal"
     ticket.sla_response_due_at = base + timedelta(minutes=cfg["sla_response_minutes"][pr])
     ticket.sla_resolve_due_at = base + timedelta(minutes=cfg["sla_resolve_minutes"][pr])
+
+
+def log_guest_complaint(db: Session, *, issue: str, booking_id=None, room_id=None, category="other",
+                        priority="normal", ticket_category="other", client_ref=None, raised_by=None,
+                        commit=True):
+    """v8q: the ONE way a guest complaint is created - the desk, the guest app and WhatsApp all come
+    here, so each gets the respond-by / resolve-by timers (and so the owner's WhatsApp when it is
+    ignored). Before this only the desk path stamped them: a WhatsApp complaint could sit forever.
+    Returns (ticket, duplicate)."""
+    from routers.maintenance import create_guest_ticket
+    existing = None
+    if client_ref:
+        existing = db.query(MaintenanceTicket).filter(MaintenanceTicket.client_ref == client_ref).first()
+    ticket = create_guest_ticket(db, issue=issue, booking_id=booking_id, room_id=room_id,
+                                 category=ticket_category, priority=priority, client_ref=client_ref,
+                                 commit=False)
+    # The guest-facing category lives in `area` (the ticket's category is the maintenance taxonomy).
+    if ticket.area is None:
+        ticket.area = f"complaint:{category}"
+    if existing is None:
+        ticket.raised_by = raised_by
+        stamp_sla(ticket, app_settings.get_complaints_config(db))
+    if commit:
+        db.commit()
+        db.refresh(ticket)
+    else:
+        db.flush()
+    return ticket, existing is not None
+
+
+def close_linked_request(db: Session, ticket: MaintenanceTicket):
+    """v8q: a complaint from the guest app also sits on the desk's Guest requests board (and in the
+    guest's own "Your requests"). When the complaint is resolved, that entry shows Done too."""
+    r = db.query(GuestRequest).filter(GuestRequest.client_ref == f"complaint-ticket:{ticket.id}",
+                                      GuestRequest.status.notin_(("completed", "dismissed"))).first()
+    if r is not None:
+        r.status = "completed"
+        r.updated_at = datetime.utcnow()
 
 
 def _breach(ticket: MaintenanceTicket, now: datetime | None = None) -> dict:
@@ -165,7 +203,6 @@ def create_complaint(data: ComplaintCreate, db: Session = Depends(get_db),
     """Front desk logs a guest's complaint against a stay. Creates a source='guest' ticket and
     stamps its SLA due-times. Idempotent on client_ref (via create_guest_ticket)."""
     try:
-        from routers.maintenance import create_guest_ticket
         category = app_settings.validate_category(db, "complaint", data.category)   # editable list (F-A)
         priority = app_settings.validate_category(db, "priority", data.priority)    # editable list (v3 item 2)
         if data.room_id is not None and not db.query(Room).filter(Room.room_id == data.room_id).first():
@@ -174,29 +211,15 @@ def create_complaint(data: ComplaintCreate, db: Session = Depends(get_db),
                 Booking.booking_id == data.booking_id).first():
             raise HTTPException(status_code=404, detail="Booking not found")
 
-        existing = None
-        if data.client_ref:
-            existing = db.query(MaintenanceTicket).filter(
-                MaintenanceTicket.client_ref == data.client_ref).first()
-
-        ticket = create_guest_ticket(
+        ticket, duplicate = log_guest_complaint(
             db, issue=data.issue, booking_id=data.booking_id, room_id=data.room_id,
-            category="other" if data.category not in ("maintenance",) else "other",
-            priority=priority, client_ref=data.client_ref, commit=False)
-        # Store the guest-facing complaint category in area (the ticket's category enum is the
-        # maintenance taxonomy; complaints use their own — kept in `area` so both stay valid).
-        if ticket.area is None:
-            ticket.area = f"complaint:{data.category}"
-        if existing is None:            # a fresh ticket — set SLA + raiser
-            ticket.raised_by = _resolve_user_id(db, user)
-            stamp_sla(ticket, app_settings.get_complaints_config(db))
-        db.commit()
-        db.refresh(ticket)
+            category=data.category, priority=priority, client_ref=data.client_ref,
+            raised_by=_resolve_user_id(db, user))
         write_audit(db, user, "complaint.create", "maintenance_ticket", ticket.id,
                     after={"category": data.category, "priority": ticket.priority,
-                           "booking_id": ticket.booking_id, "duplicate": existing is not None},
+                           "booking_id": ticket.booking_id, "duplicate": duplicate},
                     client="web", commit=True)
-        return {**_complaint_dict(db, ticket), "duplicate": existing is not None}
+        return {**_complaint_dict(db, ticket), "duplicate": duplicate}
     except HTTPException:
         raise
     except Exception as e:
@@ -325,6 +348,7 @@ def resolve_complaint(complaint_id: int, data: ComplaintResolve, db: Session = D
             t.first_responded_at = datetime.utcnow()
         if data.resolution_notes:
             t.resolution_notes = f"{t.resolution_notes + chr(10) if t.resolution_notes else ''}{data.resolution_notes}"
+        close_linked_request(db, t)
         db.commit()
         write_audit(db, user, "complaint.resolve", "maintenance_ticket", t.id,
                     after={"resolution_notes": data.resolution_notes}, client="web", commit=True)
@@ -358,6 +382,7 @@ def bulk_resolve_complaints(data: ComplaintBulkResolve, db: Session = Depends(ge
             if data.resolution_notes:
                 t.resolution_notes = (
                     f"{t.resolution_notes + chr(10) if t.resolution_notes else ''}{data.resolution_notes}")
+            close_linked_request(db, t)
             db.commit()
             write_audit(db, user, "complaint.resolve", "maintenance_ticket", t.id,
                         after={"resolution_notes": data.resolution_notes, "bulk": True},

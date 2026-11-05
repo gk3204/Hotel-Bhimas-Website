@@ -365,8 +365,8 @@ TEMPLATES = {
         # trailing sentence is deliberate: Meta rejects a body that ends on a variable
         "body_preview": (
             "Hi {guest_name}, welcome to Hotel Bhimas (room {room_number}). Order room service, get "
-            "the WiFi code, request a wake-up call or cab, and check out here: {link}. Save this "
-            "message for your stay."
+            "the WiFi code, request a wake-up call or cab, report a problem in your room, and check "
+            "out here: {link}. Save this message for your stay."
         ),
     },
 }

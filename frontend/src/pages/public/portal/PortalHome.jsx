@@ -28,6 +28,9 @@ export default function PortalHome() {
         )}
         {f.wakeup && <Tile to={`${base}/wakeup`} icon="⏰" title="Wake-up call" subtitle="Set a time" />}
         {f.cab && <Tile to={`${base}/cab`} icon="🚕" title="Cab / tour desk" subtitle="Book a ride" />}
+        {f.complaint && (
+          <Tile to={`${base}/complaint`} icon="🛠️" title="Report a problem" subtitle="AC, water, cleaning…" />
+        )}
         {f.contactless_checkout && (
           <Tile to={`${base}/checkout`} icon="🧳" title="Checkout" subtitle={money(data.folio?.balance)} />
         )}

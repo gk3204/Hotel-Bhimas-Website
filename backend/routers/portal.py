@@ -33,10 +33,10 @@ from sqlalchemy.orm import Session
 
 from database import SessionLocal
 from models import (Booking, BookingItem, Folio, FolioCharge, Guest, GuestPortalSession,
-                    GuestRequest, MenuItem, Room)
+                    GuestRequest, MaintenanceTicket, MenuItem, Room)
 from schemas import (CabRequest, CheckoutRequestBody, MenuAvailabilityUpdate, MenuItemCreate,
                      MenuItemUpdate, PortalConfigUpdate, PortalSessionRequest, RequestActionRequest,
-                     RoomServiceOrder, WakeupRequest, WifiRequestBody)
+                     PortalComplaintRequest, RoomServiceOrder, WakeupRequest, WifiRequestBody)
 from utils import clock, ordering
 from utils import settings as app_settings
 from utils.audit import _resolve_user_id, write_audit
@@ -396,6 +396,12 @@ def ack_request(request_id: int, db: Session = Depends(get_db),
     r.status = "acknowledged"
     r.handled_by = _resolve_user_id(db, user)
     r.updated_at = datetime.utcnow()
+    if r.type == "complaint":
+        # v8q: the desk taking it up IS the first response - it stops the response timer
+        tid = (json.loads(r.payload) if r.payload else {}).get("ticket_id")
+        t = db.query(MaintenanceTicket).filter(MaintenanceTicket.id == tid).first() if tid else None
+        if t is not None and t.first_responded_at is None:
+            t.first_responded_at = datetime.utcnow()
     db.commit()
     write_audit(db, user, "portal.request_ack", "guest_request", r.id, client="web", commit=True)
     return _request_dict(db, r, with_room=True)
@@ -621,6 +627,76 @@ def _feature_gate(cfg: dict, key: str):
         raise HTTPException(status_code=409, detail="This service is currently unavailable.")
 
 
+# v8q (owner, 5 Nov): what a guest can report from the guest app.
+# key: (label shown, complaint category, maintenance category, priority). Keep in step with
+# frontend/src/pages/public/portal/PortalComplaint.jsx.
+GUEST_PROBLEMS = {
+    "ac": ("AC / cooling", "maintenance", "appliance", "high"),
+    "water": ("Water / bathroom", "maintenance", "plumbing", "high"),
+    "electrical": ("Lights / power", "maintenance", "electrical", "high"),
+    "cleanliness": ("Cleanliness", "cleanliness", "other", "normal"),
+    "tv_wifi": ("TV / WiFi", "amenities", "other", "normal"),
+    "noise": ("Noise", "noise", "other", "normal"),
+    "service": ("Staff / service", "service", "other", "normal"),
+    "other": ("Something else", "other", "other", "normal"),
+}
+# A guest app cannot open more than this many complaints a day (a public link: no flood).
+PORTAL_COMPLAINTS_PER_DAY = 10
+
+
+def record_complaint_request(db: Session, session, booking, ticket, label: str, detail: str | None,
+                             source: str = "portal") -> GuestRequest:
+    """v8q: put a complaint on the desk's Guest requests board (chime, room, guest) and in the
+    guest's own "Your requests". One entry per complaint (client_ref complaint-ticket:<id>)."""
+    return _create_request(db, session, booking, "complaint",
+                           payload={"ticket_id": ticket.id, "label": label},
+                           note=f"PROBLEM - {label}" + (f": {detail}" if detail else ""),
+                           source=source, client_ref=f"complaint-ticket:{ticket.id}")
+
+
+@router.post("/{token}/complaint")
+def report_problem(token: str, data: PortalComplaintRequest, db: Session = Depends(get_db)):
+    """PUBLIC - v8q: the guest reports a problem. It becomes a guest complaint with the hotel's
+    response / resolve timers (the owner is WhatsApped if ignored), a PRIORITY job for the
+    technician, and an entry on the desk's Guest requests board."""
+    cfg = app_settings.get_portal_config(db)
+    if not cfg["enabled"]:
+        raise HTTPException(status_code=404, detail="The in-room service is currently unavailable.")
+    s, booking = _resolve_token(db, token)
+    from routers.complaints import log_guest_complaint      # lazy: routers import each other
+    since = datetime.utcnow() - timedelta(hours=24)
+    if not data.client_ref or not db.query(MaintenanceTicket).filter(
+            MaintenanceTicket.client_ref == f"portal-complaint:{data.client_ref}").first():
+        recent = db.query(GuestRequest).filter(GuestRequest.booking_id == booking.booking_id,
+                                               GuestRequest.type == "complaint",
+                                               GuestRequest.created_at >= since).count()
+        if recent >= PORTAL_COMPLAINTS_PER_DAY:
+            raise HTTPException(status_code=429,
+                                detail="We already have your reports - please call the front desk.")
+    label, ccat, mcat, prio = GUEST_PROBLEMS.get(data.category, GUEST_PROBLEMS["other"])
+    try:
+        ccat = app_settings.validate_category(db, "complaint", ccat)
+    except HTTPException:
+        ccat = "other"
+    detail = (data.issue or "").strip()
+    if detail == label:
+        detail = ""
+    if data.category == "other" and len(detail) < 3:
+        raise HTTPException(status_code=422, detail="Tell us what's wrong.")
+    room = _room_number(db, s.room_id)
+    ticket, dup = log_guest_complaint(
+        db, issue=f"Guest app - {label}" + (f": {detail}" if detail else "") + (f" (room {room})" if room else ""),
+        booking_id=booking.booking_id, room_id=s.room_id, category=ccat, priority=prio,
+        ticket_category=mcat,
+        client_ref=f"portal-complaint:{data.client_ref}" if data.client_ref else None)
+    r = record_complaint_request(db, s, booking, ticket, label, detail or None)
+    if not dup:
+        write_audit(db, None, "portal.complaint", "maintenance_ticket", ticket.id,
+                    after={"booking_id": booking.booking_id, "category": data.category,
+                           "priority": ticket.priority}, client="guest", commit=True)
+    return {**_request_dict(db, r), "complaint_id": ticket.id, "duplicate": dup}
+
+
 @router.get("/{token}")
 def portal_home(token: str, db: Session = Depends(get_db)):
     """PUBLIC — the in-room portal landing: stay info, enabled features, menu, WiFi, folio balance,
@@ -653,6 +729,7 @@ def portal_home(token: str, db: Session = Depends(get_db)):
             "room_service": cfg["room_service_enabled"], "wifi": cfg["wifi_enabled"],
             "wakeup": cfg["wakeup_enabled"], "cab": cfg["cab_enabled"],
             "contactless_checkout": cfg["contactless_checkout_enabled"],
+            "complaint": True,          # v8q: reporting a problem is always on with the portal
         },
         "menu": menu,
         "wifi": wifi,

@@ -471,6 +471,9 @@ def verify_ticket(ticket_id: int, data: TicketVerifyRequest, db: Session = Depen
     t.verified_at = datetime.utcnow()
     if data.resolution_notes:
         t.resolution_notes = data.resolution_notes
+    if t.source == "guest":
+        from routers.complaints import close_linked_request   # local: routers import each other
+        close_linked_request(db, t)
     db.commit()
     write_audit(db, user, "maintenance.verify", "maintenance_ticket", t.id,
                 after={"status": "resolved", "verified_by": t.verified_by}, client="web", commit=True)

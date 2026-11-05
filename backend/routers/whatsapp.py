@@ -59,6 +59,15 @@ _OPTOUT_MAX_WORDS = 2
 # complaint_ack at the guest.
 _COMPLAINT_RE = re.compile(
     r"\b(problem|problems|complaint|complaints|complain|issue|issues|bad|unhappy)\b")
+# v8q (owner, 5 Nov): a guest who is IN the hotel rarely writes "complaint" - they write "AC not
+# working" or "no hot water". For an in-house guest these words count too. Kept off for anyone else
+# so "is an AC room free?" from a stranger never becomes a complaint.
+_INHOUSE_PROBLEM_RE = re.compile(
+    r"\b(not working|isn'?t working|doesn'?t work|stopped working|no water|no hot water|hot water|"
+    r"leak|leaking|leakage|broken|dirty|smell|smells|smelly|stink|stinks|noisy|noise|disturb\w*|"
+    r"cockroach\w*|bed ?bugs?|insects?|mosquito\w*|repair|ac|a/?c|aircon|cooling|fan|light|lights|"
+    r"tv|wifi|wi-?fi|geyser|heater|toilet|flush|tap|shower|blocked|clogged|power cut|no power|"
+    r"no current|towel|towels|bedsheet|bedsheets|blanket)\b")
 # checkout_reminder invites "Reply EXTEND" -- see _handle_extend_request.
 _EXTEND_RE = re.compile(r"\bextend\b")
 
@@ -549,19 +558,60 @@ def _handle_inbound_text(db, from_number, text, provider_id=None):
         _handle_extend_request(db, from_number, guest, booking_id, provider_id)
         return
 
-    # Complaint keywords -> raise a guest ticket + acknowledge.
-    if _COMPLAINT_RE.search(norm_text):
-        norm, guest, booking_id = _resolve_guest_and_booking(db, from_number)
-        ticket = create_guest_ticket(
-            db, issue=f"Guest WhatsApp complaint: {text[:400]}",
-            booking_id=booking_id,
-            client_ref=f"wa_complaint:{norm}:{booking_id}" if booking_id else None,
-            commit=True)
-        if guest and guest.phone:
+    # Complaint keywords -> raise a guest complaint (with its timers) + acknowledge.
+    norm, guest, booking_id = _resolve_guest_and_booking(db, from_number)
+    booking = db.query(Booking).filter(Booking.booking_id == booking_id).first() if booking_id else None
+    in_house = booking is not None and booking.status == "checked_in"
+    if _COMPLAINT_RE.search(norm_text) or (in_house and _INHOUSE_PROBLEM_RE.search(norm_text)):
+        from routers.complaints import log_guest_complaint   # lazy: routers import each other
+        session = None
+        if in_house:
+            try:
+                from routers.portal import _get_or_create_session
+                session = _get_or_create_session(db, booking)
+            except Exception as e:
+                logger.warning(f"WhatsApp complaint: no guest-app session for booking {booking_id}: {e}")
+        room_id = session.room_id if session is not None else None
+        # One OPEN complaint per stay from WhatsApp: follow-up messages land on it. Once it is
+        # resolved, the next complaint is a new one (it used to be swallowed by the old ref).
+        ref = None
+        if booking_id:
+            from models import MaintenanceTicket
+            from routers.maintenance import TERMINAL_STATUSES
+            base_ref = f"wa_complaint:{norm}:{booking_id}"
+            prev = (db.query(MaintenanceTicket)
+                    .filter((MaintenanceTicket.client_ref == base_ref)
+                            | MaintenanceTicket.client_ref.like(base_ref + ":%"))
+                    .order_by(MaintenanceTicket.id.desc()).all())
+            open_prev = next((t for t in prev if t.status not in TERMINAL_STATUSES), None)
+            ref = open_prev.client_ref if open_prev else (base_ref if not prev else f"{base_ref}:{len(prev) + 1}")
+        ticket, dup = log_guest_complaint(
+            db, issue=f"Guest WhatsApp complaint: {text[:400]}", booking_id=booking_id,
+            room_id=room_id, category="other", priority="high" if in_house else "normal",
+            client_ref=ref)
+        if not dup and session is not None:
+            try:
+                from routers.portal import record_complaint_request
+                record_complaint_request(db, session, booking, ticket, "WhatsApp", text[:200], source="whatsapp")
+            except Exception as e:
+                logger.warning(f"WhatsApp complaint #{ticket.id}: desk board entry failed: {e}")
+        if guest and guest.phone and not dup:
             wa.send_template(db, guest.phone, "complaint_ack", {"guest_name": guest.name},
                              guest_id=guest.guest_id, booking_id=booking_id,
                              respect_optout=False)
-        logger.info(f"WhatsApp complaint -> ticket #{ticket.id} (guest={guest.guest_id if guest else None})")
+            # v8q (owner): tell them the guest app does this too - their message just opened the
+            # 24h window, so a free-text reply needs no extra Meta template.
+            if session is not None:
+                try:
+                    from routers.portal import _portal_url
+                    wa.send_text(db, guest.phone,
+                                 "You can also report a problem - and see what we are doing about it - "
+                                 f"anytime in your Hotel Bhimas guest app: {_portal_url(session.token)}",
+                                 guest_id=guest.guest_id, booking_id=booking_id)
+                except Exception as e:
+                    logger.warning(f"guest-app tip not sent for booking {booking_id}: {e}")
+        logger.info(f"WhatsApp complaint -> ticket #{ticket.id} (guest={guest.guest_id if guest else None}, "
+                    f"in_house={in_house}, duplicate={dup})")
 
 
 @router.post("/webhook")

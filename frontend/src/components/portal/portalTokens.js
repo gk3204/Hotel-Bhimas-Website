@@ -10,7 +10,7 @@ export const STATUS_LABEL = {
 };
 
 export const TYPE_LABEL = {
-  room_service: "Room service", wifi: "WiFi", wakeup: "Wake-up call", cab: "Cab", checkout: "Checkout",
+  room_service: "Room service", wifi: "WiFi", wakeup: "Wake-up call", cab: "Cab", checkout: "Checkout", complaint: "Problem reported",
 };
 
 export const inCls =

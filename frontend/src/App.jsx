@@ -31,6 +31,7 @@ import PortalWakeup from "./pages/public/portal/PortalWakeup";
 import PortalCab from "./pages/public/portal/PortalCab";
 import PortalCheckout from "./pages/public/portal/PortalCheckout";
 import PortalRequests from "./pages/public/portal/PortalRequests";
+import PortalComplaint from "./pages/public/portal/PortalComplaint";
 import PaymentSuccess from "./pages/public/PaymentSuccess";
 import PaymentFailed from "./pages/public/PaymentFailed";
 
@@ -125,6 +126,7 @@ function App() {
         <Route path="wakeup" element={<PortalFeature flag="wakeup"><PortalWakeup /></PortalFeature>} />
         <Route path="cab" element={<PortalFeature flag="cab"><PortalCab /></PortalFeature>} />
         <Route path="checkout" element={<PortalFeature flag="contactless_checkout"><PortalCheckout /></PortalFeature>} />
+        <Route path="complaint" element={<PortalFeature flag="complaint"><PortalComplaint /></PortalFeature>} />
         <Route path="requests" element={<PortalRequests />} />
         {/* An unknown sub-path is a mistyped/stale link, not a 404 for the whole portal. */}
         <Route path="*" element={<Navigate to="." replace />} />

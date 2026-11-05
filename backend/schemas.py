@@ -1578,6 +1578,13 @@ COMPLAINT_CATEGORY_RE = CATEGORY_SLUG_RE   # editable list (F-A); membership che
 COMPLAINT_PRIORITY_RE = CATEGORY_SLUG_RE   # editable list (v3, family `priority`); checked at the endpoint
 
 
+class PortalComplaintRequest(BaseModel):
+    """v8q: a guest reports a problem from the in-room guest app."""
+    category: str = Field("other", max_length=30)
+    issue: str = Field("", max_length=400)
+    client_ref: Optional[str] = Field(None, max_length=80)
+
+
 class ComplaintCreate(BaseModel):
     """Front desk logs a guest's complaint against a stay (source='guest')."""
     issue: str = Field(..., min_length=3, max_length=500)
