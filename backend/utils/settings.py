@@ -127,6 +127,9 @@ OTA_PAYMENT_TRACKING_START_KEY = "ota_payment_tracking_start"  # YYYY-MM-DD; bla
 # Comma list of the hotel's own addresses allowed to send Go-MMT payment mails in as Gmail "Forward as
 # attachment" (the history backfill). Blank = attachments are never read - anyone can send a mail.
 OTA_PAYMENT_FORWARDERS_KEY = "ota_payment_forwarders"
+# P2a Yatra: the hotel's Yatra vendor ID as printed on Yatra's YES Bank payment advice (owner's samples:
+# 58270). An advice naming any other vendor is not this hotel's money and is never stored.
+OTA_PAYMENT_YATRA_VENDOR_KEY = "ota_payment_yatra_vendor_id"
 
 # Front-desk policy (v5n; seeded in migration 045). How much KYC the desk must capture before a
 # check-in can complete, and the date from which an unarrived booking becomes an automatic no-show.
@@ -477,6 +480,7 @@ def get_ota_payment_config(db) -> dict:
         "tracking_start": start,
         "forwarders": [a.strip().lower() for a in (get_setting(db, OTA_PAYMENT_FORWARDERS_KEY) or "").split(",")
                        if "@" in a],
+        "yatra_vendor_id": re.sub(r"\D", "", get_setting(db, OTA_PAYMENT_YATRA_VENDOR_KEY) or "58270"),
     }
 
 

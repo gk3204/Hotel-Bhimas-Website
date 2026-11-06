@@ -1,3 +1,5 @@
+// P2a (owner, 6 Nov): Yatra too - its YES Bank payment advices, its per-booking commission invoices, a
+// channel switch on every tab, expected vs received per payment, and the per-booking money chain.
 // P1 batch 2 (owner, 5 Nov): which Goibibo / MakeMyTrip booking Go-MMT has paid, in which transfer, and
 // whether that money reached the bank. Three states per booking - Payment pending / Payment done /
 // Payment received. "Confirm received" is per payment (one UTR, all its bookings) and admin only.
@@ -12,14 +14,18 @@ import {
   getPaymentCandidates, receivePayment, undoPaymentReceipt, addPayment, linkPaymentLine,
   ignorePaymentLine, importPayments, getBookingPaymentState,
   getStatementMonths, getStatementMonth, downloadStatementFile, uploadOtaMail,
+  getBookingChain, getPaymentSettings, putPaymentSettings,
 } from "../../api/ota";
 import { exportCsv } from "../../utils/exportCsv";
 
-const BRAND = { makemytrip: "MakeMyTrip", goibibo: "Goibibo" };
+const BRAND = { makemytrip: "MakeMyTrip", goibibo: "Goibibo", yatra: "Yatra" };
+const CHANNELS = [["all", "All"], ["makemytrip", "MakeMyTrip"], ["goibibo", "Goibibo"], ["yatra", "Yatra"]];
+const chanParam = (c) => (c && c !== "all" ? c : undefined);
 const FLAG_LABEL = {
   short_paid: "Short paid", over_paid: "Over paid", paid_but_cancelled: "Paid but cancelled",
   no_voucher_amount: "No voucher amount", paid_in_parts: "Paid in parts",
   totals_mismatch: "Totals don't add up", bank_account_mismatch: "Wrong bank account",
+  several_bookings: "Several bookings in one advice",
 };
 const LINE_LABEL = {
   matched: ["Matched", "ok"], amount_diff: ["Amount differs", "warn"], unknown_booking: ["Booking not found", "danger"],
@@ -42,6 +48,7 @@ export function PaymentStateChip({ st }) {
  *  the server, so for any other login (or a non-Go-MMT booking) it simply renders nothing. */
 export function OtaPaymentBadge({ bookingId, source }) {
   const [got, setGot] = useState(null);      // {id, state} - kept per booking so a stale one never shows
+  const [chain, setChain] = useState(false);
   useEffect(() => {
     let live = true;
     if (bookingId && BRAND[source]) {
@@ -53,12 +60,14 @@ export function OtaPaymentBadge({ bookingId, source }) {
   if (!st) return null;
   return (
     <div className="mt-1 text-xs text-slate-300 flex flex-wrap items-center gap-1">
-      <span className="text-slate-400">Go-MMT payment:</span> <PaymentStateChip st={st} />
+      <span className="text-slate-400">{BRAND[source]} payment:</span> <PaymentStateChip st={st} />
       {st.paid > 0 && <span>{money(st.paid)}</span>}
       {st.payment_date && <span>· paid {st.payment_date}</span>}
       {st.utrs?.length > 0 && <span className="font-mono">· {st.utrs.join(", ")}</span>}
       {st.received_on && <span>· in bank {st.received_on}</span>}
+      <button className="underline text-[#E5C07B] ml-1" onClick={() => setChain(true)}>Money chain</button>
       <Flags flags={st.flags} />
+      {chain && <ChainModal bookingId={bookingId} onClose={() => setChain(false)} />}
     </div>
   );
 }
@@ -124,11 +133,13 @@ const OtaPayments = () => {
   const refresh = () => setVersion((v) => v + 1);
   const [adding, setAdding] = useState(false);
   const [importing, setImporting] = useState(false);
-  const [summary] = useLoad(getPaymentSummary, [version]);
+  const [settings, setSettings] = useState(false);
+  const [channel, setChannel] = useState("all");
+  const [summary] = useLoad(() => getPaymentSummary(chanParam(channel)), [version, channel]);
   const s = summary.data;
 
   const runImport = async () => {
-    const since = window.prompt("Read Go-MMT payment mails received on or after (YYYY-MM-DD):", "2025-12-01");
+    const since = window.prompt("Read OTA payment mails (Go-MMT, Yatra) received on or after (YYYY-MM-DD):", "2025-12-01");
     if (!since) return;
     setImporting(true);
     try {
@@ -136,7 +147,8 @@ const OtaPayments = () => {
       const p = r.payments || {};
       showToast(r.configured === false
         ? "The OTA mailbox is not configured on this server."
-        : `Read ${r.processed || 0} mail(s): ${p.stored || 0} payment(s) saved, ${p.skipped || 0} skipped (already saved or other property).`);
+        : `Read ${r.processed || 0} mail(s): ${p.stored || 0} payment(s) saved, ${p.skipped || 0} skipped ` +
+          `(already saved or other property), ${p.statements || 0} statement(s), ${p.documents || 0} Yatra invoice(s).`);
       refresh();
     } catch (e) { showToast(`❌ ${e.message}`); }
     setImporting(false);
@@ -146,27 +158,38 @@ const OtaPayments = () => {
     <PageShell
       icon="💸"
       title="OTA Payments"
-      subtitle="Goibibo / MakeMyTrip: which booking Go-MMT has paid, in which bank transfer (UTR), and whether you have seen that money in the bank."
+      subtitle="Goibibo, MakeMyTrip and Yatra: which booking the OTA has paid, in which bank transfer (UTR), and whether you have seen that money in the bank."
       toast={toast}
     >
       {/* not PageShell's `right` slot: that slot never shrinks, so on a phone it pushed the page sideways */}
-      <div className="flex flex-wrap gap-2 mb-4 md:justify-end">
+      <div className="flex flex-wrap gap-2 mb-4 items-center">
+        <div className="flex flex-wrap gap-1 mr-auto" role="group" aria-label="Channel">
+          {CHANNELS.map(([k, label]) => (
+            <button key={k} onClick={() => setChannel(k)}
+              className={`px-3 py-1.5 rounded-full text-sm font-semibold border transition ${channel === k
+                ? "bg-[#E5C07B] text-slate-900 border-[#E5C07B]" : "border-slate-600 text-slate-300 hover:bg-slate-700/60"}`}>
+              {label}
+            </button>
+          ))}
+        </div>
+        <GhostButton onClick={() => setSettings(true)}>Settings</GhostButton>
         <GhostButton onClick={runImport} disabled={importing}>{importing ? "Reading mail…" : "Import history"}</GhostButton>
         <PrimaryButton onClick={() => setAdding(true)}>+ Add payment</PrimaryButton>
       </div>
       <div className="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6">
         <Stat label="Payment pending (stay started)" value={s ? `${s.pending.count} · ${money(s.pending.expected)}` : "…"} tone="text-amber-300" />
-        <Stat label={`Overdue (${s ? s.overdue_days : 3}+ days after checkout)`} value={s ? `${s.overdue.count} · ${money(s.overdue.expected)}` : "…"} tone="text-red-300" />
+        <Stat label={`Overdue (${s ? s.overdue_days : 3}+ days after checkout; Yatra: check-in)`} value={s ? `${s.overdue.count} · ${money(s.overdue.expected)}` : "…"} tone="text-red-300" />
         <Stat label="Payment done - check the bank" value={s ? `${s.awaiting_bank_check.count} · ${money(s.awaiting_bank_check.amount)}` : "…"} tone="text-sky-300" />
         <Stat label="Received this month" value={s ? `${s.received_this_month.count} · ${money(s.received_this_month.amount)}` : "…"} tone="text-emerald-300" />
       </div>
       {summary.error && <ErrorBox error={summary.error} />}
 
       <Tabs tabs={[["payments", "Payments"], ["bookings", "Bookings"], ["exceptions", "Exceptions"], ["tax", "TDS / TCS"]]} active={tab} onChange={setTab} />
-      {tab === "payments" && <PaymentsTab version={version} refresh={refresh} showToast={showToast} />}
-      {tab === "bookings" && <BookingsTab version={version} />}
-      {tab === "exceptions" && <ExceptionsTab version={version} refresh={refresh} showToast={showToast} />}
-      {tab === "tax" && <TaxTab version={version} refresh={refresh} showToast={showToast} />}
+      {tab === "payments" && <PaymentsTab version={version} refresh={refresh} showToast={showToast} channel={channel} />}
+      {tab === "bookings" && <BookingsTab version={version} channel={channel} />}
+      {tab === "exceptions" && <ExceptionsTab version={version} refresh={refresh} showToast={showToast} channel={channel} />}
+      {tab === "tax" && <TaxTab key={channel} version={version} refresh={refresh} showToast={showToast} channel={channel} />}
+      {settings && <SettingsModal onClose={() => setSettings(false)} onSaved={() => { setSettings(false); refresh(); showToast("Settings saved"); }} />}
 
       {adding && <AddPaymentModal onClose={() => setAdding(false)} onSaved={() => { setAdding(false); refresh(); showToast("Payment added"); }} />}
     </PageShell>
@@ -174,17 +197,17 @@ const OtaPayments = () => {
 };
 
 // ---------------------------------------------------------------- Payments
-function PaymentsTab({ version, refresh, showToast }) {
+function PaymentsTab({ version, refresh, showToast, channel }) {
   const [from, setFrom] = useState(daysAgo(89));
   const [to, setTo] = useState(today());
-  const [list, reload] = useLoad(() => getPayments({ from, to }), [from, to, version]);
+  const [list, reload] = useLoad(() => getPayments({ from, to, channel: chanParam(channel) }), [from, to, version, channel]);
   const [open, setOpen] = useState(null);         // payment id expanded
   const [receiving, setReceiving] = useState(null);
   const [undoing, setUndoing] = useState(null);
   const rows = list.data?.rows || [];
 
   return (
-    <Card title="Go-MMT transfers">
+    <Card title="OTA transfers">
       <FilterRow>
         <input type="date" className={inputCls} value={from} onChange={(e) => setFrom(e.target.value)} aria-label="From" />
         <span className="text-slate-400">to</span>
@@ -197,9 +220,10 @@ function PaymentsTab({ version, refresh, showToast }) {
           {rows.map((p) => (
             <React.Fragment key={p.id}>
               <tr className="hover:bg-slate-800/40">
-                <Td>{p.payment_date}<div className="text-xs text-slate-500">{p.source === "manual" ? "added by hand" : "from mail"}</div></Td>
+                <Td>{p.payment_date}<div className="text-xs text-slate-500">{p.source === "manual" ? "added by hand" : "from mail"}</div>
+                  <div className="flex flex-wrap gap-1 mt-1">{(p.channels || []).map((c) => <Chip key={c}>{BRAND[c] || c}</Chip>)}</div></Td>
                 <Td className="font-mono text-xs">{p.utr}</Td>
-                <Td right>{money(p.amount)}</Td>
+                <Td right>{money(p.amount)}<ExpectedLine p={p} /></Td>
                 <Td>
                   {p.bookings}
                   {p.unmatched > 0 && <span className="ml-2"><Chip tone="danger">{p.unmatched} not found</Chip></span>}
@@ -332,14 +356,16 @@ function UndoModal({ p, onClose, onDone }) {
 }
 
 // ---------------------------------------------------------------- Bookings
-function BookingsTab({ version }) {
+function BookingsTab({ version, channel }) {
+  const [chainOf, setChainOf] = useState(null);
   const [from, setFrom] = useState(daysAgo(29));
   const [to, setTo] = useState(today());
   const [state, setState] = useState("");
   const [overdueOnly, setOverdueOnly] = useState(false);
   const [list, reload] = useLoad(
-    () => getPaymentBookings({ from, to, state: state || undefined, overdue: overdueOnly ? true : undefined }),
-    [from, to, state, overdueOnly, version]);
+    () => getPaymentBookings({ from, to, state: state || undefined, overdue: overdueOnly ? true : undefined,
+      channel: chanParam(channel) }),
+    [from, to, state, overdueOnly, version, channel]);
   const rows = list.data?.rows || [];
   const c = list.data?.counts || {};
   const csv = () => exportCsv(`ota-payments-${from}-${to}.csv`, rows, [
@@ -392,18 +418,20 @@ function BookingsTab({ version }) {
               <Td right>{r.expected == null ? "—" : money(r.expected)}</Td>
               <Td right>{r.paid ? money(r.paid) : "—"}{r.difference ? <div className="text-xs text-amber-300">{r.difference > 0 ? "+" : ""}{r.difference}</div> : null}</Td>
               <Td className="font-mono text-xs">{(r.utrs || []).join(", ") || "—"}{r.payment_date && <div className="text-slate-500">{r.payment_date}</div>}</Td>
-              <Td><PaymentStateChip st={r} /><Flags flags={r.flags} /></Td>
+              <Td><PaymentStateChip st={r} /><Flags flags={r.flags} />
+                <button className="block text-xs underline text-[#E5C07B] mt-1" onClick={() => setChainOf(r.booking_id)}>Money chain</button></Td>
             </tr>
           ))}
         </Table>
       )}
+      {chainOf && <ChainModal bookingId={chainOf} onClose={() => setChainOf(null)} />}
     </Card>
   );
 }
 
 // ---------------------------------------------------------------- Exceptions
-function ExceptionsTab({ version, refresh, showToast }) {
-  const [ex, reload] = useLoad(getPaymentExceptions, [version]);
+function ExceptionsTab({ version, refresh, showToast, channel }) {
+  const [ex, reload] = useLoad(() => getPaymentExceptions(chanParam(channel)), [version, channel]);
   const [linking, setLinking] = useState(null);
   if (ex.loading) return <Spinner className="p-10" />;
   if (ex.error) return <ErrorBox error={ex.error} onRetry={reload} />;
@@ -471,7 +499,7 @@ function ExceptionsTab({ version, refresh, showToast }) {
           </Table>
         )}
         {bookings.some((r) => r.overdue) && (
-          <div className="px-5 pb-4 text-xs text-slate-400">Overdue: ask Go-MMT at payments@go-mmt.com with the booking IDs.</div>
+          <div className="px-5 pb-4 text-xs text-slate-400">Overdue: ask Go-MMT at payments@go-mmt.com, or your Yatra account manager, with the booking IDs.</div>
         )}
       </Card>
 
@@ -498,6 +526,15 @@ function askMmtHref(kind, label) {
 
 function TaxCell({ m, k }) {
   const t = m[k];
+  if (m.channel === "yatra") {
+    // Yatra sends no TDS / TCS statement - its vouchers are the record
+    return t.voucher == null ? <span className="text-slate-500 text-xs">{t.bookings ? "no voucher figures" : "—"}</span> : (
+      <div>
+        <div className="font-semibold">{money(t.voucher)}</div>
+        <div className="text-xs text-slate-400">from {t.with_voucher} voucher(s) · Yatra issues no statement</div>
+      </div>
+    );
+  }
   if (!t.received) {
     if (!m.due) return <span className="text-slate-500 text-xs">due by {m.due_on}</span>;
     return (
@@ -521,8 +558,10 @@ function TaxCell({ m, k }) {
   );
 }
 
-function TaxTab({ version, refresh, showToast }) {
-  const [rep, reload] = useLoad(() => getStatementMonths(12), [version]);
+function TaxTab({ version, refresh, showToast, channel }) {
+  // starts from the page's channel switch; the parent remounts this tab (key) when that switch changes
+  const [ota, setOta] = useState(channel === "yatra" ? "yatra" : "go_mmt");
+  const [rep, reload] = useLoad(() => getStatementMonths(12, ota), [version, ota]);
   const [open, setOpen] = useState(null);
   const [uploading, setUploading] = useState(false);
   const months = rep.data?.months || [];
@@ -534,7 +573,8 @@ function TaxTab({ version, refresh, showToast }) {
     try {
       const r = await uploadOtaMail(f);
       showToast(r.statement
-        ? (r.stored ? `${KIND_SHORT[r.kind]} for ${r.period?.slice(0, 7)} saved (${r.rows} bookings)` : `Not saved: ${r.reason}`)
+        ? (r.stored ? (r.channel === "yatra" ? `Yatra ${KIND_SHORT[r.kind]?.toLowerCase()} saved`
+          : `${KIND_SHORT[r.kind]} for ${r.period?.slice(0, 7)} saved (${r.rows} bookings)`) : `Not saved: ${r.reason}`)
         : (r.stored || r.stored_count ? "Payment saved" : `Not saved: ${r.reason || "already recorded"}`));
       refresh();
     } catch (err) { showToast(`❌ ${err.message}`); }
@@ -543,20 +583,29 @@ function TaxTab({ version, refresh, showToast }) {
   const dl = (s, part) => downloadStatementFile(s.id, part, part === "pdf" ? s.pdf_name : s.file_name)
     .catch((err) => showToast(`❌ ${err.message}`));
   return (
-    <Card title={<>Go-MMT statements by month <InfoTip text="TDS (0.1%, 194-O) and TCS (0.5%, GST) Go-MMT deducted, as its monthly statements say, against the figures on each booking's voucher. For filing, Form 26AS and the GST portal's TCS credit are final; this is the booking-by-booking check." /></>}>
+    <Card title={<>{ota === "yatra" ? "Yatra" : "Go-MMT"} statements by month <InfoTip text={ota === "yatra"
+      ? "Yatra sends a GST commission invoice with each booking and a credit note when one is cancelled; TDS (0.1%) and TCS (0.5%) are as each voucher states them - Yatra issues no monthly statement. For filing, Form 26AS and the GST portal's TCS credit are final."
+      : "TDS (0.1%, 194-O) and TCS (0.5%, GST) Go-MMT deducted, as its monthly statements say, against the figures on each booking's voucher. For filing, Form 26AS and the GST portal's TCS credit are final; this is the booking-by-booking check."} /></>}>
       <FilterRow>
+        <div className="flex gap-1 mr-2">
+          {[["go_mmt", "Go-MMT"], ["yatra", "Yatra"]].map(([k, l]) => (
+            <button key={k} onClick={() => setOta(k)} className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${ota === k
+              ? "bg-[#E5C07B] text-slate-900 border-[#E5C07B]" : "border-slate-600 text-slate-300 hover:bg-slate-700/60"}`}>{l}</button>
+          ))}
+        </div>
         <label className={`cursor-pointer ${uploading ? "opacity-50" : ""}`}>
           <span className="inline-block bg-slate-800/60 border border-slate-600 hover:bg-slate-700/60 px-4 py-2 rounded-lg font-semibold">
-            {uploading ? "Reading…" : "Upload a Go-MMT mail (.eml)"}
+            {uploading ? "Reading…" : "Upload an OTA mail (.eml)"}
           </span>
           <input type="file" accept=".eml,message/rfc822" className="hidden" onChange={upload} disabled={uploading} />
         </label>
-        <span className="text-xs text-slate-400">For a statement or payment mail that reached your main inbox only (Gmail: ⋮ → Download message).</span>
+        <span className="text-xs text-slate-400">For a Go-MMT statement / payment mail, a Yatra payment advice, or a Yatra booking mail with its invoice, that reached your main inbox only (Gmail: ⋮ → Download message).</span>
       </FilterRow>
       {rep.loading ? <Spinner className="p-10" /> : rep.error ? <ErrorBox error={rep.error} onRetry={reload} /> : !months.length ? (
-        <Empty text="No Go-MMT statements yet. They arrive by mail each month; use Import history to read past ones." />
+        <Empty text={ota === "yatra" ? "No Yatra invoices yet. They come with each Yatra booking mail; use Import history to read past ones."
+          : "No Go-MMT statements yet. They arrive by mail each month; use Import history to read past ones."} />
       ) : (
-        <Table head={<><Th>Month</Th><Th>TDS deducted</Th><Th>TCS collected</Th><Th>Commission</Th><Th>Files</Th><Th></Th></>}>
+        <Table head={<><Th>Month</Th><Th>TDS deducted</Th><Th>TCS collected</Th><Th>Commission</Th><Th>{ota === "yatra" ? "Invoices" : "Files"}</Th><Th></Th></>}>
           {months.map((m) => (
             <tr key={m.period} className="hover:bg-slate-800/40">
               <Td className="font-semibold whitespace-nowrap">{m.label}</Td>
@@ -567,9 +616,10 @@ function TaxTab({ version, refresh, showToast }) {
                   <div>
                     <div className="font-semibold">{money(m.commission.total)}</div>
                     <div className="text-xs text-slate-400">{money(m.commission.commission)} + GST {money(m.commission.gst)}</div>
-                    <div className="text-xs text-slate-500 font-mono">{m.commission.invoices.join(", ")}</div>
+                    <div className="text-xs text-slate-500 font-mono">{ota === "yatra" ? `${m.commission.invoices.length} invoice(s)` : m.commission.invoices.join(", ")}</div>
+                    {m.commission.differs > 0 && <Chip tone="warn">{m.commission.differs} differ from voucher</Chip>}
                   </div>
-                ) : m.due ? (
+                ) : ota === "yatra" ? <span className="text-slate-500 text-xs">—</span> : m.due ? (
                   <div><Chip tone="danger">Not received</Chip>
                     <a className="block text-xs text-[#E5C07B] underline mt-1" href={askMmtHref("commission", m.label)}>Ask Go-MMT</a></div>
                 ) : <span className="text-slate-500 text-xs">due by {m.due_on}</span>}
@@ -577,13 +627,14 @@ function TaxTab({ version, refresh, showToast }) {
               </Td>
               <Td>
                 <div className="flex flex-col gap-1">
-                  {m.files.map((s) => (
+                  {(ota === "yatra" ? m.files.slice(0, 4) : m.files).map((s) => (
                     <div key={s.id} className="flex flex-wrap gap-1 items-center text-xs">
-                      <span className="text-slate-400">{KIND_SHORT[s.kind]}</span>
+                      <span className="text-slate-400">{ota === "yatra" ? s.doc_no : KIND_SHORT[s.kind]}</span>
                       {s.file_name && <button className="underline text-[#E5C07B]" onClick={() => dl(s, "xlsx")}>xlsx</button>}
                       {s.pdf_name && <button className="underline text-[#E5C07B]" onClick={() => dl(s, "pdf")}>pdf</button>}
                     </div>
                   ))}
+                  {ota === "yatra" && m.files.length > 4 && <span className="text-xs text-slate-500">+{m.files.length - 4} more - see Bookings</span>}
                   {!m.files.length && <span className="text-slate-500 text-xs">—</span>}
                 </div>
               </Td>
@@ -592,21 +643,21 @@ function TaxTab({ version, refresh, showToast }) {
           ))}
         </Table>
       )}
-      {open && <TaxMonthModal m={open} onClose={() => setOpen(null)} />}
+      {open && <TaxMonthModal m={open} ota={ota} onClose={() => setOpen(null)} />}
     </Card>
   );
 }
 
 const CHECK_CHIP = {
   ok: ["Matches voucher", "ok"], differs: ["Differs", "warn"], no_voucher: ["No voucher figure", "neutral"],
-  not_in_statement: ["Not in statement", "neutral"],
+  not_in_statement: ["Not in statement", "neutral"], voucher_only: ["Voucher (no statement)", "neutral"],
 };
 
-function TaxMonthModal({ m, onClose }) {
-  const [st] = useLoad(() => getStatementMonth(m.period.slice(0, 7)), [m.period]);
+function TaxMonthModal({ m, onClose, ota = "go_mmt" }) {
+  const [st] = useLoad(() => getStatementMonth(m.period.slice(0, 7), ota), [m.period, ota]);
   const [onlyProblems, setOnlyProblems] = useState(false);
   const rows = (st.data?.rows || []).filter((r) => !onlyProblems || r.flags.length);
-  const csv = () => exportCsv(`go-mmt-statements-${m.period.slice(0, 7)}.csv`, rows, [
+  const csv = () => exportCsv(`${ota === "yatra" ? "yatra" : "go-mmt"}-statements-${m.period.slice(0, 7)}.csv`, rows, [
     { header: "OTA booking ID", value: (r) => r.ota_booking_id },
     { header: "PMS booking", value: (r) => r.booking_id },
     { header: "Guest", value: (r) => r.guest_name },
@@ -621,17 +672,19 @@ function TaxMonthModal({ m, onClose }) {
     { header: "Commission incl GST", value: (r) => r.commission },
     { header: "GST on commission", value: (r) => r.commission_gst },
     { header: "Credit memo", value: (r) => r.credit_memo },
+    { header: "Commission voucher", value: (r) => r.commission_voucher },
+    { header: "Commission check", value: (r) => r.commission_check },
     { header: "Flags", value: (r) => r.flags.join(" ") },
   ]);
   const Check = ({ v }) => { const [l, t] = CHECK_CHIP[v] || [v, "neutral"]; return <Chip tone={t}>{l}</Chip>; };
   return (
-    <Modal title={`Go-MMT statements - ${m.label}`} onClose={onClose} wide>
+    <Modal title={`${ota === "yatra" ? "Yatra" : "Go-MMT"} statements - ${m.label}`} onClose={onClose} wide>
       <div className="flex flex-wrap gap-3 items-center mb-3 text-sm">
         <label className="flex items-center gap-1 text-slate-300">
           <input type="checkbox" checked={onlyProblems} onChange={(e) => setOnlyProblems(e.target.checked)} /> Only bookings to check
         </label>
         <GhostButton onClick={csv} disabled={!rows.length}>CSV</GhostButton>
-        <span className="text-xs text-slate-400">"Not in PMS" = a Go-MMT booking this hotel's PMS has no record of.</span>
+        <span className="text-xs text-slate-400">"Not in PMS" = an OTA booking this hotel's PMS has no record of.</span>
       </div>
       {st.loading ? <Spinner className="p-8" /> : st.error ? <ErrorBox error={st.error} /> : !rows.length ? <Empty text="Nothing to show." /> : (
         <div className="max-h-[60vh] overflow-y-auto">
@@ -642,17 +695,114 @@ function TaxMonthModal({ m, onClose }) {
                 <Td className="whitespace-nowrap text-xs">{r.check_in} → {r.check_out}</Td>
                 <Td right>{r.tds_check === "not_in_statement" ? "—" : money(r.tds)}{r.tds_voucher != null && r.tds_check !== "not_in_statement" && <div className="text-xs text-slate-500">voucher {money(r.tds_voucher)}</div>}</Td>
                 <Td right>{r.tcs_check === "not_in_statement" ? "—" : money(r.tcs)}{r.tcs_voucher != null && r.tcs_check !== "not_in_statement" && <div className="text-xs text-slate-500">voucher {money(r.tcs_voucher)}</div>}</Td>
-                <Td right>{r.commission ? money(r.commission) : "—"}{r.credit_memo ? <div className="text-xs text-emerald-300">memo {money(r.credit_memo)}</div> : null}</Td>
+                <Td right>{r.commission ? money(r.commission) : "—"}{r.credit_memo ? <div className="text-xs text-emerald-300">memo {money(r.credit_memo)}</div> : null}
+                  {r.commission_voucher != null && r.commission_check !== "not_in_statement" && <div className="text-xs text-slate-500">voucher {money(r.commission_voucher)}</div>}</Td>
                 <Td>
                   <div className="flex flex-col gap-1 items-start">
                     {r.tds_check !== "not_in_statement" && <span className="text-xs">TDS <Check v={r.tds_check} /></span>}
                     {r.tcs_check !== "not_in_statement" && <span className="text-xs">TCS <Check v={r.tcs_check} /></span>}
+                    {r.commission_check && r.commission_check !== "not_in_statement" && <span className="text-xs">Commission <Check v={r.commission_check} /></span>}
                     {r.booking_status === "cancelled" && <Chip tone="neutral">Cancelled</Chip>}
                   </div>
                 </Td>
               </tr>
             ))}
           </Table>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+// ---------------------------------------------------------------- P2a: expected vs received, chain, settings
+/** Under a payment amount: what the vouchers say it should have been. */
+function ExpectedLine({ p }) {
+  if (p.expected_total == null) return <div className="text-xs text-slate-500">expected: —</div>;
+  if (p.expected_missing) {
+    return <div className="text-xs text-slate-400">expected {money(p.expected_total)} for {p.bookings - p.expected_missing} of {p.bookings}</div>;
+  }
+  const d = p.expected_difference || 0;
+  return (
+    <div className={`text-xs ${Math.abs(d) > 1 ? "text-amber-300" : "text-slate-400"}`}>
+      expected {money(p.expected_total)}{Math.abs(d) >= 0.01 && <> · {d > 0 ? "+" : ""}{d.toFixed(2)}</>}
+    </div>
+  );
+}
+
+const STEP_CHIP = {
+  ok: ["OK", "ok"], differs: ["Differs", "warn"], missing: ["Not yet", "neutral"], no_voucher: ["No voucher figure", "neutral"],
+  voucher_only: ["Voucher only", "neutral"], pending: ["Check the bank", "info"], info: ["", ""],
+};
+
+/** The booking's money from the guest's gross to the hotel's bank, step by step. */
+function ChainModal({ bookingId, onClose }) {
+  const [st] = useLoad(() => getBookingChain(bookingId), [bookingId]);
+  const ch = st.data?.chain;
+  return (
+    <Modal title={`Money chain - booking #${bookingId}`} onClose={onClose} wide>
+      {st.loading ? <Spinner className="p-8" /> : st.error ? <ErrorBox error={st.error} /> : !ch ? <Empty text="Not a Goibibo / MakeMyTrip / Yatra booking." /> : (
+        <div>
+          <div className="text-sm text-slate-300 mb-3 flex flex-wrap gap-2 items-center">
+            <span className="font-mono">{ch.ota_booking_id}</span> <Chip>{BRAND[ch.channel] || ch.channel}</Chip>
+            <PaymentStateChip st={ch.state} />
+            {ch.breaks.length ? <Chip tone="warn">Breaks at: {ch.breaks.join(", ")}</Chip> : <Chip tone="ok">No break found</Chip>}
+          </div>
+          <Table head={<><Th>Step</Th><Th right>Voucher says</Th><Th right>OTA document / actual</Th><Th>Check</Th><Th>Reference</Th></>}>
+            {ch.steps.map((x) => {
+              const [label, tone] = STEP_CHIP[x.status] || [x.status, "neutral"];
+              return (
+                <tr key={x.key}>
+                  <Td>{x.label}{x.note && <div className="text-xs text-slate-500">{x.note}</div>}</Td>
+                  <Td right>{x.voucher == null ? "—" : money(x.voucher)}</Td>
+                  <Td right>{x.actual == null ? "—" : money(x.actual)}</Td>
+                  <Td>{label && <Chip tone={tone}>{label}</Chip>}{x.overdue && <Chip tone="danger">Overdue</Chip>}</Td>
+                  <Td className="text-xs font-mono">{[...(x.documents || []), x.date].filter(Boolean).join(" · ") || "—"}</Td>
+                </tr>
+              );
+            })}
+          </Table>
+        </div>
+      )}
+    </Modal>
+  );
+}
+
+function SettingsModal({ onClose, onSaved }) {
+  const [st] = useLoad(getPaymentSettings, []);
+  const [edits, setEdits] = useState({});           // only what the admin changed, over the loaded values
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const form = st.data ? { ...st.data, ...edits } : null;
+  const set = (k) => (e) => setEdits((f) => ({ ...f, [k]: e.target.value }));
+  const save = async () => {
+    setBusy(true); setErr("");
+    try {
+      await putPaymentSettings({ forwarders: form.forwarders, yatra_vendor_id: String(form.yatra_vendor_id),
+        bank_account: String(form.bank_account), overdue_days: Number(form.overdue_days), tracking_start: form.tracking_start });
+      onSaved();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+  return (
+    <Modal title="OTA payment settings" onClose={onClose}>
+      {!form ? (st.error ? <ErrorBox error={st.error} /> : <Spinner className="p-8" />) : (
+        <div className="grid gap-4">
+          <Field label="Bank account the OTAs must pay into" value={form.bank_account} onChange={set("bank_account")}
+            hint="A payment to any other account raises a high alert" />
+          <Field label="Yatra vendor ID" value={form.yatra_vendor_id} onChange={set("yatra_vendor_id")}
+            hint="As printed on Yatra's YES Bank payment advice (58270). Advices for any other vendor are ignored." />
+          <Field label="Overdue after (days)" type="number" min="0" max="60" value={form.overdue_days} onChange={set("overdue_days")}
+            hint="Go-MMT: days after checkout. Yatra: days after check-in." />
+          <Field label="Forwarding address(es)" value={form.forwarders} onChange={set("forwarders")}
+            hint="Your own address(es), comma separated, allowed to send OTA mails in as Gmail 'Forward as attachment' (e.g. hotelbhimas@gmail.com)" />
+          <Field label="Track bookings from" type="date" value={form.tracking_start} onChange={set("tracking_start")}
+            hint="Leave empty to start from the first OTA stay in the PMS. Payments for earlier stays are kept but not listed as problems." />
+          <div className="text-xs text-slate-500">Go-MMT accounts: {Object.entries(form.accounts || {}).map(([k, v]) => `${k} = ${v === "this" ? "this hotel" : "ignored"}`).join(", ")}</div>
+          {err && <div className="text-red-300">{err}</div>}
+          <div className="flex justify-end gap-2">
+            <GhostButton onClick={onClose}>Cancel</GhostButton>
+            <PrimaryButton onClick={save} disabled={busy}>{busy ? "Saving…" : "Save"}</PrimaryButton>
+          </div>
         </div>
       )}
     </Modal>

@@ -1723,7 +1723,7 @@ def auto_confirm_draft(db, d, user=None):
 
 
 def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
-                       future_only=False, drafts_only=False) -> dict:
+                       future_only=False, drafts_only=False, payments_only=False) -> dict:
     """Parse + upsert one email into a draft. Auto-flags/cancels a matching booking when the email is
     a cancellation, and auto-confirms a *confident* new-booking draft. Best-effort; caller commits.
 
@@ -1738,6 +1738,13 @@ def ingest_email_bytes(db, raw: bytes, force_channel=None, commit=False, *,
     pay = ota_payments.ingest_mail(db, raw, commit=commit)
     if pay.get("payment") or pay.get("statement"):     # batch 3: TDS/TCS/commission statements too
         return pay
+    # P2a: a Yatra booking / cancellation mail carries Yatra's commission invoice / credit note as a PDF.
+    # Keep the document, then let the mail go on to the voucher logic as before.
+    from services import ota_statements
+    docs = ota_statements.ingest_yatra_documents(db, raw)
+    if payments_only:
+        # the payment-history import: never create or touch booking drafts
+        return {"parsed": False, "reason": "payments-only import", "yatra_documents": docs}
     fields = parse_email_bytes(raw, force_channel=force_channel)
     if fields is None:
         return {"parsed": False, "reason": "no OTA channel detected"}
@@ -1991,7 +1998,8 @@ def repair_yatra_drafts(db, dry_run=False) -> dict:
     return out
 
 
-def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None, from_addr=None) -> dict:
+def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None, from_addr=None,
+                 payments_only=False) -> dict:
     """Connect to the configured IMAP mailbox, ingest OTA emails into drafts.
 
     Backfill (since given) defaults to future_only=True + drafts_only=True: stays already past are
@@ -2042,7 +2050,8 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None, f
     ensure_channels(db)
     processed = created = errors = skipped_past = 0
     drafts = []
-    payments = {"stored": 0, "skipped": 0, "relinked": 0, "statements": 0}   # P1 Go-MMT payment + statement mails
+    payments = {"stored": 0, "skipped": 0, "relinked": 0, "statements": 0,   # P1 Go-MMT payment + statement mails
+                "documents": 0}                                              # P2a Yatra invoices / credit notes
     from services import ota_payments
     conn = None
     # v6m.2: fix what the old Yatra parser left behind (wrapped cancellation ids, "Guest Email
@@ -2079,8 +2088,8 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None, f
                 if typ != "OK" or not msg_data or not msg_data[0]:
                     continue
                 raw = msg_data[0][1]
-                res = ingest_email_bytes(db, raw, commit=False,
-                                         future_only=future_only, drafts_only=drafts_only)
+                res = ingest_email_bytes(db, raw, commit=False, future_only=future_only,
+                                         drafts_only=drafts_only, payments_only=payments_only)
                 processed += 1
                 if res.get("payment"):
                     # a "Forward as attachment" mail carries many payments (and maybe statements)
@@ -2089,6 +2098,7 @@ def poll_mailbox(db, limit=50, since=None, future_only=None, drafts_only=None, f
                     payments["statements"] += res.get("statements_stored", 0)
                 elif res.get("statement") and res.get("stored"):
                     payments["statements"] += 1
+                payments["documents"] += sum(1 for d in res.get("yatra_documents") or [] if d.get("stored"))
                 if res.get("skipped") and res.get("reason") == "past check-in":
                     skipped_past += 1
                 if res.get("created"):

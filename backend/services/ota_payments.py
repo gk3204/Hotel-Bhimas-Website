@@ -43,6 +43,25 @@ _BOOKING_ID_RE = re.compile(r"^[A-Z]{2}\d{10,}$")
 # Brand column -> the PMS channel code. A payment mixes both brands (one Go-MMT account).
 _BRAND_CHANNEL = {"MMTINDIA": "makemytrip", "MAKEMYTRIP": "makemytrip", "GOIBIBO": "goibibo"}
 GO_MMT_CHANNELS = ("makemytrip", "goibibo")
+# P2a: every channel whose payments are tracked here. Yatra pays through YES Bank, one booking per advice.
+TRACKED_CHANNELS = GO_MMT_CHANNELS + ("yatra",)
+CHANNEL_LABEL = {"makemytrip": "MakeMyTrip", "goibibo": "Goibibo", "yatra": "Yatra"}
+# Overdue counts from check-out for Go-MMT (it pays after the stay starts) but from CHECK-IN for Yatra,
+# which pays the day before arrival (owner, 5 Nov: "Yatra - check-in + 3 days").
+OVERDUE_FROM_CHECK_IN = ("yatra",)
+
+# Yatra's payment advice: a YES Bank net-banking alert with a PDF (owner's samples, Oct-Nov 2026).
+YES_BANK_SENDER = "Corporate.NetBankingAlerts@YES.BANK.IN"
+YATRA_PAYER = "yatra online limited"
+
+
+def channels_of(channel=None) -> tuple:
+    """The channel filter of the screens: None / "all" = every tracked channel, else just that one."""
+    if not channel or channel == "all":
+        return TRACKED_CHANNELS
+    if channel not in TRACKED_CHANNELS:
+        raise ValueError(f"Unknown channel: {channel}")
+    return (channel,)
 # The header cells of the two tables, normalised (lower-case, single spaces, no punctuation).
 _XFER_COLS = {"bank name": "bank_name", "beneficiary name": "beneficiary",
               "account number": "bank_account", "total amount transferred rs": "total",
@@ -223,6 +242,119 @@ def parse_payment_email(raw: bytes) -> dict | None:
     return out
 
 
+# --- Yatra: YES Bank "BENEFICIARY PAYMENT ADVICE" (P2a) -------------------------------------------
+# The mail body only says "Domestic Fund Transfer ... favoring K R G HOTELS PVT LTD on 05-11-2026 for
+# INR 2789"; the attached BT<n>.pdf carries the rest, but its text comes out with every label in one run
+# and every value in another, so the values are picked by their own shape:
+#   for the value of Rs. 2,789.00 | 05/11/26 (value date) | BT26110593758257 (customer ref)
+#   YESIG63090210754 (bank reference = the UTR) | HTLPYT257988142 (Yatra payment document)
+#   58270 (vendor ID) | YATMB0012288247 / IXIJP0002555287 (booking) | XXXXXX9778 (beneficiary a/c)
+#   06-Nov-26 09-Nov-26 (stay)
+_YB_AMOUNT = re.compile(r"value\s+of\s+Rs\.?\s*([\d,]+\.\d{2})", re.I)
+_YB_VALUE_DATE = re.compile(r"\b(\d{2}/\d{2}/\d{2})\b")
+_YB_CUSTOMER_REF = re.compile(r"\b(BT\d{10,})\b")
+_YB_BANK_REF = re.compile(r"\b(YES[A-Z]{0,4}\d{8,})\b")
+_YB_DOC = re.compile(r"\b(HTLPYT\d+)\b")
+_YB_BOOKING = re.compile(r"\b((?:YAT[A-Z]{0,3}|IXIJ)\s?P?\d{7,}|P\d{9,})\b")
+_YB_ACCOUNT = re.compile(r"\b(X{4,}\d{3,4})\b")
+_YB_STAY = re.compile(r"\b(\d{2}-[A-Za-z]{3}-\d{2})\b")
+
+
+def _pdf_attachments(msg) -> list[bytes]:
+    out = []
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        name = (part.get_filename() or "").lower()
+        if name.endswith(".pdf") or part.get_content_type() == "application/pdf":
+            data = part.get_payload(decode=True) or b""
+            if data[:5].startswith(b"%PDF"):
+                out.append(data)
+    return out
+
+
+def parse_yatra_advice_text(text: str) -> dict | None:
+    """The fields of one Yatra payment advice, from the PDF's text. PURE. None if it is not Yatra's."""
+    t = text or ""
+    if YATRA_PAYER not in t.lower() or "payment advice" not in t.lower():
+        return None
+    from services.ota_service import canonical_ota_id
+    amount = _money((_YB_AMOUNT.search(t) or [None, None])[1])
+    vd = _YB_VALUE_DATE.search(t)
+    try:
+        value_date = datetime.strptime(vd.group(1), "%d/%m/%y").date() if vd else None
+    except ValueError:
+        value_date = None
+    # The vendor ID sits between the payment document and the booking ("HTLPYT257988142 58270
+    # YATMB0012288247"); fall back to the only standalone 5-digit number if the layout ever shifts.
+    m = re.search(r"HTLPYT\d+\s+(\d{3,8})\s+(?:YAT|IXIJ|P\d)", t)
+    loose = re.findall(r"(?<![\w/.,-])(\d{5})(?![\w/.,-])", t)
+    vendor = m.group(1) if m else (loose[0] if len(set(loose)) == 1 else None)
+    accounts = _YB_ACCOUNT.findall(t)
+    bookings = list(dict.fromkeys(canonical_ota_id("yatra", re.sub(r"\s+", "", b)) for b in _YB_BOOKING.findall(t)))
+    stay = [_d for _d in (_dmy_short(s) for s in _YB_STAY.findall(t)) if _d]
+    bank_ref = _YB_BANK_REF.search(t)
+    return {
+        "vendor_id": vendor,
+        "total": amount,
+        "txn_date": value_date,
+        "utr": bank_ref.group(1) if bank_ref else None,
+        "reference": (_YB_CUSTOMER_REF.search(t) or [None, None])[1],
+        "doc_no": (_YB_DOC.search(t) or [None, None])[1],
+        # the beneficiary account is printed masked; the first masked number on the advice is ours
+        # (the second, XXXXXXXXXXX1303, is Yatra's own debit account)
+        "bank_account": accounts[0] if accounts else None,
+        "bookings": bookings,
+        "check_in": stay[0] if stay else None,
+        "check_out": stay[1] if len(stay) > 1 else None,
+    }
+
+
+def _dmy_short(s):
+    try:
+        return datetime.strptime(s, "%d-%b-%y").date()
+    except ValueError:
+        return None
+
+
+def parse_yatra_advice_email(raw: bytes) -> dict | None:
+    """A YES Bank advice mail -> the same shape parse_payment_email returns, or None when it is not a
+    payment from Yatra (YES Bank sends these for every corporate payer that uses it). PURE."""
+    msg = email.message_from_bytes(raw)
+    sender = email.utils.parseaddr(_decode(msg.get("From")))[1].lower()
+    if not sender.endswith("@yes.bank.in"):
+        return None
+    from utils.pdf_text import pdf_text
+    a = None
+    for data in _pdf_attachments(msg):
+        a = parse_yatra_advice_text(pdf_text(data))
+        if a:
+            break
+    if not a:
+        return None
+    lines = []
+    if a["total"] is not None:
+        if len(a["bookings"]) == 1:
+            lines = [{"ota_booking_id": a["bookings"][0], "amount_paid": a["total"]}]
+        else:
+            # never seen; the amount cannot be split by guessing, so every booking gets a 0 line and the
+            # totals check flags the payment for a person to look at
+            lines = [{"ota_booking_id": b, "amount_paid": 0.0} for b in a["bookings"]]
+    for ln in lines:
+        ln.update({"pnr": a["doc_no"], "guest_name": None, "hotel_name": None, "check_in": a["check_in"],
+                   "check_out": a["check_out"], "original_cost": None, "booking_type": "Paid",
+                   "brand": "YATRA", "channel_code": "yatra"})
+    return {
+        "kind": "yatra", "account_code": f"YATRA:{a['vendor_id'] or '?'}", "vendor_id": a["vendor_id"],
+        "utr": a["utr"] or a["reference"], "reference": a["reference"], "total": a["total"],
+        "mail_total": a["total"], "txn_date": a["txn_date"], "bank_name": "YES Bank (Yatra Online Limited)",
+        "bank_account": a["bank_account"], "lines": lines,
+        "flags": ["several_bookings"] if len(a["bookings"]) > 1 else [],
+        "message_id": (msg.get("Message-ID") or msg.get("Message-Id") or "").strip() or None,
+        "subject": _decode(msg.get("Subject")) or "BENEFICIARY PAYMENT ADVICE",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Matching
 # ---------------------------------------------------------------------------
@@ -234,7 +366,7 @@ def tracking_start(db, cfg=None):
         return cfg["tracking_start"]
     from sqlalchemy import func
     return (db.query(func.min(Booking.check_in))
-            .filter(Booking.booking_source.in_(GO_MMT_CHANNELS), Booking.ota_booking_id.isnot(None))
+            .filter(Booking.booking_source.in_(TRACKED_CHANNELS), Booking.ota_booking_id.isnot(None))
             .scalar())
 
 
@@ -355,10 +487,21 @@ def ingest_forwarded_payments(db, raw: bytes, commit=False) -> dict | None:
     return out
 
 
+def _same_account(seen, ours) -> bool:
+    """Go-MMT prints the full account number; YES Bank masks all but the last four (XXXXXX9778)."""
+    seen_digits, ours = re.sub(r"\D", "", seen or ""), re.sub(r"\D", "", ours or "")
+    if not seen_digits or not ours:
+        return True                     # nothing to compare - no flag
+    if "X" in (seen or "").upper():
+        return ours.endswith(seen_digits)
+    return seen_digits == ours
+
+
 def ingest_payment_email(db, raw: bytes, commit=False) -> dict:
-    """Store one Go-MMT payment mail. Idempotent on Message-ID and on UTR. Never raises."""
+    """Store one payment mail - a Go-MMT wire confirmation or (P2a) a Yatra YES Bank advice.
+    Idempotent on Message-ID and on UTR. Never raises."""
     try:
-        p = parse_payment_email(raw)
+        p = parse_payment_email(raw) or parse_yatra_advice_email(raw)
     except Exception as e:  # a malformed mail must not stop the poll
         logger.exception("OTA payment: could not parse mail")
         return {"payment": True, "stored": False, "reason": f"unreadable ({e})"}
@@ -366,10 +509,15 @@ def ingest_payment_email(db, raw: bytes, commit=False) -> dict:
         return {"payment": False}
     cfg = get_ota_payment_config(db)
     code = p["account_code"]
-    role = cfg["accounts"].get(code)
-    base = {"payment": True, "account_code": code, "utr": p.get("utr"), "amount": p.get("total")}
+    yatra = p.get("kind") == "yatra"
+    if yatra:
+        role = "this" if p.get("vendor_id") and p["vendor_id"] == cfg["yatra_vendor_id"] else None
+    else:
+        role = cfg["accounts"].get(code)
+    base = {"payment": True, "account_code": code, "utr": p.get("utr"), "amount": p.get("total"),
+            "channel": "yatra" if yatra else "go_mmt"}
     if role != "this":
-        # Bhimas Paradise (or an account nobody has mapped) - its money is not this hotel's.
+        # Bhimas Paradise (or an account / Yatra vendor nobody has mapped) - its money is not this hotel's.
         return {**base, "stored": False, "reason": "other property" if role == "ignore" else "unmapped account code"}
     if not p.get("utr") or p.get("total") is None or not p["lines"]:
         logger.warning("OTA payment %s: no UTR/total/bookings read from %r", code, p.get("subject"))
@@ -384,21 +532,23 @@ def ingest_payment_email(db, raw: bytes, commit=False) -> dict:
         return {**base, "stored": False, "reason": "already recorded", "settlement_id": existing.id}
 
     lines_total = round(sum(x["amount_paid"] for x in p["lines"]), 2)
-    flags = []
+    flags = list(p.get("flags") or [])
     if abs(lines_total - p["total"]) > 0.5 or (p.get("mail_total") is not None and abs(p["mail_total"] - p["total"]) > 0.5):
         flags.append("totals_mismatch")
-    if cfg["bank_account"] and p.get("bank_account") and p["bank_account"] != cfg["bank_account"]:
+    if cfg["bank_account"] and p.get("bank_account") and not _same_account(p["bank_account"], cfg["bank_account"]):
         flags.append("bank_account_mismatch")
     ins = [x["check_in"] for x in p["lines"] if x.get("check_in")]
     s = OtaSettlement(
-        channel_code="makemytrip",      # Go-MMT; each line carries its own brand/channel
-        amount=p["total"], lines_total=lines_total, reference=p["utr"], utr=p["utr"],
+        # Go-MMT: one transfer covers MakeMyTrip and Goibibo, each line carries its own brand/channel
+        channel_code="yatra" if yatra else "makemytrip",
+        amount=p["total"], lines_total=lines_total, reference=p.get("reference") or p["utr"], utr=p["utr"],
         payment_date=p.get("txn_date") or p.get("subject_date"),
         period_start=min(ins) if ins else None, period_end=max(ins) if ins else None,
         ota_account_code=code, bank_name=p.get("bank_name"), bank_account=p.get("bank_account"),
         source="mail", message_id=p.get("message_id"), state="done", flags=",".join(flags) or None,
         raw_source=(p.get("subject") or "") + "\n" + _summary(p),
-        notes=f"Go-MMT payment mail, {len(p['lines'])} booking(s)",
+        notes=(f"Yatra payment advice (YES Bank), {len(p['lines'])} booking(s)" if yatra
+               else f"Go-MMT payment mail, {len(p['lines'])} booking(s)"),
     )
     db.add(s)
     db.flush()
@@ -434,8 +584,12 @@ def _summary(p) -> str:
 # ---------------------------------------------------------------------------
 # Booking payment state - the ONE implementation
 # ---------------------------------------------------------------------------
-def is_go_mmt(b) -> bool:
-    return (b.booking_source or "") in GO_MMT_CHANNELS
+def is_tracked(b) -> bool:
+    """A booking whose OTA payment this module tracks: Goibibo, MakeMyTrip or (P2a) Yatra."""
+    return (b.booking_source or "") in TRACKED_CHANNELS
+
+
+is_go_mmt = is_tracked      # P1 name, kept for callers outside this module
 
 
 def _state_of(b, lines, settlements, cfg, today) -> dict:
@@ -464,14 +618,18 @@ def _state_of(b, lines, settlements, cfg, today) -> dict:
         state = "not_applicable"
     else:
         state = "pending"
-    overdue = (state == "pending" and b.check_out is not None
-               and today > b.check_out + timedelta(days=cfg["overdue_days"]))
+    # Go-MMT counts from check-out, Yatra (pays the day before arrival) from check-in - P2a
+    due_from = b.check_in if (b.booking_source or "") in OVERDUE_FROM_CHECK_IN else b.check_out
+    overdue = (state == "pending" and due_from is not None
+               and today > due_from + timedelta(days=cfg["overdue_days"]))
     last = max(sts, key=lambda s: (s.payment_date or date.min, s.id)) if sts else None
     return {
         "booking_id": b.booking_id,
         "ota_booking_id": b.ota_booking_id,
+        "channel": b.booking_source,
         "state": state,
         "overdue": overdue,
+        "overdue_from": "check_in" if (b.booking_source or "") in OVERDUE_FROM_CHECK_IN else "check_out",
         "expected": expected,
         "paid": paid,
         "difference": round(paid - expected, 2) if (paid_lines and expected is not None) else None,
@@ -487,7 +645,7 @@ def ota_payment_states(db, bookings, cfg=None, today=None) -> dict:
     """{booking_id: state dict} for many bookings in three queries. Non-Go-MMT bookings are left out."""
     cfg = cfg or get_ota_payment_config(db)
     today = today or clock.business_today()
-    bs = [b for b in bookings if is_go_mmt(b)]
+    bs = [b for b in bookings if is_tracked(b)]
     if not bs:
         return {}
     ids = [b.booking_id for b in bs]
@@ -504,6 +662,95 @@ def ota_payment_states(db, bookings, cfg=None, today=None) -> dict:
 def ota_payment_state(db, booking, cfg=None, today=None) -> dict | None:
     """One booking's Go-MMT payment state, or None for a booking that is not Goibibo/MakeMyTrip."""
     return ota_payment_states(db, [booking], cfg=cfg, today=today).get(booking.booking_id)
+
+
+def booking_chain(db, booking, cfg=None, today=None) -> dict | None:
+    """P2a: one booking's money from the guest's gross to the hotel's bank, step by step, each step as
+    the voucher states it beside what the OTA's own documents say - so a break shows where it is.
+
+        gross -> commission incl. GST (voucher vs invoice, net of credit notes)
+              -> TCS (voucher vs statement; Yatra: voucher only) -> TDS (same)
+              -> payable (voucher; also checked as gross - commission - TCS - TDS)
+              -> paid (payment lines, UTRs) -> received (bank confirmation)
+
+    None for a booking whose payments are not tracked."""
+    if not is_tracked(booking):
+        return None
+    from models import OtaTaxStatement, OtaTaxStatementLine
+    from services.ota_statements import voucher_figures
+    cfg = cfg or get_ota_payment_config(db)
+    tol = cfg["tolerance"]
+    oid = booking.ota_booking_id
+    yatra = booking.booking_source == "yatra"
+    v = voucher_figures(db, [oid]).get(oid, {}) if oid else {}
+    docs = []
+    if oid:
+        docs = (db.query(OtaTaxStatementLine, OtaTaxStatement)
+                .join(OtaTaxStatement, OtaTaxStatement.id == OtaTaxStatementLine.statement_id)
+                .filter(OtaTaxStatementLine.ota_booking_id == oid, OtaTaxStatement.superseded.is_(False),
+                        OtaTaxStatement.channel == ("yatra" if yatra else "go_mmt")).all())
+    by_kind = {}
+    for line, st in docs:
+        by_kind.setdefault(st.kind, []).append((line, st))
+    cancelled = booking.status == "cancelled"
+
+    def total(kinds):
+        rows = [ln for k in kinds for ln, _ in by_kind.get(k, [])]
+        return round(sum(float(x.amount) for x in rows), 2) if rows else None
+
+    def docs_of(kinds):
+        return sorted({st.doc_no or st.period.strftime("%b %Y") for k in kinds for _, st in by_kind.get(k, [])})
+
+    def status(voucher, actual, expected_zero=False):
+        want = 0.0 if expected_zero else voucher
+        if actual is None:
+            return "missing"
+        if want is None:
+            return "no_voucher"
+        return "ok" if abs(actual - want) <= tol else "differs"
+
+    steps = []
+    gross = v.get("gross")
+    if gross is None and booking.ota_net_payout is not None:
+        from services.ota_service import ota_gross_basis
+        gross = ota_gross_basis(booking)
+    steps.append({"key": "gross", "label": "Guest paid the OTA (gross)", "voucher": gross, "actual": None,
+                  "status": "info", "documents": []})
+    com_actual = total(("commission", "credit_memo"))
+    steps.append({"key": "commission", "label": "Commission incl. GST", "voucher": v.get("commission"),
+                  "actual": com_actual, "status": status(v.get("commission"), com_actual, cancelled),
+                  "documents": docs_of(("commission", "credit_memo"))})
+    for k, label in (("tcs", "TCS (GST, 0.5%)"), ("tds", "TDS (194-O, 0.1%)")):
+        if yatra:
+            steps.append({"key": k, "label": label, "voucher": v.get(k), "actual": None, "status": "voucher_only",
+                          "documents": []})
+        else:
+            act = total((k,))
+            steps.append({"key": k, "label": label, "voucher": v.get(k), "actual": act,
+                          "status": status(v.get(k), act, cancelled), "documents": docs_of((k,))})
+    payable = float(booking.ota_net_payout) if booking.ota_net_payout is not None else v.get("payable")
+    parts = [gross, v.get("commission"), v.get("tcs"), v.get("tds")]
+    arith = (round(parts[0] - parts[1] - parts[2] - parts[3], 2) if all(x is not None for x in parts) else None)
+    steps.append({"key": "payable", "label": "Payable to the hotel (voucher)", "voucher": payable,
+                  "actual": arith, "status": ("info" if arith is None or payable is None else
+                                              "ok" if abs(arith - payable) <= tol else "differs"),
+                  "documents": [], "note": "actual = gross - commission - TCS - TDS from the voucher"})
+    st = ota_payment_state(db, booking, cfg=cfg, today=today) or {}
+    paid = st.get("paid") if st.get("state") in ("done", "received") else None
+    steps.append({"key": "paid", "label": "Paid by the OTA", "voucher": payable, "actual": paid,
+                  "status": ("missing" if paid is None else
+                             "no_voucher" if payable is None else
+                             "ok" if abs(paid - (0.0 if cancelled else payable)) <= tol else "differs"),
+                  "documents": st.get("utrs", []), "date": st.get("payment_date"),
+                  "overdue": st.get("overdue", False)})
+    steps.append({"key": "received", "label": "Seen in the bank", "voucher": None,
+                  "actual": paid if st.get("state") == "received" else None,
+                  "status": ("ok" if st.get("state") == "received" else
+                             "pending" if st.get("state") == "done" else "missing"),
+                  "documents": [], "date": st.get("received_on")})
+    return {"booking_id": booking.booking_id, "ota_booking_id": oid, "channel": booking.booking_source,
+            "status": booking.status, "state": st, "steps": steps,
+            "breaks": [x["key"] for x in steps if x["status"] == "differs"]}
 
 
 def voucher_taxes(db, booking) -> dict:
@@ -578,7 +825,34 @@ def serialize_payment(s: OtaSettlement, lines=None) -> dict:
         out["bookings"] = len(lines)
         out["unmatched"] = sum(1 for x in lines if x.match_status == "unknown_booking")
         out["differences"] = sum(1 for x in lines if x.match_status in ("amount_diff", "cancelled_booking"))
+        out["channels"] = sorted({x.channel_code for x in lines if x.channel_code})
+        # P2a: what the vouchers say this transfer should have been, beside what was sent. Only a full
+        # figure when every line found its booking and that booking's voucher has a payable.
+        known = [x for x in lines if x.expected_amount is not None and x.match_status in _LINKED]
+        out["expected_total"] = round(sum(float(x.expected_amount) for x in known), 2) if known else None
+        out["expected_missing"] = len(lines) - len(known)
+        out["expected_difference"] = (round(float(s.amount or 0) - out["expected_total"], 2)
+                                      if known and not out["expected_missing"] else None)
     return out
+
+
+def payment_channels(db, settlement_ids) -> dict:
+    """{settlement_id: {channels}} - a Go-MMT transfer can hold MakeMyTrip and Goibibo lines."""
+    out = {}
+    if not settlement_ids:
+        return out
+    for sid, ch in (db.query(OtaSettlementLine.settlement_id, OtaSettlementLine.channel_code)
+                    .filter(OtaSettlementLine.settlement_id.in_(list(settlement_ids))).distinct()):
+        out.setdefault(sid, set()).add(ch)
+    return out
+
+
+def in_channels(db, settlements, chans) -> list:
+    """The settlements that pay at least one booking of `chans` (by their lines, else their own code)."""
+    if set(chans) == set(TRACKED_CHANNELS):
+        return list(settlements)
+    by = payment_channels(db, [s.id for s in settlements])
+    return [s for s in settlements if (by.get(s.id) or {s.channel_code}) & set(chans)]
 
 
 # ---------------------------------------------------------------------------
@@ -644,8 +918,8 @@ def _line_status(db, line, booking, cfg) -> str:
 def link_line(db, line: OtaSettlementLine, booking, *, user_id=None) -> OtaSettlementLine:
     """An admin ties a payment line to a booking by hand (the OTA id was typed differently, or the
     booking was made without one). `linked_by` keeps automatic re-matching away from it."""
-    if not is_go_mmt(booking):
-        raise PaymentError("Only a Goibibo or MakeMyTrip booking can be linked to a Go-MMT payment.")
+    if not is_tracked(booking):
+        raise PaymentError("Only a Goibibo, MakeMyTrip or Yatra booking can be linked to an OTA payment.")
     cfg = get_ota_payment_config(db)
     line.booking_id = booking.booking_id
     line.expected_amount = booking.ota_net_payout
@@ -673,8 +947,8 @@ def _manual_rows(db, ids, amounts):
     rows = []
     for i in ids:
         b = bookings[i]
-        if not is_go_mmt(b):
-            raise PaymentError(f"Booking #{i} is not a Goibibo / MakeMyTrip booking.")
+        if not is_tracked(b):
+            raise PaymentError(f"Booking #{i} is not a Goibibo / MakeMyTrip / Yatra booking.")
         a = amounts.get(i, b.ota_net_payout)
         if a is None:
             raise PaymentError(f"Booking #{i} has no voucher payable - enter its amount.")
@@ -706,8 +980,10 @@ def create_manual_payment(db, *, utr, payment_date, amount, booking_ids, amounts
     rows = _manual_rows(db, ids, {int(k): v for k, v in (amounts or {}).items()})
     cfg = get_ota_payment_config(db)
     lines_total = round(sum(a for _, a in rows), 2)
+    sources = {b.booking_source for b, _ in rows}
     s = OtaSettlement(
-        channel_code="makemytrip", amount=amount, lines_total=lines_total, reference=utr, utr=utr,
+        channel_code="yatra" if sources == {"yatra"} else "makemytrip",
+        amount=amount, lines_total=lines_total, reference=utr, utr=utr,
         payment_date=payment_date, source="manual", state="done", created_by=user_id,
         flags="totals_mismatch" if abs(lines_total - amount) > 0.5 else None,
         period_start=min(b.check_in for b, _ in rows), period_end=max(b.check_in for b, _ in rows),
@@ -720,7 +996,7 @@ def create_manual_payment(db, *, utr, payment_date, amount, booking_ids, amounts
             settlement_id=s.id, channel_code=b.booking_source, ota_booking_id=b.ota_booking_id or f"#{b.booking_id}",
             guest_name=b.guest_name, check_in=b.check_in, check_out=b.check_out, amount_paid=a,
             booking_id=b.booking_id, expected_amount=b.ota_net_payout, linked_by=user_id,
-            brand="GOIBIBO" if b.booking_source == "goibibo" else "MMTINDIA")
+            brand={"goibibo": "GOIBIBO", "yatra": "YATRA"}.get(b.booking_source, "MMTINDIA"))
         db.add(line)
         db.flush()
         line.match_status = _line_status(db, line, b, cfg)
@@ -731,9 +1007,10 @@ def create_manual_payment(db, *, utr, payment_date, amount, booking_ids, amounts
 # ---------------------------------------------------------------------------
 # Batch 2 - what the OTA Payments screen shows
 # ---------------------------------------------------------------------------
-def _tracked_bookings(db, cfg, until=None):
-    """Go-MMT bookings whose stay has begun (MMT pays after check-in), from the tracking start."""
-    q = db.query(Booking).filter(Booking.booking_source.in_(GO_MMT_CHANNELS),
+def _tracked_bookings(db, cfg, until=None, chans=TRACKED_CHANNELS):
+    """Tracked OTA bookings whose stay has begun (by `until`), from the tracking start. Yatra pays the
+    day before check-in, so a Yatra stay starting tomorrow is not yet expected - same rule for all."""
+    q = db.query(Booking).filter(Booking.booking_source.in_(chans),
                                  Booking.check_in <= (until or clock.business_today()))
     start = tracking_start(db, cfg)
     if start is not None:
@@ -745,17 +1022,19 @@ def _sum_money(xs, f) -> float:
     return round(sum(float(f(x) or 0) for x in xs), 2)
 
 
-def summary(db, today=None) -> dict:
-    """The four tiles: pending, overdue, done-awaiting-bank-check, received this month."""
+def summary(db, today=None, channel=None) -> dict:
+    """The four tiles: pending, overdue, done-awaiting-bank-check, received this month (P2a: per channel)."""
     cfg = get_ota_payment_config(db)
     today = today or clock.business_today()
-    states = ota_payment_states(db, _tracked_bookings(db, cfg, today), cfg=cfg, today=today)
+    chans = channels_of(channel)
+    states = ota_payment_states(db, _tracked_bookings(db, cfg, today, chans), cfg=cfg, today=today)
     pend = [st for st in states.values() if st["state"] == "pending"]
     over = [st for st in pend if st["overdue"]]
-    done = db.query(OtaSettlement).filter(OtaSettlement.utr.isnot(None), OtaSettlement.state == "done").all()
-    rec = (db.query(OtaSettlement)
-           .filter(OtaSettlement.state == "received", OtaSettlement.received_on >= today.replace(day=1),
-                   OtaSettlement.received_on <= today).all())
+    done = in_channels(db, db.query(OtaSettlement).filter(OtaSettlement.utr.isnot(None),
+                                                          OtaSettlement.state == "done").all(), chans)
+    rec = in_channels(db, (db.query(OtaSettlement)
+                           .filter(OtaSettlement.state == "received", OtaSettlement.received_on >= today.replace(day=1),
+                                   OtaSettlement.received_on <= today).all()), chans)
     return {
         "today": str(today),
         "pending": {"count": len(pend), "expected": _sum_money(pend, lambda s: s["expected"])},
@@ -770,11 +1049,13 @@ _EXCEPTION_LINES = ("unknown_booking", "amount_diff", "cancelled_booking", "othe
 _MONEY_FLAGS = {"short_paid", "over_paid", "paid_but_cancelled"}
 
 
-def exceptions(db, today=None) -> dict:
+def exceptions(db, today=None, channel=None) -> dict:
     """Everything a person must look at: problem lines, flagged payments, overdue / mis-paid bookings."""
     cfg = get_ota_payment_config(db)
     today = today or clock.business_today()
-    lines = (db.query(OtaSettlementLine).filter(OtaSettlementLine.match_status.in_(_EXCEPTION_LINES))
+    chans = channels_of(channel)
+    lines = (db.query(OtaSettlementLine).filter(OtaSettlementLine.match_status.in_(_EXCEPTION_LINES),
+                                                OtaSettlementLine.channel_code.in_(chans))
              .order_by(OtaSettlementLine.settlement_id.desc(), OtaSettlementLine.id).all())
     sids = {x.settlement_id for x in lines}
     pays = {s.id: s for s in db.query(OtaSettlement).filter(OtaSettlement.id.in_(sids)).all()} if sids else {}
@@ -785,10 +1066,10 @@ def exceptions(db, today=None) -> dict:
         r["utr"] = s.utr if s else None
         r["payment_date"] = str(s.payment_date) if s and s.payment_date else None
         out_lines.append(r)
-    flagged = [serialize_payment(s) for s in db.query(OtaSettlement)
+    flagged = [serialize_payment(s) for s in in_channels(db, db.query(OtaSettlement)
                .filter(OtaSettlement.flags.isnot(None), OtaSettlement.flags != "")
-               .order_by(OtaSettlement.payment_date.desc()).all()]
-    bs = _tracked_bookings(db, cfg, today)
+               .order_by(OtaSettlement.payment_date.desc()).all(), chans)]
+    bs = _tracked_bookings(db, cfg, today, chans)
     states = ota_payment_states(db, bs, cfg=cfg, today=today)
     by_id = {b.booking_id: b for b in bs}
     bad = []
@@ -804,7 +1085,7 @@ def exceptions(db, today=None) -> dict:
 # ---------------------------------------------------------------------------
 # Batch 2 - alerts (called from utils/fraud_detection.run_reconciliation)
 # ---------------------------------------------------------------------------
-ALERT_OVERDUE = "ota_payment_overdue"          # med  - a stay MMT has not paid N days after checkout
+ALERT_OVERDUE = "ota_payment_overdue"          # med  - not paid N days after checkout (Yatra: check-in)
 ALERT_UNCONFIRMED = "ota_payment_unconfirmed"  # low  - MMT says paid, nobody checked the bank in a week
 ALERT_PROBLEM = "ota_payment_problem"          # high for a wrong bank account, else med
 
@@ -819,8 +1100,11 @@ def _alert_overdue(db, make_alert, cfg, today) -> set:
         make_alert(type=ALERT_OVERDUE, severity="med", dedupe_key=f"{ALERT_OVERDUE}:booking:{bid}",
                    booking_id=bid,
                    detail={"ota_booking_id": st["ota_booking_id"], "expected": st["expected"],
-                           "note": f"Go-MMT has not paid this booking {cfg['overdue_days']} days after "
-                                   f"checkout - ask payments@go-mmt.com"})
+                           "channel": st["channel"],
+                           "note": (f"Yatra has not paid this booking {cfg['overdue_days']} days after check-in - "
+                                    f"ask your Yatra account manager" if st["channel"] == "yatra" else
+                                    f"Go-MMT has not paid this booking {cfg['overdue_days']} days after "
+                                    f"checkout - ask payments@go-mmt.com")})
     return overdue
 
 

@@ -184,15 +184,27 @@ def list_settlements(from_: str = Query(None, alias="from"), to: str = Query(Non
 # P1 Go-MMT payment tracking (services/ota_payments.py). Batch 1 = intake + read; the screen and
 # Confirm received / Undo arrive in batch 2. Admin only - this is money.
 # ============================================================
+def _chans(channel):
+    """P2a channel filter: all | makemytrip | goibibo | yatra."""
+    try:
+        return ota_payments.channels_of(channel)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+_CHANNEL_Q = Query(None, description="all | makemytrip | goibibo | yatra")
+
+
 @router.get("/payments")
-def list_payments(from_: str = Query(None, alias="from"), to: str = Query(None),
+def list_payments(from_: str = Query(None, alias="from"), to: str = Query(None), channel: str = _CHANNEL_Q,
                   db: Session = Depends(get_db), user=Depends(require_admin)):
-    """Go-MMT payments by payment date, newest first, with their booking counts."""
+    """OTA payments (Go-MMT transfers, Yatra advices) by payment date, newest first, with their counts."""
     dfrom, dto = _range(from_, to, default_days=90)
-    pays = (db.query(OtaSettlement)
+    chans = _chans(channel)
+    pays = ota_payments.in_channels(db, (db.query(OtaSettlement)
             .filter(OtaSettlement.utr.isnot(None),
                     OtaSettlement.payment_date >= dfrom, OtaSettlement.payment_date <= dto)
-            .order_by(OtaSettlement.payment_date.desc(), OtaSettlement.id.desc()).all())
+            .order_by(OtaSettlement.payment_date.desc(), OtaSettlement.id.desc()).all()), chans)
     lines = {}
     if pays:
         for x in (db.query(OtaSettlementLine)
@@ -210,12 +222,12 @@ def list_payments(from_: str = Query(None, alias="from"), to: str = Query(None),
 @router.get("/payments/bookings")
 def payment_states(from_: str = Query(None, alias="from"), to: str = Query(None),
                    state: str = Query(None, description="pending | done | received | not_applicable"),
-                   overdue: bool = Query(None),
+                   overdue: bool = Query(None), channel: str = _CHANNEL_Q,
                    db: Session = Depends(get_db), user=Depends(require_admin)):
-    """Every Goibibo / MakeMyTrip booking checking out in [from, to] with its payment state."""
+    """Every Goibibo / MakeMyTrip / Yatra booking checking out in [from, to] with its payment state."""
     dfrom, dto = _range(from_, to, default_days=30)
     bs = (db.query(Booking)
-          .filter(Booking.booking_source.in_(ota_payments.GO_MMT_CHANNELS),
+          .filter(Booking.booking_source.in_(_chans(channel)),
                   Booking.check_out >= dfrom, Booking.check_out <= dto)
           .order_by(Booking.check_out.desc(), Booking.booking_id.desc()).all())
     states = ota_payments.ota_payment_states(db, bs)
@@ -271,15 +283,78 @@ def _payment_out(db, s):
 
 
 @router.get("/payments/summary")
-def payments_summary(db: Session = Depends(get_db), user=Depends(require_admin)):
+def payments_summary(channel: str = _CHANNEL_Q, db: Session = Depends(get_db), user=Depends(require_admin)):
     """The four tiles on OTA Payments."""
-    return ota_payments.summary(db)
+    _chans(channel)
+    return ota_payments.summary(db, channel=channel)
 
 
 @router.get("/payments/exceptions")
-def payments_exceptions(db: Session = Depends(get_db), user=Depends(require_admin)):
+def payments_exceptions(channel: str = _CHANNEL_Q, db: Session = Depends(get_db), user=Depends(require_admin)):
     """Lines that found no booking or the wrong amount, flagged payments, overdue / mis-paid bookings."""
-    return ota_payments.exceptions(db)
+    _chans(channel)
+    return ota_payments.exceptions(db, channel=channel)
+
+
+@router.get("/payments/booking/{booking_id}/chain")
+def payment_chain_of_booking(booking_id: int, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """P2a: the booking's money step by step - gross, commission, TCS, TDS, payable, paid, in bank - each
+    as the voucher states it beside what the OTA's documents say. `chain` is null for an untracked booking."""
+    b = db.query(Booking).filter(Booking.booking_id == booking_id).first()
+    if b is None:
+        raise HTTPException(status_code=404, detail="Booking not found")
+    return {"booking_id": booking_id, "chain": ota_payments.booking_chain(db, b)}
+
+
+class OtaPaymentSettings(BaseModel):
+    forwarders: Optional[str] = Field(None, max_length=300)        # comma list of the hotel's own addresses
+    yatra_vendor_id: Optional[str] = Field(None, max_length=12)
+    bank_account: Optional[str] = Field(None, max_length=30)
+    overdue_days: Optional[int] = Field(None, ge=0, le=60)
+    tracking_start: Optional[str] = Field(None, max_length=10)     # YYYY-MM-DD, "" = automatic
+
+
+@router.get("/payments/settings")
+def get_payment_settings(db: Session = Depends(get_db), user=Depends(require_admin)):
+    from utils.settings import get_ota_payment_config
+    c = get_ota_payment_config(db)
+    return {"forwarders": ", ".join(c["forwarders"]), "yatra_vendor_id": c["yatra_vendor_id"],
+            "bank_account": c["bank_account"], "overdue_days": c["overdue_days"],
+            "tracking_start": str(c["tracking_start"]) if c["tracking_start"] else "",
+            "accounts": c["accounts"], "hotel_name": c["hotel_name"]}
+
+
+@router.put("/payments/settings")
+def put_payment_settings(data: OtaPaymentSettings, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """P2a: the payment-tracking settings that had no screen - the forwarding address(es) allowed to send
+    payment mails in as attachments, the Yatra vendor ID, the bank account, overdue days, tracking start."""
+    from utils import settings as S
+    before = get_payment_settings(db, user)
+    if data.forwarders is not None:
+        bad = [a for a in (x.strip() for x in data.forwarders.split(",")) if a and "@" not in a]
+        if bad:
+            raise HTTPException(status_code=400, detail=f"Not an e-mail address: {bad[0]}")
+        S.set_setting(db, S.OTA_PAYMENT_FORWARDERS_KEY,
+                      ",".join(a.strip().lower() for a in data.forwarders.split(",") if a.strip()), user=user)
+    if data.yatra_vendor_id is not None:
+        if not re.fullmatch(r"\d{3,8}", data.yatra_vendor_id.strip()):
+            raise HTTPException(status_code=400, detail="The Yatra vendor ID is a number, e.g. 58270")
+        S.set_setting(db, S.OTA_PAYMENT_YATRA_VENDOR_KEY, data.yatra_vendor_id.strip(), user=user)
+    if data.bank_account is not None:
+        if not re.fullmatch(r"\d{6,20}", re.sub(r"\s", "", data.bank_account)):
+            raise HTTPException(status_code=400, detail="Enter the full bank account number (digits only)")
+        S.set_setting(db, S.OTA_PAYMENT_BANK_ACCOUNT_KEY, re.sub(r"\s", "", data.bank_account), user=user)
+    if data.overdue_days is not None:
+        S.set_setting(db, S.OTA_PAYMENT_OVERDUE_DAYS_KEY, str(data.overdue_days), user=user)
+    if data.tracking_start is not None:
+        if data.tracking_start.strip():
+            _parse_date(data.tracking_start.strip(), "tracking_start")
+        S.set_setting(db, S.OTA_PAYMENT_TRACKING_START_KEY, data.tracking_start.strip(), user=user)
+    db.flush()
+    after = get_payment_settings(db, user)
+    write_audit(db, user, "ota.payment_settings", "app_settings", None, before=before, after=after, client="web")
+    db.commit()
+    return after
 
 
 @router.get("/payments/booking/{booking_id}")
@@ -294,10 +369,10 @@ def payment_state_of_booking(booking_id: int, db: Session = Depends(get_db), use
 
 @router.get("/payments/candidates")
 def payment_candidates(q: str = Query(None, description="OTA id, guest name or booking number"),
-                       unpaid_only: bool = Query(True),
+                       unpaid_only: bool = Query(True), channel: str = _CHANNEL_Q,
                        db: Session = Depends(get_db), user=Depends(require_admin)):
-    """Go-MMT bookings to tick on "Add payment" or pick when linking a line - unpaid first."""
-    query = db.query(Booking).filter(Booking.booking_source.in_(ota_payments.GO_MMT_CHANNELS))
+    """Tracked OTA bookings to tick on "Add payment" or pick when linking a line - unpaid first."""
+    query = db.query(Booking).filter(Booking.booking_source.in_(_chans(channel)))
     term = (q or "").strip()
     if term:
         like = f"%{term}%"
@@ -323,18 +398,22 @@ def get_payment(payment_id: int, db: Session = Depends(get_db), user=Depends(req
 
 
 @router.post("/payments/import")
-def import_payments(since: str = Query(..., description="YYYY-MM-DD - read Go-MMT payment mails on/after this date"),
+def import_payments(since: str = Query(..., description="YYYY-MM-DD - read OTA payment mails on/after this date"),
                     limit: int = Query(1000, ge=1, le=5000),
                     db: Session = Depends(get_db), user=Depends(require_admin)):
-    """Backfill Go-MMT payment mails (read or unread, left unread). Idempotent - a payment already
-    recorded is skipped by Message-ID and by UTR. Also reads TCS/TDS into drafts saved before P1."""
+    """Backfill OTA payment mails (read or unread, left unread). Idempotent - a payment already
+    recorded is skipped by Message-ID and by UTR. Also reads TCS/TDS into drafts saved before P1.
+    Payments-only: no booking draft is ever created or changed by this import."""
     d = _parse_date(since, "since")
-    res = ota_service.poll_mailbox(db, limit=limit, since=d, from_addr=ota_payments.PAYMENT_SENDER)
-    # plus batch 3's monthly TDS / TCS / commission statements, and "Forward as attachment" mails from
-    # the hotel's own inbox (ota_payment_forwarders)
+    res = ota_service.poll_mailbox(db, limit=limit, since=d, from_addr=ota_payments.PAYMENT_SENDER,
+                                   payments_only=True)
+    # plus batch 3's monthly Go-MMT statements, P2a's Yatra YES Bank advices and Yatra booking mails
+    # (for their commission invoices / credit notes), and "Forward as attachment" mails from the
+    # hotel's own inbox (ota_payment_forwarders)
     from utils.settings import get_ota_payment_config
-    for fwd in [ota_statements.STATEMENT_SENDER] + get_ota_payment_config(db)["forwarders"]:
-        more = ota_service.poll_mailbox(db, limit=limit, since=d, from_addr=fwd)
+    senders = [ota_statements.STATEMENT_SENDER, ota_payments.YES_BANK_SENDER, ota_statements.YATRA_DOC_SENDER]
+    for fwd in senders + get_ota_payment_config(db)["forwarders"]:
+        more = ota_service.poll_mailbox(db, limit=limit, since=d, from_addr=fwd, payments_only=True)
         res["processed"] = (res.get("processed") or 0) + (more.get("processed") or 0)
         for k, v in (more.get("payments") or {}).items():
             res.setdefault("payments", {}).setdefault(k, 0)
@@ -359,15 +438,18 @@ def _period(s):
 
 @router.get("/statements/months")
 def statement_months(months: int = Query(12, ge=1, le=36),
+                     channel: str = Query("go_mmt", pattern="^(go_mmt|yatra)$"),
                      db: Session = Depends(get_db), user=Depends(require_admin)):
-    """One row per month: TDS / TCS statement vs vouchers, commission, and what is still missing."""
-    return ota_statements.month_report(db, months=months)
+    """One row per month: TDS / TCS statement vs vouchers, commission, and what is still missing.
+    channel=yatra (P2a): Yatra commission invoices / credit notes and voucher TDS / TCS."""
+    return ota_statements.month_report(db, months=months, channel=channel)
 
 
 @router.get("/statements/month/{period}")
-def statement_month(period: str, db: Session = Depends(get_db), user=Depends(require_admin)):
+def statement_month(period: str, channel: str = Query("go_mmt", pattern="^(go_mmt|yatra)$"),
+                    db: Session = Depends(get_db), user=Depends(require_admin)):
     """One month booking by booking (period = YYYY-MM)."""
-    return ota_statements.month_detail(db, _period(period))
+    return ota_statements.month_detail(db, _period(period), channel=channel)
 
 
 @router.get("/statements/{statement_id}/file")
@@ -396,8 +478,15 @@ async def upload_mail(file: UploadFile = File(...), db: Session = Depends(get_db
         raise HTTPException(status_code=400, detail="Choose a .eml file under 15 MB")
     res = ota_payments.ingest_mail(db, raw, source="upload")
     if not (res.get("payment") or res.get("statement")):
-        db.rollback()
-        raise HTTPException(status_code=400, detail="This is not a Go-MMT payment or statement mail")
+        # P2a: a Yatra booking / cancellation mail - keep its commission invoice / credit note
+        docs = ota_statements.ingest_yatra_documents(db, raw, source="upload")
+        if not docs:
+            db.rollback()
+            raise HTTPException(status_code=400, detail="This is not an OTA payment, statement or Yatra invoice mail")
+        first = docs[0]
+        res = {"statement": True, "kind": first.get("kind"), "stored": any(x.get("stored") for x in docs),
+               "reason": None if any(x.get("stored") for x in docs) else first.get("reason"),
+               "rows": len(docs), "documents": docs, "channel": "yatra"}
     if res.get("payment"):
         ota_payments.rematch_open_lines(db)
     write_audit(db, user, "ota.mail_uploaded", "ota", None,

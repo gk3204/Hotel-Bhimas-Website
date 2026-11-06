@@ -1209,6 +1209,7 @@ class OtaTaxStatement(Base):
     __tablename__ = "ota_tax_statements"
     id = Column(Integer, primary_key=True, index=True)
     kind = Column(String(16), nullable=False)              # tds | tcs | commission | credit_memo
+    channel = Column(String(20), nullable=False, default="go_mmt")   # go_mmt | yatra (P2a, migration 063)
     period = Column(Date, nullable=False)                  # first day of the statement's month
     ota_account_code = Column(String(30), nullable=True)
     message_id = Column(String(200), nullable=True)
@@ -1220,6 +1221,8 @@ class OtaTaxStatement(Base):
     pdf_name = Column(String(200), nullable=True)
     pdf_data = Column(LargeBinary, nullable=True)
     doc_no = Column(String(60), nullable=True)             # commission invoice / credit memo number
+    ref_doc_no = Column(String(60), nullable=True)         # P2a: the invoice a credit note reverses (063)
+    supplier_gstin = Column(String(20), nullable=True)     # P2a: the OTA's GSTIN on the document (063)
     row_count = Column(Integer, nullable=False, default=0)
     other_rows = Column(Integer, nullable=False, default=0)
     total_base = Column(Numeric(14, 2), nullable=True)

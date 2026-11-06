@@ -124,12 +124,17 @@ const post = async (path, body) =>
     body: body === undefined ? undefined : JSON.stringify(body),
   }));
 
-export const getPaymentSummary = () => get("/ota/payments/summary");
+export const getPaymentSummary = (channel) => get(`/ota/payments/summary${qs({ channel })}`);
 export const getPayments = (params) => get(`/ota/payments${qs(params)}`);
 export const getPayment = (id) => get(`/ota/payments/${id}`);
 export const getPaymentBookings = (params) => get(`/ota/payments/bookings${qs(params)}`);
-export const getPaymentExceptions = () => get("/ota/payments/exceptions");
+export const getPaymentExceptions = (channel) => get(`/ota/payments/exceptions${qs({ channel })}`);
 export const getBookingPaymentState = (bookingId) => get(`/ota/payments/booking/${bookingId}`);
+// P2a: the booking money chain (gross -> commission -> TCS -> TDS -> payable -> paid -> in bank)
+export const getBookingChain = (bookingId) => get(`/ota/payments/booking/${bookingId}/chain`);
+export const getPaymentSettings = () => get("/ota/payments/settings");
+export const putPaymentSettings = async (data) =>
+  handle(await fetch(`${BASE_URL}/ota/payments/settings`, { method: "PUT", headers: authHeaders(), body: JSON.stringify(data) }));
 export const getPaymentCandidates = (params) => get(`/ota/payments/candidates${qs(params)}`);
 export const receivePayment = (id, data) => post(`/ota/payments/${id}/receive`, data);
 export const undoPaymentReceipt = (id, reason) => post(`/ota/payments/${id}/undo`, { reason });
@@ -140,8 +145,8 @@ export const ignorePaymentLine = (lineId) => post(`/ota/payments/lines/${lineId}
 export const importPayments = (since) => post(`/ota/payments/import${qs({ since })}`);
 
 // --- P1 batch 3: monthly TDS / TCS / commission statements ---
-export const getStatementMonths = (months = 12) => get(`/ota/statements/months${qs({ months })}`);
-export const getStatementMonth = (period) => get(`/ota/statements/month/${period}`);
+export const getStatementMonths = (months = 12, channel = "go_mmt") => get(`/ota/statements/months${qs({ months, channel })}`);
+export const getStatementMonth = (period, channel = "go_mmt") => get(`/ota/statements/month/${period}${qs({ channel })}`);
 
 /** Download a statement file as Go-MMT sent it (needs the auth header, so not a plain link). */
 export async function downloadStatementFile(id, part, name) {

@@ -36,6 +36,7 @@ from utils.xlsx_reader import read_dicts
 logger = logging.getLogger(__name__)
 
 STATEMENT_SENDER = "feedback@zen2-makemytrip.com"     # IMAP FROM search for the history import
+YATRA_DOC_SENDER = "donotreply@yatra.com"               # P2a: Yatra booking mails carry its invoices
 SENDER_DOMAINS = ("zen2-makemytrip.com", "makemytrip.com", "go-mmt.com")
 KINDS = ("tds", "tcs", "commission", "credit_memo")
 KIND_LABEL = {"tds": "TDS statement", "tcs": "TCS statement", "commission": "Commission invoice",
@@ -218,11 +219,12 @@ def _store(db, msg, kind, period, subject, source, base, commit):
         return {**base, "stored": False, "reason": "other property", "rows": len(rows)}
     doc_no = next((r["doc_no"] for r in keep if r["doc_no"]), None)
     if kind in ("commission", "credit_memo") and doc_no and db.query(OtaTaxStatement).filter(
-            OtaTaxStatement.kind == kind, OtaTaxStatement.doc_no == doc_no).first():
+            OtaTaxStatement.channel == "go_mmt", OtaTaxStatement.kind == kind, OtaTaxStatement.doc_no == doc_no).first():
         return {**base, "stored": False, "reason": "already recorded", "doc_no": doc_no}
     if kind in ("tds", "tcs"):
         # a re-sent statement for the same month replaces the earlier one (both kept, the old one marked)
-        for old in db.query(OtaTaxStatement).filter(OtaTaxStatement.kind == kind, OtaTaxStatement.period == period,
+        for old in db.query(OtaTaxStatement).filter(OtaTaxStatement.channel == "go_mmt", OtaTaxStatement.kind == kind,
+                                                    OtaTaxStatement.period == period,
                                                     OtaTaxStatement.superseded.is_(False)).all():
             old.superseded = True
     try:
@@ -231,7 +233,8 @@ def _store(db, msg, kind, period, subject, source, base, commit):
     except (TypeError, ValueError, AttributeError):
         mail_date = None
     s = OtaTaxStatement(
-        kind=kind, period=period, ota_account_code=next(iter(mine), None) if len(mine) == 1 else None,
+        kind=kind, channel="go_mmt", period=period,
+        ota_account_code=next(iter(mine), None) if len(mine) == 1 else None,
         message_id=message_id, subject=subject[:300], mail_date=mail_date, source=source,
         file_name=name[:200], file_data=data,
         pdf_name=pdf[0][0][:200] if pdf else None, pdf_data=pdf[0][1] if pdf else None,
@@ -259,6 +262,130 @@ def _store(db, msg, kind, period, subject, source, base, commit):
 
 
 # ---------------------------------------------------------------------------
+# Yatra per-booking commission invoices and credit notes (P2a)
+# ---------------------------------------------------------------------------
+# Yatra attaches a GST tax invoice for its commission to the booking mail ("Amended | Yatra
+# (Travelguru) booking for 0012288247" -> THI27/27/0336596.pdf) and a tax credit note to the
+# cancellation mail ("Cancellation Request Booking ID(IXIJP0002535157)" -> THM27/27/0037416_cr.pdf).
+# One document = one booking, so each becomes its own OtaTaxStatement (channel yatra) with one line.
+# The PDF text (owner's samples):
+#   "Tax Invoice ... Invoice No.: THI27/27/0336596 ... GST Number - 27AAACY2602D1ZS ... GSTIN/UIN
+#    37AAACK9397F1Z3 ... Booking ID: 0012288247 Check-in: 06 Nov 2026 ; Check-out: 09 Nov 2026 Invoice
+#    Date: 20 Sep 2026 ... Booked by: Harish Jayakumar Description ... UTGST(@0.00% of commission)
+#    690.00 0.00 0.00 124.20 0.00 Total Commission Receivable in INR (Amount in words: ...) 814.20"
+#   "Tax Credit Note ... Tax Credit Note No : THM27/27/0037416 Invoice No: THI27/27/0345785 ..."
+_YD_AMOUNTS = re.compile(r"UTGST\s*\(@[^)]*\)\s*" + r"\s+".join([r"([\d,]+\.\d{2})"] * 5), re.I)
+_YD_TOTAL = re.compile(r"Total\s+Commission\s+Receivable\s+in\s+INR\s*(?:\([^)]*\))?\s*([\d,]+\.\d{2})", re.I)
+_YD_DATE = r"(\d{1,2}\s+[A-Za-z]{3}\s+\d{4})"
+
+
+def _ydate(s):
+    try:
+        return datetime.strptime(re.sub(r"\s+", " ", s or "").strip(), "%d %b %Y").date()
+    except ValueError:
+        return None
+
+
+def parse_yatra_document_text(text: str) -> dict | None:
+    """A Yatra commission invoice or credit note, from the PDF text. PURE. None if it is neither."""
+    t = text or ""
+    low = t.lower()
+    if "yatra online limited" not in low:
+        return None
+    if "tax credit note" in low:
+        kind = "credit_memo"
+        doc = re.search(r"Tax\s+Credit\s+Note\s+No\s*:\s*([A-Z0-9/]+)", t, re.I)
+        ref = re.search(r"\bInvoice\s+No\.?\s*:\s*(THI[A-Z0-9/]+)", t, re.I)
+    elif "tax invoice" in low:
+        kind = "commission"
+        doc = re.search(r"\bInvoice\s+No\.?\s*:\s*([A-Z0-9/]+)", t, re.I)
+        ref = None
+    else:
+        return None
+    amounts = _YD_AMOUNTS.search(t)
+    total = _YD_TOTAL.search(t)
+    booking = re.search(r"Booking\s+ID\s*:\s*([A-Z]{0,5}\s?P?\d{6,})", t, re.I)
+    if not (doc and amounts and booking):
+        return None
+    from services.ota_service import canonical_ota_id
+    commission, cgst, sgst, igst, utgst = (_num(x) or 0.0 for x in amounts.groups())
+    gst = round(cgst + sgst + igst + utgst, 2)
+    amount = _num(total.group(1)) if total else round(commission + gst, 2)
+    sign = -1 if kind == "credit_memo" else 1
+    stay = re.search(r"Check-in\s*:\s*" + _YD_DATE + r"\s*;\s*Check-out\s*:\s*" + _YD_DATE, t, re.I)
+    inv_date = re.search(r"Invoice\s+Date\s*:\s*" + _YD_DATE, t, re.I)
+    guest = re.search(r"Booked\s+by\s*:\s*(.+?)\s+Description\b", t, re.I)
+    supplier = re.search(r"GST\s+Number\s*-\s*([0-9A-Z]{15})", t)
+    return {
+        "kind": kind, "doc_no": doc.group(1), "ref_doc_no": ref.group(1) if ref else None,
+        "ota_booking_id": canonical_ota_id("yatra", re.sub(r"\s+", "", booking.group(1))),
+        "check_in": _ydate(stay.group(1)) if stay else None,
+        "check_out": _ydate(stay.group(2)) if stay else None,
+        "doc_date": _ydate(inv_date.group(1)) if inv_date else None,
+        "guest_name": _txt(guest.group(1)) if guest else None,
+        "supplier_gstin": supplier.group(1) if supplier else None,
+        "base_amount": round(sign * commission, 2), "gst_amount": round(sign * gst, 2),
+        "amount": round(sign * amount, 2),
+    }
+
+
+def ingest_yatra_documents(db, raw: bytes, *, source="mail", commit=False) -> list:
+    """Store every Yatra commission invoice / credit note attached to a mail from Yatra. The mail itself
+    is a booking or cancellation and still goes on to the voucher logic - this never consumes it.
+    Idempotent on the document number. Never raises."""
+    try:
+        msg = email.message_from_bytes(raw)
+        sender = email.utils.parseaddr(_decode(msg.get("From")))[1].lower()
+        if not (sender.endswith("@yatra.com") or sender.endswith(".yatra.com")):
+            return []
+        _xlsx, pdfs = _attachments(msg)
+        if not pdfs:
+            return []
+        from utils.pdf_text import pdf_text
+        out = []
+        message_id = (msg.get("Message-ID") or msg.get("Message-Id") or "").strip() or None
+        for name, data in pdfs:
+            d = parse_yatra_document_text(pdf_text(data))
+            if d is None:
+                continue
+            if db.query(OtaTaxStatement).filter(OtaTaxStatement.channel == "yatra", OtaTaxStatement.kind == d["kind"],
+                                                OtaTaxStatement.doc_no == d["doc_no"]).first():
+                out.append({"yatra_document": True, "stored": False, "reason": "already recorded", "doc_no": d["doc_no"]})
+                continue
+            if message_id and db.query(OtaTaxStatement).filter(OtaTaxStatement.message_id == message_id).first():
+                message_id = None          # a second document in the same mail: the Message-ID is taken
+            try:
+                mail_date = email.utils.parsedate_to_datetime(msg.get("Date")).astimezone(clock.UTC).replace(tzinfo=None)
+            except (TypeError, ValueError, AttributeError):
+                mail_date = None
+            period = (d["doc_date"] or (mail_date.date() if mail_date else clock.business_today())).replace(day=1)
+            b = db.query(Booking).filter(Booking.ota_booking_id == d["ota_booking_id"]).first()
+            s = OtaTaxStatement(
+                kind=d["kind"], channel="yatra", period=period, message_id=message_id,
+                subject=_decode(msg.get("Subject"))[:300], mail_date=mail_date, source=source,
+                pdf_name=name[:200], pdf_data=data, doc_no=d["doc_no"], ref_doc_no=d["ref_doc_no"],
+                supplier_gstin=d["supplier_gstin"], row_count=1, other_rows=0,
+                total_base=d["base_amount"], total_gst=d["gst_amount"], total_amount=d["amount"])
+            db.add(s)
+            db.flush()
+            db.add(OtaTaxStatementLine(
+                statement_id=s.id, ota_booking_id=d["ota_booking_id"], guest_name=d["guest_name"],
+                booking_date=None, check_in=d["check_in"], check_out=d["check_out"], brand="YATRA",
+                doc_no=d["doc_no"], base_amount=d["base_amount"], gst_amount=d["gst_amount"], amount=d["amount"],
+                booking_id=b.booking_id if b else None))
+            db.flush()
+            message_id = None
+            out.append({"yatra_document": True, "stored": True, "kind": d["kind"], "doc_no": d["doc_no"],
+                        "ota_booking_id": d["ota_booking_id"], "amount": d["amount"], "statement_id": s.id})
+        if commit and out:
+            db.commit()
+        return out
+    except Exception:
+        logger.exception("Yatra document: could not read a mail attachment")
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Month report
 # ---------------------------------------------------------------------------
 def _month_add(d: date, n: int) -> date:
@@ -280,23 +407,36 @@ def _first_month(db):
     return min(candidates).replace(day=1) if candidates else None
 
 
-def _voucher_taxes(db, ota_ids) -> dict:
-    """{ota_booking_id: (tcs, tds)} from the newest confirmation draft of each booking."""
+def _f(v):
+    return float(v) if v is not None else None
+
+
+def voucher_figures(db, ota_ids) -> dict:
+    """{ota_booking_id: {"tcs", "tds", "commission", "gross", "payable"}} from the newest confirmation
+    draft of each booking - the voucher as the OTA sent it. Commission is incl. GST, as the voucher
+    and the invoices both state it."""
     out = {}
     if not ota_ids:
         return out
     for d in (db.query(OtaDraftBooking)
-              .filter(OtaDraftBooking.ota_booking_id.in_(ota_ids), OtaDraftBooking.kind == "confirmation")
+              .filter(OtaDraftBooking.ota_booking_id.in_(list(ota_ids)), OtaDraftBooking.kind == "confirmation")
               .order_by(OtaDraftBooking.id).all()):
-        out[d.ota_booking_id] = (float(d.tcs_amount) if d.tcs_amount is not None else None,
-                                 float(d.tds_amount) if d.tds_amount is not None else None)
+        out[d.ota_booking_id] = {"tcs": _f(d.tcs_amount), "tds": _f(d.tds_amount),
+                                 "commission": _f(d.commission_amount), "gross": _f(d.amount),
+                                 "payable": _f(d.net_payout)}
     return out
 
 
-def _current(db, periods):
+def _voucher_taxes(db, ota_ids) -> dict:
+    """{ota_booking_id: (tcs, tds)} - P1's view of voucher_figures."""
+    return {k: (v["tcs"], v["tds"]) for k, v in voucher_figures(db, ota_ids).items()}
+
+
+def _current(db, periods, channel="go_mmt"):
     """Statements in force for the periods: the latest TDS/TCS per month, every commission doc."""
     stmts = (db.query(OtaTaxStatement)
-             .filter(OtaTaxStatement.period.in_(periods), OtaTaxStatement.superseded.is_(False))
+             .filter(OtaTaxStatement.period.in_(periods), OtaTaxStatement.superseded.is_(False),
+                     OtaTaxStatement.channel == channel)
              .order_by(OtaTaxStatement.id).all())
     by = {}
     for s in stmts:
@@ -315,9 +455,16 @@ def _compare(kind, net, voucher, booking_status):
     return expected, ("ok" if abs(net - expected) <= _TOL else "differs")
 
 
-def month_detail(db, period: date) -> dict:
-    """One month, booking by booking: TDS and TCS (statement vs voucher), commission, credit memo."""
-    by = _current(db, [period])
+def _check(net, expected):
+    if expected is None:
+        return "no_voucher"
+    return "ok" if abs(net - expected) <= _TOL else "differs"
+
+
+def month_detail(db, period: date, channel="go_mmt") -> dict:
+    """One month, booking by booking: TDS and TCS (statement vs voucher), commission (invoice vs voucher,
+    P2a), credit memo. Yatra issues no TDS/TCS statement, so for Yatra those two are the voucher's."""
+    by = _current(db, [period], channel)
     stmts = [s for k in KINDS for s in by.get((period, k), [])]
     lines = (db.query(OtaTaxStatementLine)
              .filter(OtaTaxStatementLine.statement_id.in_([s.id for s in stmts])).all()) if stmts else []
@@ -341,66 +488,120 @@ def month_detail(db, period: date) -> dict:
             r["commission_gst"] = round(r["commission_gst"] + float(x.gst_amount or 0), 2)
         else:
             r["credit_memo"] = round(r["credit_memo"] + float(x.amount), 2)
-    vouchers = _voucher_taxes(db, list(rows))
+    vouchers = voucher_figures(db, list(rows))
     status = {}
     if rows:
         for b in db.query(Booking).filter(Booking.ota_booking_id.in_(list(rows))).all():
             status.setdefault(b.ota_booking_id, (b.booking_id, b.status))
+    # The commission check uses every invoice / credit note of the booking, whatever month it is dated:
+    # a stay invoiced in September and cancelled in October has its credit note in October.
+    com_all = commission_documents(db, list(rows), channel)
     out = []
     for oid, r in sorted(rows.items(), key=lambda kv: (kv[1]["check_in"] or "", kv[0])):
         bid, bstatus = status.get(oid, (r["booking_id"], None))
-        tcs_v, tds_v = vouchers.get(oid, (None, None))
+        v = vouchers.get(oid, {})
         flags = []
-        row = {**{k: v for k, v in r.items() if k != "in"}, "booking_id": bid, "booking_status": bstatus}
-        for k, v in (("tds", tds_v), ("tcs", tcs_v)):
-            if k not in r["in"]:
-                row[f"{k}_voucher"], row[f"{k}_check"] = v, "not_in_statement"
+        row = {**{k: val for k, val in r.items() if k != "in"}, "booking_id": bid, "booking_status": bstatus}
+        for k in ("tds", "tcs"):
+            if channel != "go_mmt":
+                # Yatra sends no TDS/TCS statement - the voucher figure is the record
+                row[k] = v.get(k) or 0.0
+                row[f"{k}_voucher"], row[f"{k}_check"] = v.get(k), "voucher_only"
                 continue
-            row[f"{k}_voucher"], row[f"{k}_check"] = _compare(k, r[k], v, bstatus)
+            if k not in r["in"]:
+                row[f"{k}_voucher"], row[f"{k}_check"] = v.get(k), "not_in_statement"
+                continue
+            row[f"{k}_voucher"], row[f"{k}_check"] = _compare(k, r[k], v.get(k), bstatus)
             if row[f"{k}_check"] == "differs":
                 flags.append(f"{k}_differs")
+        # P2a commission check: the invoice (net of any credit memo) against the voucher commission
+        if r["in"] & {"commission", "credit_memo"}:
+            expected = 0.0 if bstatus == "cancelled" else v.get("commission")
+            row["commission_voucher"] = v.get("commission")
+            row["commission_all_documents"] = com_all.get(oid, 0.0)
+            row["commission_check"] = _check(com_all.get(oid, 0.0), expected)
+            if row["commission_check"] == "differs":
+                flags.append("commission_differs")
+        else:
+            row["commission_voucher"], row["commission_check"] = v.get("commission"), "not_in_statement"
         if bid is None:
             flags.append("not_in_pms")
         row["flags"] = flags
         out.append(row)
-    return {"period": str(period), "rows": out,
+    return {"period": str(period), "channel": channel, "rows": out,
             "statements": [serialize_statement(s) for s in stmts]}
 
 
-def month_report(db, months=12, today=None) -> dict:
-    """One row per month, newest first: each statement's total, the voucher-based figure for the same
-    bookings, how many bookings differ, and which statements are still missing."""
+def commission_documents(db, ota_ids, channel) -> dict:
+    """{ota_booking_id: net commission incl. GST} over ALL of a booking's invoices and credit notes."""
+    out = {}
+    if not ota_ids:
+        return out
+    q = (db.query(OtaTaxStatementLine.ota_booking_id, OtaTaxStatementLine.amount)
+         .join(OtaTaxStatement, OtaTaxStatement.id == OtaTaxStatementLine.statement_id)
+         .filter(OtaTaxStatementLine.ota_booking_id.in_(list(ota_ids)), OtaTaxStatement.channel == channel,
+                 OtaTaxStatement.kind.in_(("commission", "credit_memo")), OtaTaxStatement.superseded.is_(False)))
+    for oid, amount in q:
+        out[oid] = round(out.get(oid, 0.0) + float(amount), 2)
+    return out
+
+
+def _yatra_voucher_month(db, p):
+    """TDS / TCS for Yatra stays starting in the month, from their vouchers (Yatra deducts at payment,
+    the day before check-in, so the check-in month is the deduction month)."""
+    nxt = _month_add(p, 1)
+    bs = (db.query(Booking).filter(Booking.booking_source == "yatra", Booking.check_in >= p, Booking.check_in < nxt,
+                                   Booking.status != "cancelled", Booking.ota_booking_id.isnot(None)).all())
+    v = voucher_figures(db, {b.ota_booking_id for b in bs})
+    out = {}
+    for k in ("tds", "tcs"):
+        known = [v[b.ota_booking_id][k] for b in bs if v.get(b.ota_booking_id, {}).get(k) is not None]
+        out[k] = {"received": None, "statement": None, "statement_with_voucher": None,
+                  "voucher": round(sum(known), 2) if known else None, "with_voucher": len(known),
+                  "bookings": len(bs), "differs": 0, "no_voucher": len(bs) - len(known)}
+    return out
+
+
+def month_report(db, months=12, today=None, channel="go_mmt") -> dict:
+    """One row per month, newest first: each statement total, the voucher-based figure for the same
+    bookings, how many bookings differ, and which statements are still missing. channel="yatra" (P2a):
+    commission from Yatra per-booking invoices / credit notes, TDS / TCS from the vouchers, and nothing
+    is ever "missing" - Yatra sends no monthly statement."""
     today = today or clock.business_today()
     first = _first_month(db)
     if first is None:
-        return {"months": [], "today": str(today)}
+        return {"months": [], "today": str(today), "channel": channel}
     this_month = today.replace(day=1)
     periods = [p for p in (_month_add(this_month, -i) for i in range(months)) if p >= first]
-    by = _current(db, periods)
+    by = _current(db, periods, channel)
     out = []
     for p in periods:
-        detail = month_detail(db, p) if any((p, k) in by for k in KINDS) else {"rows": [], "statements": []}
+        has_any = any((p, k) in by for k in KINDS)
+        detail = month_detail(db, p, channel) if has_any else {"rows": [], "statements": []}
         rows = detail["rows"]
         due = today >= due_date(p)
         row = {"period": str(p), "label": p.strftime("%b %Y"), "due_on": str(due_date(p)), "due": due,
-               "missing": [], "files": detail["statements"]}
-        for k in ("tds", "tcs"):
-            has = (p, k) in by
-            in_k = [r for r in rows if r[f"{k}_check"] != "not_in_statement"]
-            known = [r for r in in_k if r[f"{k}_check"] != "no_voucher"]
-            row[k] = {
-                "received": has,
-                "statement": round(sum(r[k] for r in in_k), 2) if has else None,
-                # the same bookings, as their vouchers state it - only where a voucher figure exists
-                "statement_with_voucher": round(sum(r[k] for r in known), 2) if known else None,
-                "voucher": round(sum(r[f"{k}_voucher"] or 0 for r in known), 2) if known else None,
-                "with_voucher": len(known),
-                "bookings": len(in_k),
-                "differs": sum(1 for r in in_k if r[f"{k}_check"] == "differs"),
-                "no_voucher": sum(1 for r in in_k if r[f"{k}_check"] == "no_voucher"),
-            }
-            if due and not has:
-                row["missing"].append(k)
+               "missing": [], "files": detail["statements"], "channel": channel}
+        if channel == "go_mmt":
+            for k in ("tds", "tcs"):
+                has = (p, k) in by
+                in_k = [r for r in rows if r[f"{k}_check"] != "not_in_statement"]
+                known = [r for r in in_k if r[f"{k}_check"] != "no_voucher"]
+                row[k] = {
+                    "received": has,
+                    "statement": round(sum(r[k] for r in in_k), 2) if has else None,
+                    # the same bookings, as their vouchers state it - only where a voucher figure exists
+                    "statement_with_voucher": round(sum(r[k] for r in known), 2) if known else None,
+                    "voucher": round(sum(r[f"{k}_voucher"] or 0 for r in known), 2) if known else None,
+                    "with_voucher": len(known),
+                    "bookings": len(in_k),
+                    "differs": sum(1 for r in in_k if r[f"{k}_check"] == "differs"),
+                    "no_voucher": sum(1 for r in in_k if r[f"{k}_check"] == "no_voucher"),
+                }
+                if due and not has:
+                    row["missing"].append(k)
+        else:
+            row.update(_yatra_voucher_month(db, p))
         com = by.get((p, "commission"), [])
         crm = by.get((p, "credit_memo"), [])
         row["commission"] = {
@@ -410,11 +611,12 @@ def month_report(db, months=12, today=None) -> dict:
             "gst": round(sum(float(s.total_gst or 0) for s in com), 2),
             "total": round(sum(float(s.total_amount or 0) for s in com), 2),
             "credit_memos": round(sum(float(s.total_amount or 0) for s in crm), 2),
+            "differs": sum(1 for r in rows if r.get("commission_check") == "differs"),
         }
-        if due and not com:
+        if channel == "go_mmt" and due and not com:
             row["missing"].append("commission")
         out.append(row)
-    return {"months": out, "today": str(today)}
+    return {"months": out, "today": str(today), "channel": channel}
 
 
 def serialize_statement(s: OtaTaxStatement) -> dict:
@@ -426,6 +628,7 @@ def serialize_statement(s: OtaTaxStatement) -> dict:
         "total_amount": float(s.total_amount) if s.total_amount is not None else None,
         "file_name": s.file_name, "pdf_name": s.pdf_name, "source": s.source,
         "mail_date": s.mail_date.isoformat() if s.mail_date else None, "superseded": s.superseded,
+        "channel": s.channel, "ref_doc_no": s.ref_doc_no, "supplier_gstin": s.supplier_gstin,
     }
 
 
