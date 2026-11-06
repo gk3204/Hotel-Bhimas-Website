@@ -1104,7 +1104,8 @@ def generate_shift_report_pdf(shift_data):
     import tempfile
     file_path = os.path.join(tempfile.gettempdir(), f"shift_report_{shift_data['id']}.pdf")
 
-    doc = SimpleDocTemplate(file_path, pagesize=A4,
+    # v8s: landscape - the lists have a column per payment mode, and on portrait the amounts wrapped
+    doc = SimpleDocTemplate(file_path, pagesize=landscape(A4),
                             rightMargin=25, leftMargin=25, topMargin=25, bottomMargin=25)
     styles = getSampleStyleSheet()
     styles["Normal"].fontSize = 9
@@ -1233,74 +1234,19 @@ def generate_shift_report_pdf(shift_data):
         elements.append(method_table)
         elements.append(Spacer(1, 0.25 * inch))
 
-    # v5i: every receipt and paid-out this shift handled, in the cashier-summary layout (grouped
-    # by mode -> check-out bills / advances / paid-outs, with bill no, room, guest, CR no, user),
-    # so the person signing the report can tie the method totals above to real receipts.
-    receipts = shift_data.get("receipts") or {}
-    elements.append(Paragraph("<b>Receipts &amp; payments — this shift</b>", styles["Heading2"]))
-    if receipts.get("rows"):
-        elements.append(build_marker_table(receipts["columns"], receipts["rows"],
-                                           receipts.get("totals"), styles, font_size=7))
-    else:
-        elements.append(Paragraph("No receipts or paid-outs were recorded in this shift.",
-                                  styles["Normal"]))
-    elements.append(Spacer(1, 0.25 * inch))
-
-    # Expenses breakdown
-    expenses = shift_data.get("expenses") or []
-    elements.append(Paragraph("<b>Expenses</b>", styles["Heading2"]))
-    if expenses:
-        # v6m.14: each expense's time, in the hotel's clock (the data is converted upstream)
-        rows = [["#", "Time", "Category", "Description", "Logged by", "Amount"]]
-        for i, e in enumerate(expenses, 1):
-            rows.append([str(i), _dt(e.get("created_at")), (e.get("category") or "").capitalize(),
-                         Paragraph(e.get("description") or "", styles["Normal"]),
-                         e.get("logged_by") or "—",
-                         _rs(e.get("amount"))])
-        rows.append(["", "", "", "", "Total", _rs(shift_data.get("expenses_total"))])
-        exp_table = Table(rows, colWidths=[22, 78, 66, 152, 64, 68])
-        exp_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-            ('ALIGN', (5, 0), (5, -1), 'RIGHT'),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-        ]))
-        elements.append(exp_table)
-    else:
-        elements.append(Paragraph("No expenses logged this shift.", styles["Normal"]))
-    elements.append(Spacer(1, 0.2 * inch))
-
-    # Cash paid OUT, itemised (backlog v2 ALT-5). This used to be a single lump sum in the
-    # reconciliation block, so a shift receipt could not be checked line by line.
-    payouts = shift_data.get("payouts") or []
-    elements.append(Paragraph("<b>Payouts &amp; refunds (cash out)</b>", styles["Heading2"]))
-    if payouts:
-        # v6m.14: when each payout was paid and who paid it
-        prows = [["#", "Time", "Booking", "Reason", "Reference", "By", "Amount"]]
-        for i, p in enumerate(payouts, 1):
-            prows.append([str(i), _dt(p.get("at")),
-                          f"#{p.get('booking_id')}" if p.get("booking_id") else "—",
-                          Paragraph(p.get("reason") or "", styles["Normal"]),
-                          p.get("reference") or "—", p.get("by") or "—",
-                          _rs(p.get("amount"))])
-        prows.append(["", "", "", "", "", "Total", _rs(shift_data.get("payouts_total"))])
-        pay_table = Table(prows, colWidths=[20, 74, 44, 130, 70, 52, 60])
-        pay_table.setStyle(TableStyle([
-            ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor("#f0f0f0")),
-            ('FONTNAME', (0, 0), (-1, 0), 'Helvetica-Bold'),
-            ('FONTNAME', (0, -1), (-1, -1), 'Helvetica-Bold'),
-            ('ALIGN', (6, 0), (6, -1), 'RIGHT'),
-            ('GRID', (0, 0), (-1, -1), 0.5, colors.HexColor("#e0e0e0")),
-            ('BOTTOMPADDING', (0, 0), (-1, -1), 4),
-            ('TOPPADDING', (0, 0), (-1, -1), 2),
-        ]))
-        elements.append(pay_table)
-    else:
-        elements.append(Paragraph("No cash paid out this shift.", styles["Normal"]))
-    elements.append(Spacer(1, 0.2 * inch))
+    # v8s (owner, 6 Nov): four lists, each bill / receipt / payout exactly ONCE (built by
+    # routers.reports.shift_report_sections) - money received, bills checked out, paid out, in house.
+    # They replace the old receipts table + its Unsettled / Nil amount / Invoices bands and the
+    # separate Expenses and Payouts tables, which between them printed one checkout up to four times.
+    # Fitted to the printable width: the old receipts table ran off both edges of the page.
+    for sec in shift_data.get("sections") or []:
+        elements.append(Paragraph(f"<b>{sec['title']}</b>", styles["Heading2"]))
+        if sec.get("rows"):
+            elements.append(build_marker_table(sec["columns"], sec["rows"], sec.get("totals"), styles,
+                                               font_size=7.5, avail_width=landscape(A4)[0] - 50))
+        else:
+            elements.append(Paragraph("None this shift.", styles["Normal"]))
+        elements.append(Spacer(1, 0.2 * inch))
 
     # Denomination count (if entered)
     denoms = shift_data.get("denominations")

@@ -194,9 +194,9 @@ def _report_data(db: Session, shift: CashShift) -> dict:
     s["close_note"] = shift.close_note
     # v5i: receipt-level rows (every payment mode) in the cashier-summary layout, scoped to this
     # shift. Imported here, not at module level: reports imports this module's _serialize.
-    from routers.reports import _cashier_table, cashier_summary_for_shift
-    cols, rows, totals = _cashier_table(cashier_summary_for_shift(db, shift))
-    s["receipts"] = {"columns": cols, "rows": rows, "totals": totals}
+    # v8s: the report's lists, each bill / receipt / payout exactly once (reports.shift_report_sections)
+    from routers.reports import shift_report_sections
+    s["sections"] = shift_report_sections(db, shift)
     return s
 
 
@@ -435,10 +435,10 @@ def shift_detail(shift_id: int, db: Session = Depends(get_db)):
                                          Payment.refund_shift_id == shift_id).all())
     # v7d (owner): the shift report on screen - every receipt / paid-out / prepaid receipt and the
     # bills checked out in the shift (unsettled and nil amount) with who checked them out.
-    from routers.reports import _cashier_table, cashier_summary_for_shift
-    _cols, _rows, _totals = _cashier_table(cashier_summary_for_shift(db, shift))
+    # v8s: the same four lists as the printed report, each item once
+    from routers.reports import shift_report_sections
     return {
-        "receipts": {"columns": _cols, "rows": _rows, "totals": _totals},
+        "sections": shift_report_sections(db, shift),
         "shift": _serialize(db, shift),
         "denominations": json.loads(shift.denominations) if shift.denominations else None,
         "close_note": shift.close_note,

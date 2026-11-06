@@ -1679,9 +1679,10 @@ def _cashier_table(data):
     return cols, rows, totals
 
 
-def checkout_summary_data(db, day, day_to=None):
+def checkout_summary_data(db, day, day_to=None, window=None):
     """Per-bill check-out summary for one day (adapted): one row per booking checked out that day —
-    room rent, SGST/CGST, food, laundry, misc, discount, advance, refund, and the bill amount."""
+    room rent, SGST/CGST, food, laundry, misc, discount, advance, refund, and the bill amount.
+    v8s: `window` = a UTC [start, end) instead of days - one cash shift's bills."""
     from models import Folio
     from routers.folio import _get_invoice
     from services import dues as _dues
@@ -1689,7 +1690,9 @@ def checkout_summary_data(db, day, day_to=None):
     rows = []
     # v7e: bill by bill, on the day THAT bill closed (a per-room bill closes with its own room)
     # v8a (owner): "all reports by date range" - one day, or every bill closed in [day, day_to]
-    if day_to and day_to != day:
+    if window is not None:
+        _closed = _checked_out_bills(db, window=window)
+    elif day_to and day_to != day:
         _closed = _checked_out_bills(db, window=clock.business_day_bounds(day, day_to))
     else:
         _closed = _checked_out_bills(db, day=day)
@@ -1791,12 +1794,115 @@ def checkout_summary_data(db, day, day_to=None):
             "due": round(float(f.due_amount or 0), 2) if _dues.is_due_bill(f) else 0.0,
             "due_outstanding": _dues.outstanding(f),
             "bill_amount": round(float(f.total or 0), 2),
+            # v8s: for the shift report's one-line-per-bill section
+            "guest": b.display_guest_name or None, "booking_id": b.booking_id,
+            "outstanding": round(float(f.balance or 0), 2),
+            "is_due_bill": bool(_dues.is_due_bill(f)),
         })
     keys = ("room_rent", "sgst", "cgst", "food", "laundry", "misc", "discount", "total",
             "advance", "balance", "refund", "due", "bill_amount", "room_cgst", "room_sgst", "food_cgst", "food_sgst",
             "prepaid", "room_rent_net", "food_net", "laundry_net", "misc_net", "discount_net")
     totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
     return {"day": str(day), "day_to": str(day_to or day), "rows": rows, "totals": totals}
+
+
+def _cashier_only(data, keys):
+    """v8s: the cashier summary cut down to some receipt kinds (`keys` of _CASHIER_SECTIONS), with
+    each mode's and the grand totals recomputed from just those rows, and no bill / in-house lists."""
+    modes = []
+    for m in data["modes"]:
+        secs = [s for s in m["sections"] if s["key"] in keys]
+        if not secs:
+            continue
+        rec = round(sum(float(x.get("receipt") or 0) for s in secs for x in s["rows"]), 2)
+        pay = round(sum(float(x.get("payment") or 0) for s in secs for x in s["rows"]), 2)
+        modes.append({**m, "sections": secs, "receipt": rec, "payment": pay, "net": round(rec - pay, 2)})
+    counted = [m for m in modes if not m.get("memo")]
+    return {**data, "modes": modes, "unsettled": [], "nil_checkouts": [], "invoices": [], "in_house": [],
+            "due_bills": [],
+            "grand": {"receipt": round(sum(m["receipt"] for m in counted), 2),
+                      "payment": round(sum(m["payment"] for m in counted), 2),
+                      "net": round(sum(m["net"] for m in counted), 2)}}
+
+
+def _drop_cols(cols, rows, totals, drop):
+    """v8s: the same table without some columns (marker rows pass through)."""
+    keep = [i for i, c in enumerate(cols) if c not in drop]
+    pick = lambda r: [r[i] for i in keep]
+    return ([cols[i] for i in keep], [pick(r) if isinstance(r, list) else r for r in rows],
+            pick(totals) if totals else totals)
+
+
+# v8s: the shift report's money tables leave out what the Bills list already says (the bill no.,
+# the source, the running balance) so the amounts print on one line.
+_SHIFT_DROP = ("Bill", "Source", "Balance")
+
+
+def shift_report_sections(db, shift):
+    """v8s (owner, 6 Nov): "in cash shift i see many redundant info ... checkout with nil amount and
+    that again coming in the next set". The shift report listed one bill up to four times - its
+    checkout receipt, its change returned, then under "Nil amount" AND again under "Invoices raised",
+    and each payout / expense twice more in their own tables. Now every item appears ONCE:
+
+      1. Money received - advances and check-out collections, the payment modes as columns
+      2. Bills checked out - one row per bill: amount, prepaid, advance, paid at checkout, refund,
+         what is still owed, status (replaces the Unsettled / Nil amount / Invoices lists)
+      3. Paid out - refunds and expenses, once
+      4. In house at close - one row per booking, its rooms together
+
+    Returns [{"title", "columns", "rows", "totals"}] for the PDF and the web shift screen."""
+    data = cashier_summary_for_shift(db, shift)
+    out = []
+
+    cols, rows, totals = _drop_cols(*_cashier_table(_cashier_only(data, ("checkout", "due", "advance", "prepaid"))),
+                                    _SHIFT_DROP)
+    out.append({"title": "Money received this shift", "columns": cols, "rows": rows,
+                "totals": totals if rows else None})
+
+    end = shift.closed_at or clock.now_utc()
+    bills = checkout_summary_data(db, None, window=(shift.opened_at, end))["rows"]
+    bills.sort(key=lambda r: doc_number_key(r["bill_no"]))
+    bcols = ["Bill", "Checked out", "Rooms", "Guest", "Source", "Bill Amt", "Prepaid (OTA)", "Advance",
+             "Paid at checkout", "Refund", "Still owed", "Status", "By"]
+    brows = []
+    for r in bills:
+        if r.get("is_due_bill"):
+            status, owed = "PAY LATER", r.get("due_outstanding") or r.get("due") or 0.0
+        elif r["outstanding"] > 0:
+            status, owed = "UNSETTLED", r["outstanding"]
+        elif r["outstanding"] < 0:
+            status, owed = "REFUND DUE", r["outstanding"]
+        else:
+            status, owed = "SETTLED", 0.0
+        brows.append([r["bill_no"], r.get("checked_out_at", ""), r["rooms"],
+                      " · ".join(str(v) for v in (r.get("guest"), f"#{r['booking_id']}") if v),
+                      r.get("source", ""), r["bill_amount"], r.get("prepaid", 0.0) or "", r["advance"] or "",
+                      r.get("balance", 0.0) or "", r["refund"] or "", owed or "", status,
+                      r.get("checked_out_by", "")])
+    btot = None
+    if brows:
+        _t = lambda k: round(sum(float(r.get(k) or 0) for r in bills), 2)
+        btot = ["TOTAL", "", f"{len(brows)} bill(s)", "", "", _t("bill_amount"), _t("prepaid"), _t("advance"),
+                _t("balance"), _t("refund"),
+                round(sum(float(x[10] or 0) for x in brows), 2), "", ""]
+    out.append({"title": f"Bills checked out this shift ({len(brows)})", "columns": bcols, "rows": brows,
+                "totals": btot})
+
+    cols, rows, totals = _drop_cols(*_cashier_table(_cashier_only(data, ("paidout",))), _SHIFT_DROP)
+    out.append({"title": "Paid out this shift (refunds and expenses)", "columns": cols, "rows": rows,
+                "totals": totals if rows else None})
+
+    groups = {}
+    for x in data.get("in_house") or []:
+        g = groups.setdefault(x["booking_id"], {**x, "rooms": []})
+        g["rooms"].append(x["room"])
+    hcols = ["Booking", "Checked in", "Rooms", "Guest", "Source", "Check-out", "Balance"]
+    hrows = [[f"#{g['booking_id']}", g.get("checked_in") or "", ", ".join(g["rooms"]), g.get("guest") or "",
+              g.get("source") or "", g.get("check_out") or "", g.get("balance")] for g in groups.values()]
+    nrooms = sum(len(g["rooms"]) for g in groups.values())
+    out.append({"title": f"In house at close ({len(hrows)} bookings, {nrooms} rooms)", "columns": hcols,
+                "rows": hrows, "totals": None})
+    return out
 
 
 def checkout_summary_table(data):

@@ -127,7 +127,7 @@ const CashShiftSettings = () => {
           )}
         </div>
 
-        {/* v7d: one shift's receipts, paid-outs, prepaid receipts and checked-out bills (incl. nil amount) */}
+        {/* v7d / v8s: one shift's money received, bills checked out, paid out and rooms in house */}
         {detail && (
           <div className="fixed inset-0 bg-black/70 z-50 flex items-start justify-center p-4 overflow-y-auto"
                onClick={() => setDetail(null)}>
@@ -145,26 +145,36 @@ const CashShiftSettings = () => {
                     className="bg-slate-700 hover:bg-slate-600 px-3 py-1.5 rounded-lg text-white text-xs font-semibold">Close</button>
                 </div>
               </div>
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-sm">
-                  <thead className="bg-slate-800">
-                    <tr>{(detail.receipts?.columns || []).map((c) => <th key={c} className="px-3 py-2 whitespace-nowrap">{c}</th>)}</tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-800">
-                    {(detail.receipts?.rows || []).map((r, i) => {
-                      const n = (detail.receipts?.columns || []).length;
-                      if (r && !Array.isArray(r) && r.section !== undefined)
-                        return <tr key={i}><td colSpan={n} className="px-3 py-2 font-semibold text-[#E5C07B] whitespace-pre">{r.section}</td></tr>;
-                      if (r && !Array.isArray(r) && r.subtotal)
-                        return <tr key={i} className="bg-slate-800/60 font-semibold">{r.subtotal.map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap">{c}</td>)}</tr>;
-                      return <tr key={i}>{(r || []).map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap text-slate-300">{c}</td>)}</tr>;
-                    })}
-                    {detail.receipts?.totals && (
-                      <tr className="bg-slate-800 font-bold">{detail.receipts.totals.map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap">{c}</td>)}</tr>
-                    )}
-                  </tbody>
-                </table>
-              </div>
+              {/* v8s (owner): the same four lists as the printed report - each item once */}
+              {(detail.sections || []).map((sec) => (
+                <div key={sec.title} className="mb-5">
+                  <h4 className="font-semibold text-[#E5C07B] mb-2">{sec.title}</h4>
+                  {(sec.rows || []).length === 0 ? (
+                    <p className="text-slate-500 text-sm">None this shift.</p>
+                  ) : (
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left text-sm">
+                        <thead className="bg-slate-800">
+                          <tr>{(sec.columns || []).map((c) => <th key={c} className="px-3 py-2 whitespace-nowrap">{c}</th>)}</tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-800">
+                          {sec.rows.map((r, i) => {
+                            const n = (sec.columns || []).length;
+                            if (r && !Array.isArray(r) && r.section !== undefined)
+                              return <tr key={i}><td colSpan={n} className="px-3 py-2 font-semibold text-[#E5C07B] whitespace-pre">{r.section}</td></tr>;
+                            if (r && !Array.isArray(r) && r.subtotal)
+                              return <tr key={i} className="bg-slate-800/60 font-semibold">{r.subtotal.map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap">{c}</td>)}</tr>;
+                            return <tr key={i}>{(r || []).map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap text-slate-300">{c}</td>)}</tr>;
+                          })}
+                          {sec.totals && (
+                            <tr className="bg-slate-800 font-bold">{sec.totals.map((c, j) => <td key={j} className="px-3 py-2 whitespace-nowrap">{c}</td>)}</tr>
+                          )}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              ))}
             </div>
           </div>
         )}
