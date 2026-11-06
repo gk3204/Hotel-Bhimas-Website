@@ -5,6 +5,7 @@ import { FaChartLine, FaBed, FaMoneyBillWave, FaCashRegister, FaSignInAlt,
 import { getDashboard, getWeeklyTrends, runDayClose } from "../../api/reports";
 import { getReviewTrends } from "../../api/reviews";
 import BarList from "../../components/charts/BarList";
+import { OtaDashboardTiles } from "./OtaReports";
 
 const fmt = (n) =>
   `₹${Number(n || 0).toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -177,6 +178,9 @@ export default function OwnerDashboard() {
                 sub={dash?.high_severity_alerts ? `${dash.high_severity_alerts} high` : ""}
                 highlight={dash?.open_alerts_count > 0} />
             </div>
+
+            {/* P2b: OTA money - owed, overdue, commission (admin only; nothing for other logins) */}
+            <OtaDashboardTiles />
 
             {reviewTrends && (
               <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4 mb-8">

@@ -232,8 +232,14 @@ def _store(db, msg, kind, period, subject, source, base, commit):
             if msg.get("Date") else None
     except (TypeError, ValueError, AttributeError):
         mail_date = None
+    supplier_gstin = None
+    if pdf and kind in ("commission", "credit_memo"):
+        # P2b: Go-MMT's own GSTIN for the input-credit register - printed after the hotel's on its invoice
+        from utils.pdf_text import pdf_text
+        found = re.findall(r"\b\d{2}[A-Z]{5}\d{4}[A-Z][A-Z0-9]Z[A-Z0-9]\b", pdf_text(pdf[0][1], max_pages=2))
+        supplier_gstin = found[-1] if len(found) > 1 else None
     s = OtaTaxStatement(
-        kind=kind, channel="go_mmt", period=period,
+        kind=kind, channel="go_mmt", period=period, supplier_gstin=supplier_gstin,
         ota_account_code=next(iter(mine), None) if len(mine) == 1 else None,
         message_id=message_id, subject=subject[:300], mail_date=mail_date, source=source,
         file_name=name[:200], file_data=data,

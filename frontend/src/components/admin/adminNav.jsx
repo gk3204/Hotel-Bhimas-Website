@@ -7,7 +7,7 @@ import {
   FaMoneyBillWave, FaCashRegister, FaChartBar, FaFileInvoice,
   FaShieldAlt, FaClipboardCheck, FaExclamationTriangle, FaHistory,
   FaBuilding, FaTruck, FaBoxes, FaTshirt,
-  FaUserShield, FaUserCog, FaUserCheck, FaKey, FaCog, FaHourglassHalf, FaMoneyCheckAlt,
+  FaUserShield, FaUserCog, FaUserCheck, FaKey, FaCog, FaHourglassHalf, FaMoneyCheckAlt, FaFileInvoiceDollar,
 } from "react-icons/fa";
 
 export const NAV_GROUPS = [
@@ -49,6 +49,8 @@ export const NAV_GROUPS = [
     items: [
       { to: "/admin/payments", label: "Payments", icon: FaMoneyBillWave, roles: ["admin", "accountant"] },
       { to: "/admin/ota-payments", label: "OTA Payments", icon: FaMoneyCheckAlt },
+      // P2b: the accountant sees the accounting tabs only (the server enforces it too)
+      { to: "/admin/ota-reports", label: "OTA Reports", icon: FaFileInvoiceDollar, roles: ["admin", "accountant"] },
       { to: "/admin/cash-shift", label: "Cash / Shift", icon: FaCashRegister },
       { to: "/admin/dues", label: "Dues (pay later)", icon: FaHourglassHalf, roles: ["admin", "accountant"] },
       { to: "/admin/reports", label: "Reports", icon: FaChartBar, roles: ["admin", "accountant"] },

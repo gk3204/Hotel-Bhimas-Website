@@ -24,9 +24,9 @@ from sqlalchemy.orm import Session
 from database import SessionLocal
 from models import Booking, OtaSettlement, OtaSettlementLine, OtaDraftBooking, RoomType
 from schemas import OtaChannelUpdate, OtaSettlementCreate, OtaDraftConfirm, DeskBookingCreate, BookingItemCreate
-from utils.auth_utils import require_admin, require_reception_or_admin
+from utils.auth_utils import require_admin, require_admin_or_accountant, require_reception_or_admin
 from utils.audit import write_audit, _resolve_user_id
-from services import ota_service, ota_payments, ota_statements
+from services import ota_service, ota_payments, ota_statements, ota_reports
 
 logger = logging.getLogger(__name__)
 
@@ -450,6 +450,82 @@ def statement_month(period: str, channel: str = Query("go_mmt", pattern="^(go_mm
                     db: Session = Depends(get_db), user=Depends(require_admin)):
     """One month booking by booking (period = YYYY-MM)."""
     return ota_statements.month_detail(db, _period(period), channel=channel)
+
+
+# ============================================================
+# P2b OTA reports (services/ota_reports.py) - Goibibo, MakeMyTrip and Yatra. The accounting ones
+# (receivables, registers, Tally summary, month-end statement) are open to the read-only accountant
+# login too; the management ones (forecast, earnings, leakage, tiles) are admin only. All GET.
+# ============================================================
+def _month(s, field="month"):
+    try:
+        return datetime.strptime(s, "%Y-%m").date()
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail=f"{field} must be YYYY-MM")
+
+
+def _report_chan(channel):
+    _chans(channel)
+    return None if channel in (None, "", "all") else channel
+
+
+@router.get("/reports/receivables")
+def report_receivables(channel: str = _CHANNEL_Q, db: Session = Depends(get_db),
+                       user=Depends(require_admin_or_accountant)):
+    """What the OTAs still owe, aged from when each payment fell due, with the dispute list."""
+    return ota_reports.receivables(db, channel=_report_chan(channel))
+
+
+@router.get("/reports/forecast")
+def report_forecast(channel: str = _CHANNEL_Q, days: int = Query(7, ge=1, le=31),
+                    db: Session = Depends(get_db), user=Depends(require_admin)):
+    """OTA money expected in the next `days` days, from each OTA's own payment timing."""
+    return ota_reports.cash_forecast(db, channel=_report_chan(channel), days=days)
+
+
+@router.get("/reports/earnings")
+def report_earnings(from_: str = Query(None, alias="from"), to: str = Query(None), channel: str = _CHANNEL_Q,
+                    db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Per month and channel: gross, commission %, TCS, TDS, net per room-night - OTA vs direct."""
+    m_to = _month(to, "to") if to else ota_payments.clock.business_today().replace(day=1)
+    m_from = _month(from_, "from") if from_ else ota_statements._month_add(m_to, -5)
+    if m_from > m_to:
+        raise HTTPException(status_code=400, detail="'from' must be on or before 'to'")
+    return ota_reports.channel_earnings(db, m_from, m_to, channel=_report_chan(channel))
+
+
+@router.get("/reports/leakage")
+def report_leakage(channel: str = _CHANNEL_Q, db: Session = Depends(get_db), user=Depends(require_admin)):
+    """Paid-but-not-in-PMS, never paid, paid-but-cancelled, mis-paid."""
+    return ota_reports.leakage(db, channel=_report_chan(channel))
+
+
+@router.get("/reports/registers")
+def report_registers(month: str = Query(...), kind: str = Query("gst", pattern="^(gst|tcs|tds)$"),
+                     channel: str = _CHANNEL_Q, db: Session = Depends(get_db),
+                     user=Depends(require_admin_or_accountant)):
+    """GST input credit on commission / TCS / TDS register for one month, for the CA."""
+    return ota_reports.registers(db, _month(month), kind, channel=_report_chan(channel))
+
+
+@router.get("/reports/tally")
+def report_tally(month: str = Query(...), channel: str = _CHANNEL_Q, db: Session = Depends(get_db),
+                 user=Depends(require_admin_or_accountant)):
+    """The month's OTA figures and the journal entries they suggest, for Tally."""
+    return ota_reports.tally_summary(db, _month(month), channel=_report_chan(channel))
+
+
+@router.get("/reports/statement")
+def report_statement(month: str = Query(...), channel: str = _CHANNEL_Q, db: Session = Depends(get_db),
+                     user=Depends(require_admin_or_accountant)):
+    """Per OTA: opening owed + stays - received = closing owed, for one month."""
+    return ota_reports.month_statement(db, _month(month), channel=_report_chan(channel))
+
+
+@router.get("/reports/tiles")
+def report_tiles(db: Session = Depends(get_db), user=Depends(require_admin)):
+    """The owner dashboard's OTA numbers."""
+    return ota_reports.tiles(db)
 
 
 @router.get("/statements/{statement_id}/file")

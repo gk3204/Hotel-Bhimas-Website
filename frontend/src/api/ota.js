@@ -148,6 +148,9 @@ export const importPayments = (since) => post(`/ota/payments/import${qs({ since 
 export const getStatementMonths = (months = 12, channel = "go_mmt") => get(`/ota/statements/months${qs({ months, channel })}`);
 export const getStatementMonth = (period, channel = "go_mmt") => get(`/ota/statements/month/${period}${qs({ channel })}`);
 
+// --- P2b OTA reports: receivables | forecast | earnings | leakage | registers | tally | statement | tiles ---
+export const getOtaReport = (name, params) => get(`/ota/reports/${name}${qs(params)}`);
+
 /** Download a statement file as Go-MMT sent it (needs the auth header, so not a plain link). */
 export async function downloadStatementFile(id, part, name) {
   const token = localStorage.getItem("adminToken");

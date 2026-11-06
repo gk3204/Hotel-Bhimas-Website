@@ -61,6 +61,7 @@ import OwnerDashboard from "./pages/admin/OwnerDashboard";
 import Reports from "./pages/admin/Reports";
 import OtaChannels from "./pages/admin/OtaChannels";
 import OtaPayments from "./pages/admin/OtaPayments";
+import OtaReports from "./pages/admin/OtaReports";
 import Compliance from "./pages/admin/Compliance";
 import AuditLog from "./pages/admin/AuditLog";
 import Documents from "./pages/admin/Documents";
@@ -156,6 +157,7 @@ function App() {
         <Route path="/admin/cash-shift" element={<CashShiftSettings />} />
         <Route path="/admin/ota" element={<OtaChannels />} />
         <Route path="/admin/ota-payments" element={<OtaPayments />} />
+        <Route path="/admin/ota-reports" element={<OtaReports />} />
         <Route path="/admin/housekeeping" element={<AdminHousekeeping />} />
         <Route path="/admin/maintenance" element={<AdminMaintenance />} />
         <Route path="/admin/guests" element={<GuestDirectory />} />
