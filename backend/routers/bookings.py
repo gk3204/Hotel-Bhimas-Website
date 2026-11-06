@@ -382,6 +382,11 @@ def read_all_bookings(
         ]
         if term.isdigit():
             conditions.append(Booking.booking_id == int(term))
+        # v8r (owner, 6 Nov): the room number too - "who was in room 29?" is the commonest lookup
+        # after a guest's name. Exact match, so "2" does not pull in rooms 12, 20, 21 ...
+        conditions.append(Booking.booking_id.in_(
+            db.query(BookingItem.booking_id).join(Room, Room.room_id == BookingItem.room_id)
+            .filter(Room.room_number == term)))
         query = query.filter(or_(*conditions))
 
     total_count = query.count()

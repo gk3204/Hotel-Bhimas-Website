@@ -35,6 +35,10 @@ const Bookings = () => {
   const [fromDate, setFromDate] = useState("");
   const [toDate, setToDate] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
+  // v8r (owner): search by booking no., guest name, phone, OTA ID or room number. `search` is what
+  // is typed; `q` is what is sent, 350 ms after the typing stops (not one request per key).
+  const [search, setSearch] = useState("");
+  const [q, setQ] = useState("");
   const [loading, setLoading] = useState(false);
   const [role, setRole] = useState(null);
   const [selectedBooking, setSelectedBooking] = useState(null);
@@ -82,7 +86,15 @@ const Bookings = () => {
   useEffect(() => {
     loadBookings();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page, fromDate, toDate, statusFilter, sortField, sortOrder]);
+  }, [page, fromDate, toDate, statusFilter, sortField, sortOrder, q]);
+
+  useEffect(() => {
+    const t = setTimeout(() => {
+      if (search.trim() !== q) { setPage(1); setQ(search.trim()); }
+    }, 350);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
 
   const loadBookings = async () => {
     try {
@@ -90,7 +102,7 @@ const Bookings = () => {
       // The server sorts and pages. The old client-side sort could only ever reorder the 15 rows
       // already fetched, so "sort by amount" meant "the biggest of these fifteen".
       const res = await getBookings(page, fromDate, toDate, statusFilter,
-                                    SORT_FIELDS[sortField] || "", sortOrder);
+                                    SORT_FIELDS[sortField] || "", sortOrder, q);
       setBookings(res.data);
       setTotal(res.total);
     } catch (err) {
@@ -361,6 +373,16 @@ const Bookings = () => {
             🔍 Filter bookings
           </h2>
           <div className="flex gap-4 flex-wrap items-end">
+            <div className="flex flex-col w-full sm:w-80">
+              <label className="text-xs text-slate-400 mb-1">Search</label>
+              <input
+                type="search"
+                placeholder="Booking no., guest, phone, OTA ID or room"
+                className="px-4 py-3 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] transition"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+              />
+            </div>
             <div className="flex flex-col">
               <label className="text-xs text-slate-400 mb-1">Check-in from</label>
               <input
@@ -397,7 +419,7 @@ const Bookings = () => {
               </select>
             </div>
             <button
-              onClick={() => { setFromDate(""); setToDate(""); setStatusFilter(""); setPage(1); }}
+              onClick={() => { setSearch(""); setQ(""); setFromDate(""); setToDate(""); setStatusFilter(""); setPage(1); }}
               className="bg-slate-700 hover:bg-slate-600 px-6 py-3 rounded-lg text-white font-medium transition"
             >
               Reset Filters

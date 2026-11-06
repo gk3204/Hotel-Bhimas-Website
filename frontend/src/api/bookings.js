@@ -12,7 +12,7 @@ function getAuthHeader() {
 
 // Get all bookings (paginated + optional check-in date range and status filter — ALT-10)
 export const getBookings = async (
-  page = 1, fromDate = "", toDate = "", status = "", sort = "", dir = ""
+  page = 1, fromDate = "", toDate = "", status = "", sort = "", dir = "", q = ""
 ) => {
   const limit = 15;
   const skip = (page - 1) * limit;
@@ -22,6 +22,8 @@ export const getBookings = async (
   if (fromDate) url += `&from_date=${fromDate}`;
   if (toDate) url += `&to_date=${toDate}`;
   if (status) url += `&status=${encodeURIComponent(status)}`;
+  // v8r: booking no., guest name, phone, OTA booking ID or room number - searched on the server
+  if (q && q.trim()) url += `&q=${encodeURIComponent(q.trim())}`;
   // v5s: sorting is done by the SERVER, because this list is paged 15 at a time — sorting the rows
   // already on screen would order a page, not the hotel.
   if (sort) url += `&sort=${encodeURIComponent(sort)}&dir=${dir === "asc" ? "asc" : "desc"}`;
