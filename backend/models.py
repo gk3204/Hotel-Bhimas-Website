@@ -459,6 +459,8 @@ class Folio(Base):
     status = Column(String(20), nullable=False, default="open", index=True)  # open|settled
     total = Column(Numeric(10, 2), default=0)
     balance = Column(Numeric(10, 2), default=0)
+    # v8t (migration 064): rounds the bill to the rupee; in total/balance, never in GST
+    round_off = Column(Numeric(10, 2), nullable=False, default=0, server_default="0")
     opened_at = Column(TIMESTAMP, server_default=func.now())
     settled_at = Column(DateTime, nullable=True)
     # --- Corporate split billing (prompt 18 slice 7, additive) ---

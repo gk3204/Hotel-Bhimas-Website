@@ -1789,6 +1789,7 @@ def checkout_summary_data(db, day, day_to=None, window=None):
             "room_cgst": _rs["cgst_total"], "room_sgst": _rs["sgst_total"],
             "food_cgst": _fs["cgst_total"], "food_sgst": _fs["sgst_total"],
             "misc": misc, "discount": discount, "total": round(float(f.total or 0), 2),
+            "round_off": round(float(getattr(f, "round_off", 0) or 0), 2),   # v8t
             "advance": advance, "balance": balance_paid, "refund": refund,
             # v7s: what this bill left unpaid as "pay later" (agent bookings), and what is still owed
             "due": round(float(f.due_amount or 0), 2) if _dues.is_due_bill(f) else 0.0,
@@ -1801,7 +1802,7 @@ def checkout_summary_data(db, day, day_to=None, window=None):
         })
     keys = ("room_rent", "sgst", "cgst", "food", "laundry", "misc", "discount", "total",
             "advance", "balance", "refund", "due", "bill_amount", "room_cgst", "room_sgst", "food_cgst", "food_sgst",
-            "prepaid", "room_rent_net", "food_net", "laundry_net", "misc_net", "discount_net")
+            "prepaid", "room_rent_net", "food_net", "laundry_net", "misc_net", "discount_net", "round_off")
     totals = {k: round(sum(r[k] for r in rows), 2) for k in keys}
     return {"day": str(day), "day_to": str(day_to or day), "rows": rows, "totals": totals}
 
@@ -1866,14 +1867,15 @@ def shift_report_sections(db, shift):
              "Paid at checkout", "Refund", "Still owed", "Status", "By"]
     brows = []
     for r in bills:
+        # title case: "SETTLED" wrapped to two lines in the printed column (owner, 7 Nov)
         if r.get("is_due_bill"):
-            status, owed = "PAY LATER", r.get("due_outstanding") or r.get("due") or 0.0
+            status, owed = "Pay later", r.get("due_outstanding") or r.get("due") or 0.0
         elif r["outstanding"] > 0:
-            status, owed = "UNSETTLED", r["outstanding"]
+            status, owed = "Unsettled", r["outstanding"]
         elif r["outstanding"] < 0:
-            status, owed = "REFUND DUE", r["outstanding"]
+            status, owed = "Refund due", r["outstanding"]
         else:
-            status, owed = "SETTLED", 0.0
+            status, owed = "Settled", 0.0
         brows.append([r["bill_no"], r.get("checked_out_at", ""), r["rooms"],
                       " · ".join(str(v) for v in (r.get("guest"), f"#{r['booking_id']}") if v),
                       r.get("source", ""), r["bill_amount"], r.get("prepaid", 0.0) or "", r["advance"] or "",
@@ -1914,18 +1916,19 @@ def checkout_summary_table(data):
     # its own columns); Bill Amt BEFORE the money columns; Prepaid (paid to the OTA) beside Advance.
     # Each row: Rent + Food + Laundry + Misc - Discount + Total CGST + Total SGST = Bill Amt, and
     #           Prepaid + Advance + Balance - Refund + Due = Bill Amt.
+    # v8t: + Round off (the bill to the rupee), so Rent + ... + GST + Round off = Bill Amt still holds
     cols = ["Bill", "Rooms", "Source", "Booking ID", "Check-in", "Check-out", "Room Rent", "Room CGST",
             "Room SGST", "Food", "Food CGST", "Food SGST", "Laundry", "Misc", "Discount", "Total CGST",
-            "Total SGST", "Bill Amt", "Prepaid (OTA)", "Advance", "Balance", "Refund", "Due", "By"]
+            "Total SGST", "Round off", "Bill Amt", "Prepaid (OTA)", "Advance", "Balance", "Refund", "Due", "By"]
     rows = [[r["bill_no"], r["rooms"], r.get("source", ""), r.get("booking_ref", ""), r.get("checked_in_at", ""),
              r.get("checked_out_at", ""), r["room_rent_net"], r["room_cgst"], r["room_sgst"], r["food_net"],
              r["food_cgst"], r["food_sgst"], r["laundry_net"], r["misc_net"], r["discount_net"], r["cgst"], r["sgst"],
-             r["bill_amount"], r.get("prepaid", 0.0), r["advance"], r.get("balance", 0.0), r["refund"],
+             r.get("round_off", 0.0), r["bill_amount"], r.get("prepaid", 0.0), r["advance"], r.get("balance", 0.0), r["refund"],
              r.get("due", 0.0), r.get("checked_out_by", "")] for r in data["rows"]]
     t = data["totals"]
     totals = ["TOTAL", "", "", "", "", "", t["room_rent_net"], t["room_cgst"], t["room_sgst"], t["food_net"],
               t["food_cgst"], t["food_sgst"], t["laundry_net"], t["misc_net"], t["discount_net"], t["cgst"], t["sgst"],
-              t["bill_amount"], t.get("prepaid", 0.0), t["advance"], t.get("balance", 0.0), t["refund"],
+              t.get("round_off", 0.0), t["bill_amount"], t.get("prepaid", 0.0), t["advance"], t.get("balance", 0.0), t["refund"],
               t.get("due", 0.0), ""]
     return cols, rows, totals
 

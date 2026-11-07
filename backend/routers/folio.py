@@ -107,17 +107,43 @@ def _active_charges(db: Session, folio_id: int):
     ).order_by(FolioCharge.id).all()
 
 
+def round_off_for(raw_total: float, raw_balance: float) -> float:
+    """v8t (owner, 6 Nov): the paise that bring a bill's BALANCE to a whole rupee (half rounds up).
+
+    Rounding the balance (rather than the bill total) is what the desk feels: a guest who paid
+    Rs 1,208 against Rs 1,207.50 owes nothing and is owed nothing - no 50 paise "excess deposit
+    return" - and one who paid Rs 1,210 gets Rs 2 back, not Rs 2.50. A bill paid to the paisa
+    (an OTA's prepaid Rs 1,627.50) has a zero balance and is left exactly as it is. Nothing is
+    rounded before there is a charge."""
+    from decimal import ROUND_FLOOR, Decimal
+    if not raw_total:
+        return 0.0
+    b = Decimal(str(round(raw_balance, 2)))
+    whole = (b + Decimal("0.5")).to_integral_value(rounding=ROUND_FLOOR)
+    return float(round(whole - b, 2))
+
+
 def _recompute(db: Session, folio: Folio):
     """Recompute folio total/balance from non-void lines (call after every mutation).
     SessionLocal has autoflush=False, so flush pending lines before summing.
 
     total/balance keep their ORIGINAL whole-folio meaning. The corporate mirror
     (company_total/company_balance, prompt 18 slice 7) is refreshed here too, so every existing
-    mutation path stays correct without knowing anything about companies."""
+    mutation path stays correct without knowing anything about companies.
+
+    v8t: plus the bill's round-off (`folio.round_off`). It is worked out again on every change while
+    the bill is open and un-invoiced, and frozen from then on - an invoice is a filed document. A
+    company bill is never rounded here (the company invoice is its own document)."""
     db.flush()
     lines = _active_charges(db, folio.id)
-    folio.total = round(sum(float(c.amount) for c in lines if c.type != "payment"), 2)
-    folio.balance = round(sum(float(c.amount) for c in lines), 2)
+    raw_total = round(sum(float(c.amount) for c in lines if c.type != "payment"), 2)
+    raw_balance = round(sum(float(c.amount) for c in lines), 2)
+    if folio.status == "open" and _get_invoice(db, folio.id) is None:
+        folio.round_off = (round_off_for(raw_total, raw_balance)
+                           if folio.company_id is None and app_settings.bill_round_off_enabled(db) else 0.0)
+    ro = float(folio.round_off or 0)
+    folio.total = round(raw_total + ro, 2)
+    folio.balance = round(raw_balance + ro, 2)
     company_service.recompute_company_totals(db, folio)
 
 
@@ -200,7 +226,7 @@ def _get_folio(db: Session, folio_id: int) -> Folio:
     return folio
 
 
-def _invoice_totals(charges):
+def _invoice_totals(charges, round_off: float = 0.0):
     """GST math over NON-VOID lines. Amounts are GST-inclusive; CGST = SGST = slab GST / 2.
 
     v6d (F-11): a discount now reduces the **taxable value**, apportioned across the slabs, rather
@@ -226,9 +252,14 @@ def _invoice_totals(charges):
 
     # The grand total is taken from the split rather than `charges_total + discount_total` so that
     # the per-slab rows printed on the invoice always add up to the amount demanded, to the paisa.
-    grand_total = split["net_total"]
+    # v8t: the bill's round-off sits AFTER the tax - the slabs still add up to `net_total`
+    net_total = split["net_total"]
+    round_off = round(float(round_off or 0), 2)
+    grand_total = round(net_total + round_off, 2)
     balance_due = round(grand_total + payments_total, 2)
     return {
+        "net_total": net_total,
+        "round_off": round_off,
         "gst_rows": split["rows"],
         "charges_total": charges_total,
         "discount_total": discount_total,
@@ -332,7 +363,7 @@ def _folio_detail(db: Session, folio: Folio):
     charges = db.query(FolioCharge).filter(
         FolioCharge.folio_id == folio.id
     ).order_by(FolioCharge.id).all()
-    totals = _invoice_totals([c for c in charges if not c.void])
+    totals = _invoice_totals([c for c in charges if not c.void], folio.round_off)
     invoice = _get_invoice(db, folio.id)
     company = company_service.get_company(db, folio.company_id)
     company_balance = float(folio.company_balance or 0)
@@ -1200,7 +1231,8 @@ def ensure_invoice(db: Session, folio: Folio, user, client: str = "desktop", buy
     if not any(c.type not in ("payment",) for c in charges):
         return None, False
 
-    totals = _invoice_totals(charges)
+    _recompute(db, folio)        # v8t: the round-off as of this moment, then frozen with the invoice
+    totals = _invoice_totals(charges, folio.round_off)
     today = date.today()
     fy = _fy_label(today)
     seq = _allocate_invoice_seq(db, fy)
@@ -1378,7 +1410,7 @@ def _invoice_summary(invoice: Invoice):
     }
 
 
-def _frozen_totals(invoice: Invoice, charges) -> dict:
+def _frozen_totals(invoice: Invoice, charges, round_off: float = 0.0) -> dict:
     """The totals to PRINT for an issued invoice: the ones it was issued with.
 
     v6d (F-11): an invoice is a filed document. Its taxable value and tax were written to
@@ -1391,7 +1423,7 @@ def _frozen_totals(invoice: Invoice, charges) -> dict:
     because money genuinely does move after an invoice is raised and the guest should see it;
     `_invoice_payload` already lists anything settled after issue separately.
     """
-    live = _invoice_totals(charges)
+    live = _invoice_totals(charges, round_off)
     try:
         rows = json.loads(invoice.gst_breakup) if invoice.gst_breakup else []
     except (ValueError, TypeError):
@@ -1407,6 +1439,8 @@ def _frozen_totals(invoice: Invoice, charges) -> dict:
         "cgst_total": float(invoice.cgst_total or 0),
         "sgst_total": float(invoice.sgst_total or 0),
         "grand_total": frozen_grand,
+        # v8t: what the frozen tax block adds up to, before the bill's round-off
+        "net_total": round(frozen_grand - float(round_off or 0), 2),
         # Still owed against the frozen total, using today's payments.
         "balance_due": round(frozen_grand + live["payments_total"], 2),
     })
@@ -1446,7 +1480,7 @@ def _invoice_payload(db: Session, folio: Folio, invoice: Invoice):
         Booking.booking_id == folio.booking_id).first()
     guest = booking.guest if booking else None
     charges = _active_charges(db, folio.id)
-    totals = _frozen_totals(invoice, charges)
+    totals = _frozen_totals(invoice, charges, folio.round_off)
 
     def _line(c):
         # v5i: the invoice shows Rate WITHOUT GST and Amount WITH it. Both derive from the

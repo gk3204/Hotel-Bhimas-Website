@@ -26,7 +26,7 @@ from xml.sax.saxutils import escape
 
 from sqlalchemy import func
 
-from models import Company, CompanyLedger, Payment
+from models import Company, CompanyLedger, Folio, Invoice, Payment
 from routers.reports import sales_by_date
 from utils import clock          # F-03: one clock - see utils/clock.py
 
@@ -65,6 +65,18 @@ def _refunds_by_day_mode(db, dfrom, dto):
         key = (str(d), (mode or ("bank" if gateway in ("razorpay", "phonepe") else "other")).lower())
         out[key] = round(out.get(key, 0.0) + float(amt or 0), 2)
     return out
+
+
+def _round_off_by_day(db, dfrom, dto):
+    """v8t: {date_iso: amount} - the bills' round-off, on the day each bill was invoiced. The Sales
+    voucher is built from the charge lines (which never include it), so without this the paise a
+    guest did not pay - or paid over - would sit in Sundry Debtors for ever."""
+    s, e = clock.business_day_bounds(dfrom, dto)
+    rows = (db.query(clock.business_date_sql(Invoice.created_at), func.coalesce(func.sum(Folio.round_off), 0))
+            .join(Folio, Folio.id == Invoice.folio_id)
+            .filter(Invoice.created_at >= s, Invoice.created_at < e, Folio.round_off != 0)
+            .group_by(clock.business_date_sql(Invoice.created_at)).all())
+    return {str(d): round(float(a or 0), 2) for d, a in rows if round(float(a or 0), 2)}
 
 
 def _receipt_ledger(method: str, cfg: dict) -> str:
@@ -128,6 +140,18 @@ def build_journal(db, dfrom, dto, cfg: dict):
                 {"ledger": cfg["tally_cgst_ledger"], "drcr": "Cr", "amount": round(r["cgst"], 2)},
                 {"ledger": cfg["tally_sgst_ledger"], "drcr": "Cr", "amount": round(r["sgst"], 2)},
             ],
+        })
+    # v8t: the round-off - Dr Debtors / Cr Round Off when a bill was rounded up, the reverse when down
+    for d, ro in sorted(_round_off_by_day(db, dfrom, dto).items()):
+        dr, cr = ((cfg["tally_debtors_ledger"], cfg.get("tally_round_off_ledger") or "Round Off") if ro > 0
+                  else (cfg.get("tally_round_off_ledger") or "Round Off", cfg["tally_debtors_ledger"]))
+        vouchers.append({
+            "vtype": "Journal",
+            "date_iso": d,
+            "number": f"RO-{_tdate(d)}",
+            "narration": f"Bills rounded to the rupee {d}",
+            "lines": [{"ledger": dr, "drcr": "Dr", "amount": abs(ro)},
+                      {"ledger": cr, "drcr": "Cr", "amount": abs(ro)}],
         })
     pays = _payments_by_day_method(db, dfrom, dto)
     for (d, method), amt in sorted(pays.items()):

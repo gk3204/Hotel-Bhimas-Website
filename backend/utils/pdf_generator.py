@@ -567,7 +567,8 @@ def generate_folio_invoice_pdf(invoice_data):
         # v6d (F-11): the slab rows are now NET of discount, so this column totals them with
         # the grand total. It printed `charges_total` (the pre-discount gross), which on a
         # discounted bill did not equal the rows above it or the amount demanded below it.
-        f"Rs. {invoice_data['grand_total']:,.2f}",
+        # v8t: before the round-off, which is not tax - it is shown on its own line below.
+        f"Rs. {invoice_data.get('net_total', invoice_data['grand_total']):,.2f}",
     ])
     gst_table = Table(gst_data, colWidths=[60, 110, 110, 110, 90])
     gst_table.setStyle(TableStyle([
@@ -590,6 +591,10 @@ def generate_folio_invoice_pdf(invoice_data):
         # above was charged on the reduced value, which is what makes the deduction admissible.
         totals_data.append(["Discount (before tax)",
                             f"- Rs. {abs(invoice_data['discount_total']):,.2f}"])
+    _ro = round(float(invoice_data.get("round_off") or 0), 2)
+    if _ro:
+        # v8t (owner): the bill to the nearest rupee - not taxable, not part of the GST above
+        totals_data.append(["Round off", f"{'+' if _ro > 0 else '-'} Rs. {abs(_ro):,.2f}"])
     totals_data.append(["GRAND TOTAL", f"Rs. {invoice_data['grand_total']:,.2f}"])
     if invoice_data["payments_total"]:
         totals_data.append(["Advance / Payments", f"- Rs. {abs(invoice_data['payments_total']):,.2f}"])

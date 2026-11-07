@@ -192,6 +192,7 @@ COMPLAINT_ESCALATION_ENABLED_KEY = "complaint_escalation_enabled"
 COMPLAINT_AUTO_COMPENSATION_ENABLED_KEY = "complaint_auto_compensation_enabled"
 
 # Guest portal / in-room QR config keys + defaults (prompt 18d slice 10; seeded in migration 021).
+BILL_ROUND_OFF_KEY = "bill_round_off_enabled"                       # v8t: bills to the rupee
 GUEST_PORTAL_ENABLED_KEY = "guest_portal_enabled"                 # master toggle
 PORTAL_ROOM_SERVICE_ENABLED_KEY = "portal_room_service_enabled"
 PORTAL_WIFI_ENABLED_KEY = "portal_wifi_enabled"
@@ -291,6 +292,7 @@ _DEFAULTS = {
     COMPLAINT_ESCALATION_ENABLED_KEY: "true",
     COMPLAINT_AUTO_COMPENSATION_ENABLED_KEY: "false",
     GUEST_PORTAL_ENABLED_KEY: "true",
+    BILL_ROUND_OFF_KEY: "true",
     PORTAL_ROOM_SERVICE_ENABLED_KEY: "true",
     PORTAL_WIFI_ENABLED_KEY: "true",
     PORTAL_WAKEUP_ENABLED_KEY: "true",
@@ -401,6 +403,11 @@ def set_setting(db, key, value, user=None, commit=False):
     if commit:
         db.commit()
     return row
+
+
+def bill_round_off_enabled(db) -> bool:
+    """v8t (owner, 6 Nov): round every guest bill to the nearest rupee (a "Round off" line)."""
+    return _as_bool(get_setting(db, BILL_ROUND_OFF_KEY, "true"))
 
 
 def _as_bool(v) -> bool:
@@ -657,6 +664,7 @@ def get_compliance_config(db) -> dict:
         "tally_cash_ledger": (get_setting(db, TALLY_CASH_LEDGER_KEY) or "Cash").strip(),
         "tally_bank_ledger": (get_setting(db, TALLY_BANK_LEDGER_KEY) or "Bank").strip(),
         "tally_debtors_ledger": (get_setting(db, TALLY_DEBTORS_LEDGER_KEY) or "Sundry Debtors").strip(),
+        "tally_round_off_ledger": (get_setting(db, "tally_round_off_ledger") or "Round Off").strip(),   # v8t
         "admin_2fa_required": _as_bool(get_setting(db, ADMIN_2FA_REQUIRED_KEY, "false")),
         "admin_idle_logout_minutes": max(1, _as_int(get_setting(db, ADMIN_IDLE_LOGOUT_MIN_KEY), 15)),
     }
