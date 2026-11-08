@@ -1067,7 +1067,7 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
            "deviation_minutes": 0, "quoted": 0.0, "applied": 0.0, "basis": "on_time",
            "full_night": False, "days_early": days_early, "rule": None, "approval": "never",
            "needs_approval": False, "stay_start": now, "night_rate": 0.0, "comp": comp,
-           "text": "", "lapsed": None, "extra_nights": 0}
+           "text": "", "lapsed": None, "extra_nights": 0, "shift_stay": False}
 
     # Lapsed window: the stay is over, so there is nothing left to check into.
     #
@@ -1099,7 +1099,19 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
     out_rooms = {"rooms_charged": rooms_charged, "total_rooms": total_rooms,
                  "charged_room_ids": [rid for _i, rid in selection if rid]}
 
-    if now < expected:
+    if now < expected and not is_ota and _checkout_mode() != "fixed" \
+            and arrival_rules.shifts_stay(rules, src):
+        # v8u (owner, 7 Nov - prod #520, a website booking for 04:00 whose guests walked in at 23:00
+        # the night before): a website guest who comes early pays NO early fee and is not sold an
+        # extra night. They keep the nights they booked, counted from the moment they arrive (24h
+        # rule): booked 7 Nov 04:00 for 3 nights, in at 6 Nov 23:00 -> out 9 Nov 23:00, not 10 Nov
+        # 04:00. A day-early arrival moves the stay's dates one day earlier at check-in (the room is
+        # slept in tonight, so a room of the type must still be free tonight).
+        out.update(kind="early", deviation_minutes=max(0, int((expected - now).total_seconds() // 60)),
+                   rule=arrival_rules.rule_for(rules, "early_checkin", src), quoted=0.0,
+                   basis="free", full_night=False, approval="never", stay_start=now,
+                   extra_nights=0, shift_stay=True)
+    elif now < expected:
         rate = _night_rate(db, booking, selection)
         ev = arrival_rules.evaluate_early(rules, src, expected, now, rate, comp, rooms=rooms_charged,
                                           ac_flags=_selection_ac_flags(db, selection))
@@ -1144,7 +1156,13 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
     out.update(out_rooms)
     dev = _fmt_dev(out["deviation_minutes"])
     co = out["checkout_at"]
-    if out["kind"] == "early":
+    if out["kind"] == "early" and out["shift_stay"]:
+        moved = (f" · the stay moves to {today:%d %b} → {booking.check_out - timedelta(days=days_early):%d %b}"
+                 if days_early else "")
+        out["text"] = (f"Early by {dev} — website booking: no early check-in fee · the {nights} "
+                       f"night{'s' if nights != 1 else ''} booked run from now → checkout {co:%d %b %H:%M}"
+                       f"{moved}")
+    elif out["kind"] == "early":
         if out["basis"] == "exempt_comp":
             out["text"] = f"Early by {dev} — complimentary stay, no fee"
         elif out["basis"] in ("free", "on_time"):
@@ -1873,6 +1891,28 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
         # early or badly-late guest, the actual moment otherwise). OTA stays ignore it (12 -> 12).
         _arrived_now = [items[a.booking_item_id] for a in data.assignments
                         if a.booking_item_id in items]
+        if arrival.get("shift_stay") and arrival["days_early"] >= 1:
+            # v8u: a website guest a day early keeps the nights they booked, from tonight. The WHOLE
+            # stay moves (every room, arrived or not): the booked nights and the amount paid are the
+            # same, only the dates slide, so the folio below posts the same total on the new dates
+            # and tonight is occupied in availability while the last booked night is freed.
+            # The party's expected arrival becomes now, so a room of the same booking arriving at
+            # the originally booked time is a late arrival counted from now - same checkout as the
+            # rest of the party.
+            _shift = timedelta(days=arrival["days_early"])
+            db.flush()
+            if not booking.original_check_in:
+                booking.original_check_in = booking.check_in
+            booking.check_in = booking.check_in - _shift
+            booking.check_out = booking.check_out - _shift
+            for _it in db.query(BookingItem).filter(BookingItem.booking_id == booking.booking_id).all():
+                if _it.check_out:
+                    _it.check_out = _it.check_out - _shift
+                if _it.original_check_out:
+                    _it.original_check_out = _it.original_check_out - _shift
+                if _it.expected_arrival_at and not _it.checked_in_at:
+                    _it.expected_arrival_at = now
+            booking.expected_arrival_at = now
         # v6g: the rows the split just created, taken from the split itself. This used to re-read
         # `booking.booking_items` and filter on `room_id` - a relationship already loaded, which
         # does NOT contain a row just db.add-ed, so the split rows escaped being stamped by
@@ -1990,6 +2030,8 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
 
                 rule_snapshot = arrival_rules.rule_snapshot(
                     {**(arrival["rule"] or {}), "quoted": fee_quoted,
+                     "shift_stay": bool(arrival.get("shift_stay")),
+                     "days_moved": arrival["days_early"] if arrival.get("shift_stay") else 0,
                      "reason": data.arrival_fee_reason,
                      "rooms_charged": arrival.get("rooms_charged"),
                      "total_rooms": arrival.get("total_rooms"),

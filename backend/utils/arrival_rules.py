@@ -19,6 +19,9 @@ One JSON setting, `arrival_rules`:
 * `approval` — "always" | "on_change" (only when the desk edits the computed amount / makes it free) |
   "never"; satisfied by an admin login or an owner OTP (action `arrival_fee` / `extend_hours`).
 * `exempt_comp` — a fully complimentary stay is never charged (the event is still recorded).
+* `early_shift_sources` (v8u) — sources whose early guest pays NO early fee and keeps the nights
+  they booked, counted from the moment they arrive (the 24h rule). Default: the hotel's own website.
+  A day-early arrival moves the whole stay one day earlier instead of adding a paid night.
 
 Evaluation is pure (no DB writes) so the desk can dry-run it ("Early by 2 h 10 m -> Rs 300").
 """
@@ -35,6 +38,10 @@ OTA_SOURCES_DEFAULT = ("makemytrip", "goibibo", "booking_com", "agoda", "yatra",
 
 DEFAULT_RULES = {
     "exempt_comp": True,
+    # v8u (owner, 7 Nov): "for website based booking early checkin will not be charged but their
+    # stay should get updated based on number of nights booked calculated from their actual
+    # check-in date and time (with 24 hour checkout rule)"
+    "early_shift_sources": ["website"],
     "early_checkin": [
         {"sources": list(OTA_SOURCES_DEFAULT) + ["website"],
          "threshold_minutes": 30, "full_night_after_minutes": 360,
@@ -76,6 +83,12 @@ def normalise(rules: dict) -> dict:
     if not isinstance(rules, dict):
         return out
     out["exempt_comp"] = bool(rules.get("exempt_comp", True))
+    if "early_shift_sources" in rules:
+        srcs = rules.get("early_shift_sources") or []
+        if isinstance(srcs, str):
+            srcs = [srcs]
+        out["early_shift_sources"] = [str(x).strip().lower() for x in srcs
+                                      if isinstance(x, (str, int)) and str(x).strip()]
     for kind in ("early_checkin", "late_arrival", "hourly_extension"):
         rows = rules.get(kind)
         if isinstance(rows, list) and rows:
@@ -118,6 +131,8 @@ def validate(rules: dict) -> list[str]:
     errs = []
     if not isinstance(rules, dict):
         return ["rules must be an object"]
+    if "early_shift_sources" in rules and not isinstance(rules["early_shift_sources"], (list, str)):
+        errs.append("early_shift_sources: a list of booking sources")
     for kind in ("early_checkin", "late_arrival", "hourly_extension"):
         rows = rules.get(kind)
         if not isinstance(rows, list) or not rows:
@@ -247,6 +262,11 @@ def evaluate_early(rules: dict, source: str, expected_at: datetime, now: datetim
     amt, basis = charge_for(rule, night_rate, units=max(1, int(rooms)))
     out.update(charge=amt, basis=basis)
     return out
+
+
+def shifts_stay(rules: dict, source: str | None) -> bool:
+    """v8u: an early guest of this source keeps their nights from the actual arrival, fee-free."""
+    return (source or "direct").strip().lower() in (rules.get("early_shift_sources") or [])
 
 
 def evaluate_late_arrival(rules: dict, source: str, expected_at: datetime, now: datetime) -> dict:

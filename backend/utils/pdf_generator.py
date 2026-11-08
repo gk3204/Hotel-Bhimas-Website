@@ -1556,6 +1556,9 @@ def build_marker_table(columns, rows, totals_row=None, styles=None, font_size=No
                 if i in money_cols:
                     return max(6, max(len(str(v)) for v in _all[1:] or ["0"]) + 1,
                                max((len(w) for w in header[i].split()), default=4))
+                if str(header[i]).strip() in ("Room", "Rooms"):
+                    # v8v: a stay's rooms ("23, 31, 43, 44") on one line, not one room per line
+                    return max(6, min(longest_text, 11) + 1)
                 return max(6, min(longest_word, 18) + 1)
             # a sentence column (v7p fraud summary) gets room to read; a number column its width
             return max(7, min(longest_word, 16), min(longest_text, 18) if longest_text <= 40 else 40)

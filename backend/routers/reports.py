@@ -1227,6 +1227,8 @@ def _in_house_rows(db, at_utc):
         f = (db.query(_Folio).filter(_Folio.booking_item_id == it.booking_item_id).first()
              or folio_resolver.primary_folio(db, b.booking_id))
         rows.append({"room": r.room_number, "booking_id": b.booking_id, "guest": b.display_guest_name or None,
+                     "folio_id": f.id if f else None,
+                     "checked_in_at_sort": it.checked_in_at.isoformat() if it.checked_in_at else "",
                      "checked_in": it.checked_in_at.strftime("%d/%m/%y %H:%M") if it.checked_in_at else "",
                      "check_out": str(it.check_out or b.check_out or ""),
                      "balance": round(float(f.balance or 0), 2) if f else 0.0})
@@ -1244,6 +1246,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     from services import dues as _dues          # v7s
     from utils.booking_source import source_label as _srclabel
     rcache = {}   # booking_id -> room label
+    stay_rooms = {}   # v8v: booking_id -> every room of the stay
     scache = {}   # booking_id -> source label (v7n)
     modes = {}    # mode -> {section -> [rows], "receipt","payment"}
 
@@ -1267,7 +1270,17 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
         guest = db.query(Guest).filter(Guest.guest_id == b.guest_id).first() if b else None
         # A receipt names the stay's main bill; the money itself is tracked on Payment.
         folio = folio_resolver.primary_folio(db, p.booking_id) if p.booking_id else None
-        room = _booking_room_label(db, p.booking_id, rcache) if p.booking_id else "—"
+        room = _stay_rooms_label(db, p.booking_id, stay_rooms) if p.booking_id else "—"
+        # v8v: on a stay billed per room, a payment that went to ONE room's bill (payment_allocations)
+        # names that bill and that room, not the main bill and every room
+        if p.booking_id and getattr(p, "payment_id", None):
+            from models import PaymentAllocation
+            _al = {a.folio_id for a in db.query(PaymentAllocation)
+                   .filter(PaymentAllocation.payment_id == p.payment_id).all()}
+            if len(_al) == 1:
+                _f = db.query(Folio).filter(Folio.id == next(iter(_al))).first()
+                if _f is not None and _f.booking_item_id:
+                    folio, room = _f, (_bill_room_label(db, _f) or room)
         return b, guest, folio, room
 
     def _base(p, at):
@@ -1384,7 +1397,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
             at = _loc(pr.issued_at)
             mp["prepaid"].append({
                 "date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
-                "room": _booking_room_label(db, pr.booking_id, rcache),
+                "room": _stay_rooms_label(db, pr.booking_id, stay_rooms),
                 "guest": (b.display_guest_name if b else None), "booking_id": pr.booking_id,
                 "source": _src(b),
                 "balance": round(float(folio.balance or 0), 2) if folio else 0.0,
@@ -1421,7 +1434,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
     # own has its own bill, closed when THAT room left - it used to wait for the last room, and so
     # was missing from the day (and shift) it was actually settled in.
     for b, f, out_at, by in _checked_out_bills(db, day=checkouts_day, window=checkouts_window):
-        room = (_bill_room_label(db, f) or _booking_room_label(db, b.booking_id, rcache))
+        room = (_bill_room_label(db, f) or _stay_rooms_label(db, b.booking_id, stay_rooms))
         bal = round(float(f.balance or 0), 2) if f else 0.0
         inv = _get_invoice(db, f.id) if f else None
         _out = _loc(out_at)
@@ -1467,7 +1480,7 @@ def _cashier_summary_core(db, receipts, refunds, checkouts_day=None, prepaid=Non
         inv_rows.append({
             "bill_no": inv.invoice_no, "booking_id": inv.booking_id,
             "date": at.strftime("%d/%m/%y") if at else "", "time": at.strftime("%H:%M") if at else "",
-            "room": (_bill_room_label(db, f) or _booking_room_label(db, inv.booking_id, rcache)),
+            "room": (_bill_room_label(db, f) or _stay_rooms_label(db, inv.booking_id, stay_rooms)),
             "guest": (b.display_guest_name if b else None),
             "amount": round(float(inv.grand_total or 0), 2),
             "prepaid": prepaid_amt,
@@ -1669,7 +1682,10 @@ def _cashier_table(data):
             return _row(**{"Bill": f"#{x['booking_id']}", "Date": _d, "Time": _t, "Room": x["room"],
                            "Guest": x.get("guest") or "", "Source": x.get("source") or "", "Balance": x["balance"],
                            "Remarks": f"IN HOUSE - out {x.get('check_out') or ''}"})
-        _sec(f"Rooms In House ({len(data['in_house'])})", [_ih(x) for x in data["in_house"]])
+        # v8v (owner): a multi-room stay is ONE row with its rooms together, as on the shift report -
+        # it was a row per room, each repeating the stay's whole balance
+        stays = _in_house_by_stay(data["in_house"])
+        _sec(f"Rooms In House ({len(stays)} bookings, {len(data['in_house'])} rooms)", [_ih(x) for x in stays])
 
     g = data["grand"]
     totals = _row(**{"Receipt / Vou": "GRAND TOTAL", "Total": g["net"],
@@ -1784,7 +1800,7 @@ def checkout_summary_data(db, day, day_to=None, window=None):
             # v7d (owner): when they left and which reception user checked them out
             "checked_out_at": _co.strftime("%d/%m/%y %H:%M") if _co else "",
             "checked_out_by": _user_name(db, _by) or "",
-            "rooms": ", ".join(r.room_number for r in rooms if r) or "—",
+            "rooms": ", ".join(ordering.room_labels(r.room_number for r in rooms if r)) or "—",   # v8v: 4, 11, 13
             "room_rent": room_rent, "sgst": sgst, "cgst": cgst, "food": food, "laundry": laundry,
             "room_cgst": _rs["cgst_total"], "room_sgst": _rs["sgst_total"],
             "food_cgst": _fs["cgst_total"], "food_sgst": _fs["sgst_total"],
@@ -1894,14 +1910,11 @@ def shift_report_sections(db, shift):
     out.append({"title": "Paid out this shift (refunds and expenses)", "columns": cols, "rows": rows,
                 "totals": totals if rows else None})
 
-    groups = {}
-    for x in data.get("in_house") or []:
-        g = groups.setdefault(x["booking_id"], {**x, "rooms": []})
-        g["rooms"].append(x["room"])
+    stays = _in_house_by_stay(data.get("in_house"))
     hcols = ["Booking", "Checked in", "Rooms", "Guest", "Source", "Check-out", "Balance"]
-    hrows = [[f"#{g['booking_id']}", g.get("checked_in") or "", ", ".join(g["rooms"]), g.get("guest") or "",
-              g.get("source") or "", g.get("check_out") or "", g.get("balance")] for g in groups.values()]
-    nrooms = sum(len(g["rooms"]) for g in groups.values())
+    hrows = [[f"#{g['booking_id']}", g.get("checked_in") or "", g["room"], g.get("guest") or "",
+              g.get("source") or "", g.get("check_out") or "", g.get("balance")] for g in stays]
+    nrooms = sum(len(g["rooms"]) for g in stays)
     out.append({"title": f"In house at close ({len(hrows)} bookings, {nrooms} rooms)", "columns": hcols,
                 "rows": hrows, "totals": None})
     return out
@@ -1961,6 +1974,43 @@ def _booking_room_label(db, booking_id, _cache):
                .order_by(*ordering.room_number_key(Room.room_number)).first())
         _cache[booking_id] = row[0] if row else "—"
     return _cache[booking_id]
+
+
+def _stay_rooms_label(db, booking_id, _cache):
+    """v8v: EVERY room of a stay, in room order ("23, 31, 43, 44") - the label for money that belongs
+    to the whole stay (an advance, a receipt or refund on a group bill, an OTA prepaid memo).
+
+    The cashier summary and the shift report used `_booking_room_label` (the LOWEST room, which is
+    right for attributing a room-service line) - so a four-room group's Rs 8,151 checkout receipt
+    read as room 23 alone (prod #1206, RCPT-1088), and #1214's as room 4 of 11, 4, 13."""
+    if booking_id not in _cache:
+        nums = [r[0] for r in db.query(Room.room_number).join(BookingItem, BookingItem.room_id == Room.room_id)
+                .filter(BookingItem.booking_id == booking_id).all()]
+        _cache[booking_id] = ", ".join(ordering.room_labels(nums)) or "—"
+    return _cache[booking_id]
+
+
+def _in_house_by_stay(in_house):
+    """v8v: the per-room in-house rows folded to one row per stay - its rooms together, the earliest
+    arrival, the latest departure, and the balance of each of its bills counted once (a per-room
+    stay has a bill per room; a group stay one bill shared by every room)."""
+    groups = {}
+    for x in in_house or []:
+        g = groups.setdefault(x["booking_id"], {**x, "rooms": [], "_folios": {}})
+        g["rooms"].append(x["room"])
+        g["_folios"][x.get("folio_id") or ("room", x["room"])] = x.get("balance") or 0.0
+        if x.get("checked_in_at_sort") and x["checked_in_at_sort"] < g.get("checked_in_at_sort"):
+            g["checked_in"], g["checked_in_at_sort"] = x["checked_in"], x["checked_in_at_sort"]
+        if str(x.get("check_out") or "") > str(g.get("check_out") or ""):
+            g["check_out"] = x["check_out"]
+    out = []
+    for g in groups.values():
+        g["rooms"] = ordering.room_labels(g["rooms"])
+        g["room"] = ", ".join(g["rooms"])
+        g["balance"] = round(sum(float(v or 0) for v in g.pop("_folios").values()), 2)
+        out.append(g)
+    out.sort(key=lambda g: ordering.room_number_sort_key(g["rooms"][0] if g["rooms"] else ""))
+    return out
 
 
 def room_service_by_room_data(db, dfrom, dto):
