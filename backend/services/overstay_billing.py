@@ -220,7 +220,23 @@ def _bill_one(db: Session, booking_id: int, *, now, cfg) -> dict:
             out["reason"] = "unbillable"
             return out
 
+        if comped:
+            # v8x (owner, 8 Nov): a complimentary guest past check-out is NOT given the night free by
+            # the sweep. Until now this path also crashed (`_overdue` was only set when billing), so the
+            # stay just sat overdue with nobody told. An admin decides: extend it (charged, or waived by
+            # the admin) or check the guest out. The card dies now, as on any unbillable overstay.
+            _alert(db, type_="comp_overstay", severity="med", booking=booking,
+                   detail={"comp_mode": getattr(booking, "comp_mode", None),
+                           "nights_overdue": st["nights_overdue"], "due_at": st["due_at"],
+                           "note": "Complimentary stay past check-out - needs an admin to extend or check out."})
+            _supersede_cards(db, booking)
+            booking.card_reencode_required = True
+            db.commit()
+            out["reason"] = "comp_needs_approval"
+            return out
+
         posted = {"amount": 0.0, "posted": []}
+        _overdue = []
         if not comped:
             # v6c: bill the ROOMS that are actually overdue, not the whole stay. On a multi-room
             # booking one room may have overstayed while the others are still within their own

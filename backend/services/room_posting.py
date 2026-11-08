@@ -180,7 +180,7 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
                      override_total: float | None = None,
                      recompute: bool = True,
                      enforce_backfilled: bool = True,
-                     only_items=None) -> dict:
+                     only_items=None, charge_comp: bool = False) -> dict:
     """Post one type='room' FolioCharge per (BookingItem, night) over [date_from, date_to).
 
     Idempotent per (booking_item_id, charge_date): a night already posted — **even a VOIDED
@@ -216,7 +216,9 @@ def post_room_nights(db: Session, booking: Booking, folio, date_from: date, date
     # Complimentary short-circuit (v4b6). The owner's decision was SUPPRESSION, not a 100%
     # discount line: posting a taxable line and discounting it away would create an output-tax
     # liability on a supply with no consideration. So no line, no discount row, no zero row.
-    if _is_comped(booking):
+    # v8x: `charge_comp` - the nights an EXTENSION adds to a complimentary stay are not part of what
+    # the owner approved as free, so they are priced like any other stay's; an admin can still waive them.
+    if _is_comped(booking) and not charge_comp:
         return {"posted": [], "skipped": [str(d) for d in nights], "amount": 0.0,
                 "per_item": [], "comped": True}
 

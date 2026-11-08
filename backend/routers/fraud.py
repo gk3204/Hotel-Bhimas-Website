@@ -377,9 +377,11 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
         extras["paid_at_desk"] = round(float(db.query(func.coalesce(func.sum(Payment.amount), 0))
                                              .filter(Payment.booking_id == booking.booking_id,
                                                      Payment.status == "paid").scalar() or 0), 2)
+    reasons = list((data.context or {}).get("reasons") or [])
+    if data.action == "room_assignment" and booking is not None and ctx_in.get("to_room_id"):
+        reasons = _room_move_reasons(db, booking, ctx_in, reasons)   # v8x
     context = build_context(db, data.action, booking=booking, rooms=rooms, folio=folio,
-                            amount=amount, user=user,
-                            reasons=(data.context or {}).get("reasons"),
+                            amount=amount, user=user, reasons=reasons,
                             **extras)
 
     otp, delivery = create_otp(db, data.action, context, user, return_delivery=True)
@@ -393,6 +395,33 @@ def otp_request(data: OtpRequest, db: Session = Depends(get_db),
             "delivery": delivery,
             "message": delivery.get("detail")
                        or "Owner approval requested. Ask the owner for the code from the admin dashboard."}
+
+
+def _room_move_reasons(db, booking, ctx_in, reasons):
+    """v8x: what a room move really asks the owner to approve, from the hotel's data.
+
+    The desk only knows two reasons and sends 'ac_downgrade' for anything that is not an alternate
+    sale - so a complimentary guest moved to a costlier room would read as an A/C downgrade."""
+    try:
+        from services import room_posting
+        from routers.reception import _incl_rate
+        to = db.query(Room).filter(Room.room_id == _int_or_none(ctx_in.get("to_room_id"))).first()
+        frm_id = _int_or_none(ctx_in.get("from_room_id"))
+        items = [i for i in booking.booking_items if i.room_id and (frm_id is None or i.room_id == frm_id)]
+        if to is None or not items:
+            return reasons
+        new_t = db.query(RoomType).filter(RoomType.room_type_id == to.room_type_id).first()
+        old_t = db.query(RoomType).filter(RoomType.room_type_id == items[0].room_type_id).first()
+        if new_t is None or old_t is None:
+            return reasons
+        out = [r for r in reasons if r != "ac_downgrade"
+               or (bool(old_t.is_ac) and not bool(new_t.is_ac))]
+        if (room_posting._is_comped(booking) and to.alt_room_type_id != items[0].room_type_id
+                and _incl_rate(new_t) > _incl_rate(old_t) and "comp_upgrade" not in out):
+            out.append("comp_upgrade")
+        return out or reasons
+    except Exception:
+        return reasons
 
 
 @router.post("/otp/{otp_id}/resend", dependencies=[Depends(require_admin)])

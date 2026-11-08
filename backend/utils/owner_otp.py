@@ -215,6 +215,8 @@ def _sum_room_assignment(ctx):
         bits.append(f"sell {physical} {_rooms_label(ctx.get('rooms')).lower()} as {booked}")
     if "ac_downgrade" in reasons:
         bits.append("move the guest from an A/C room to a non-A/C room")
+    if "comp_upgrade" in reasons:   # v8x
+        bits.append("move a COMPLIMENTARY guest to a costlier room, free")
     what = " and ".join(bits) or f"assign {_rooms_label(ctx.get('rooms')).lower()}"
     delta = ctx.get("total_delta")
     money = f" — {_inr(delta)} below rack" if delta else ""

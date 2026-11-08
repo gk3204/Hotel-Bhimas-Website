@@ -85,6 +85,10 @@ CATALOGUE = {
         "title": "Guest stayed past check-out but could not be charged",
         "meaning": "The bill was already closed / invoiced, so the extra night could not be added.",
         "check": "Charge the night by hand or close the stay."},
+    "comp_overstay": {   # v8x
+        "title": "Complimentary guest stayed past check-out",
+        "meaning": "Extra nights on a free stay are not given automatically - someone has to decide.",
+        "check": "Extend the stay (charged, or free by an admin) or check the guest out."},
     "paid_after_expiry": {
         "title": "Online payment arrived after the booking expired",
         "meaning": "Money was received for a booking that had already been released.",
@@ -269,6 +273,9 @@ def _sentence(t, d, c, alert):
     if t == "overstay_unbillable":
         return (f"the guest stayed past check-out but the bill {d.get('invoice_no') or ''} was already closed, so "
                 f"{d.get('nights_overdue', '?')} night(s) could not be charged{bk}.")
+    if t == "comp_overstay":
+        return (f"the complimentary guest is past check-out ({d.get('nights_overdue', '?')} night(s) over) - "
+                f"no free night was added; an admin must extend or check out{bk}.")
     if t == "paid_after_expiry":
         return f"{_money(d.get('amount'))} was paid online ({d.get('via') or 'gateway'}) after the booking had expired{bk}."
     if t == "repeated_refunds":

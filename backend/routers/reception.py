@@ -26,6 +26,7 @@ from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, Booking
     Folio, FolioCharge, CardIssuance, TravelAgent, Company, BookingGuest, StayEvent
 from utils import ordering
 from utils import arrival_rules
+from utils.booking_source import channel_label as _channel_label   # v8w: "Walk-in booking: no early fee"
 from utils import secure_id_store
 from utils import availability
 from utils import settings as app_settings
@@ -1159,7 +1160,8 @@ def arrival_evaluation(db, booking: Booking, now: datetime | None = None,
     if out["kind"] == "early" and out["shift_stay"]:
         moved = (f" · the stay moves to {today:%d %b} → {booking.check_out - timedelta(days=days_early):%d %b}"
                  if days_early else "")
-        out["text"] = (f"Early by {dev} — website booking: no early check-in fee · the {nights} "
+        out["text"] = (f"Early by {dev} — {_channel_label(booking)} booking: "
+                       f"no early check-in fee · the {nights} "
                        f"night{'s' if nights != 1 else ''} booked run from now → checkout {co:%d %b %H:%M}"
                        f"{moved}")
     elif out["kind"] == "early":
@@ -3022,6 +3024,13 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
         # precisely why it needs an owner code: the fraud vector is a receptionist putting a
         # guest into a ₹4,000 room booked at ₹2,000, or pocketing the difference in cash.
         suggested = 0.0 if is_alt_sale else round((new_rate - old_rate) * remaining_nights, 2)
+        # v8x (owner, 8 Nov): a COMPLIMENTARY stay is not billed a rate difference (the room is free -
+        # it used to post a charged 'misc' line on a free stay), and moving its guest to a COSTLIER type
+        # gives away more, so that needs an approval: an admin login, or the owner's code.
+        _comp = room_posting._is_comped(booking)
+        comp_upgrade = bool(_comp and not is_alt_sale and new_rate > old_rate)
+        if _comp:
+            suggested = 0.0
         applied = suggested if data.applied_adjustment is None else round(float(data.applied_adjustment), 2)
 
         lo, hi = min(0.0, suggested), max(0.0, suggested)
@@ -3068,7 +3077,9 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             # v4b7: told up front so the desk can show the approval panel BEFORE a rejected
             # submit, and explain that an alternate sale costs the guest nothing extra.
             "is_alt_room_type_sale": is_alt_sale,
+            "is_comp_upgrade": comp_upgrade,   # v8x
             "requires_owner_otp": bool(
+                (comp_upgrade and user.get("role") != "admin") or
                 (bool(old_type.is_ac) and not bool(new_type.is_ac)
                  and app_settings.get_fraud_config(db)["ac_downgrade_otp_required"])
                 or (is_alt_sale
@@ -3097,6 +3108,8 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             # Same rule as check-in: an alternate sale is only for when the booked type is gone.
             _assert_booked_type_sold_out(db, item, new_room)
             reasons.append("alt_room_type")
+        if comp_upgrade and user.get("role") != "admin":
+            reasons.append("comp_upgrade")   # v8x: an admin login is the approval itself
         if reasons:
             # v6m.9: the comment above promised `ac_downgrade` would keep working, but only
             # `room_assignment` was accepted - and the desk asks for the shift's code as
@@ -3326,12 +3339,15 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
 
         # ---- price the extra nights (server-side, always) ------------------------------
         room_posting.assert_nights_identifiable(db, folio.id)
+        # v8x (owner, 8 Nov): extending a COMPLIMENTARY stay was free automatically, with no approval -
+        # any receptionist could give away nights. The extra nights are now priced like any stay's, so
+        # reception charges them; giving them free is the existing waive (admin login, with a reason).
+        comped = room_posting._is_comped(booking)
         preview = room_posting.post_room_nights(
             db, booking, folio, old_co, new_co, user=user,
             posting_reason=room_posting.REASON_EXTEND,
-            price_mode=room_posting.PRICE_QUOTE, recompute=False)
+            price_mode=room_posting.PRICE_QUOTE, recompute=False, charge_comp=True)
         quoted = float(preview["amount"])
-        comped = bool(preview.get("comped"))
         applied = quoted if data.applied_amount is None else round(float(data.applied_amount), 2)
         # v7c (owner): reception cannot change the extension charge
         if data.applied_amount is not None and applied != round(quoted, 2) and user.get("role") != "admin":
@@ -3415,7 +3431,7 @@ def extend_stay(data: ExtendStayRequest, db: Session = Depends(get_db),
         result = room_posting.post_room_nights(
             db, booking, folio, old_co, new_co, user=user,
             posting_reason=room_posting.REASON_EXTEND,
-            price_mode=room_posting.PRICE_QUOTE,
+            price_mode=room_posting.PRICE_QUOTE, charge_comp=True,   # v8x
             override_total=(None if data.applied_amount is None else applied),
             # v6c: price the extra nights for the rooms being extended only. `only_items` has
             # existed since v5n for exactly this - a subset of the stay's rooms.

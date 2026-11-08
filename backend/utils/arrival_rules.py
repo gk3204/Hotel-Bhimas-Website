@@ -20,8 +20,10 @@ One JSON setting, `arrival_rules`:
   "never"; satisfied by an admin login or an owner OTP (action `arrival_fee` / `extend_hours`).
 * `exempt_comp` — a fully complimentary stay is never charged (the event is still recorded).
 * `early_shift_sources` (v8u) — sources whose early guest pays NO early fee and keeps the nights
-  they booked, counted from the moment they arrive (the 24h rule). Default: the hotel's own website.
-  A day-early arrival moves the whole stay one day earlier instead of adding a paid night.
+  they booked, counted from the moment they arrive (the 24h rule). A day-early arrival moves the
+  whole stay one day earlier instead of adding a paid night. "*" = every non-OTA source (v8w
+  default: website, walk-in, front desk, agent...); OTA stays are 12:00 -> 12:00 and never shift.
+  An empty list switches it off, and the `early_checkin` fee rows then apply again.
 
 Evaluation is pure (no DB writes) so the desk can dry-run it ("Early by 2 h 10 m -> Rs 300").
 """
@@ -41,7 +43,9 @@ DEFAULT_RULES = {
     # v8u (owner, 7 Nov): "for website based booking early checkin will not be charged but their
     # stay should get updated based on number of nights booked calculated from their actual
     # check-in date and time (with 24 hour checkout rule)"
-    "early_shift_sources": ["website"],
+    # v8w (owner, 8 Nov): "For walk in and desk bookings also follow the same early check-in
+    # procedure as of website" - so every non-OTA source.
+    "early_shift_sources": ["*"],
     "early_checkin": [
         {"sources": list(OTA_SOURCES_DEFAULT) + ["website"],
          "threshold_minutes": 30, "full_night_after_minutes": 360,
@@ -265,8 +269,10 @@ def evaluate_early(rules: dict, source: str, expected_at: datetime, now: datetim
 
 
 def shifts_stay(rules: dict, source: str | None) -> bool:
-    """v8u: an early guest of this source keeps their nights from the actual arrival, fee-free."""
-    return (source or "direct").strip().lower() in (rules.get("early_shift_sources") or [])
+    """v8u: an early guest of this source keeps their nights from the actual arrival, fee-free.
+    v8w: "*" matches every source (the caller has already excluded OTA stays)."""
+    srcs = rules.get("early_shift_sources") or []
+    return "*" in srcs or (source or "direct").strip().lower() in srcs
 
 
 def evaluate_late_arrival(rules: dict, source: str, expected_at: datetime, now: datetime) -> dict:
