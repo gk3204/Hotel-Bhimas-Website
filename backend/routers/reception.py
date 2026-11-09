@@ -34,7 +34,7 @@ from utils import settings as app_settings
 from utils.settings import validate_category
 from schemas import DeskBookingCreate, CheckinRequest, CheckoutRequest, ComplimentaryRequest, \
     ExtendStayRequest, FolioOpenRequest, ReverseOverstayRequest, RoomShiftRequest, EarlyCheckoutRequest, \
-    CheckinQuoteRequest, ExtendHoursRequest, ShiftOldCardRequest, CardDeferredRequest
+    CheckinQuoteRequest, ExtendHoursRequest, ShiftOldCardRequest, CardWipedRequest, CardDeferredRequest
 from utils.auth_utils import require_admin, require_reception_or_admin, require_staff_or_accountant
 from utils.audit import write_audit, _resolve_user_id
 from utils.pdf_generator import generate_registration_slip_pdf
@@ -2935,6 +2935,42 @@ def card_deferred(data: CardDeferredRequest, db: Session = Depends(get_db),
                 client="desktop")
     db.commit()
     return {"booking_id": booking.booking_id, "card_reencode_required": True, "rooms": rooms}
+
+
+@router.post("/cards/wiped")
+def card_wiped(data: CardWipedRequest, db: Session = Depends(get_db),
+               user=Depends(require_reception_or_admin)):
+    """v8y.1 (owner: "they wiped the card and didn't complete all the checkout steps - on the retry the card
+    is blank"): record a wipe the moment it happens. The card is matched on the key it held (or its exact
+    data) - this stay's card first, else whichever stay's live card it was - and marked erased. A card that
+    matches nothing changes nothing."""
+    key = card_data.key_block(data.card_uid)
+    raw = data.card_uid.strip().lower()
+
+    def _hit(c):
+        return bool(c.card_uid) and ((key and card_data.key_block(c.card_uid) == key)
+                                     or c.card_uid.strip().lower() == raw)
+
+    mine = [c for c in db.query(CardIssuance).filter(
+        CardIssuance.booking_id == data.booking_id, CardIssuance.card_type == "guest",
+        CardIssuance.status.in_(["active", "superseded", "checked_out"])).all() if _hit(c)]
+    others = [] if mine else [c for c in db.query(CardIssuance).filter(
+        CardIssuance.booking_id != data.booking_id, CardIssuance.card_type == "guest",
+        CardIssuance.status == "active", CardIssuance.card_uid.isnot(None)).all() if _hit(c)]
+    now_ts = clock.now_utc()
+    uid_ = _resolve_user_id(db, user)
+    for c in mine + others:
+        c.status = "erased"
+        c.erased_at = now_ts
+        c.erased_by = uid_
+    write_audit(db, user, "card.wiped", "booking", data.booking_id,
+                after={"card_ids": [c.id for c in mine + others],
+                       "other_stays": [c.booking_id for c in others], "room_id": data.room_id,
+                       "card_room": card_data.card_lock_room(data.card_uid), "client_ref": data.client_ref},
+                client="desktop")
+    db.commit()
+    return {"matched": bool(mine or others), "card_ids": [c.id for c in mine + others],
+            "other_booking_ids": sorted({c.booking_id for c in others})}
 
 
 @router.post("/shift/old-card")

@@ -620,6 +620,16 @@ class CardDeferredRequest(BaseModel):
     client_ref: Optional[str] = None
 
 
+class CardWipedRequest(BaseModel):
+    """v8y.1: a key card was just wiped on the encoder (read before the wipe). Recorded at once, so a
+    checkout that is retried later - after the desk was closed, on another PC - knows the card is dead
+    instead of meeting a blank card it can no longer tell from any other."""
+    booking_id: int = Field(..., gt=0)
+    room_id: Optional[int] = Field(None, gt=0)
+    card_uid: str = Field(..., min_length=8, max_length=128)
+    client_ref: Optional[str] = Field(None, max_length=64)
+
+
 class ShiftOldCardRequest(BaseModel):
     """v6m.3: what happened to the guest's card for the room they LEFT on a shift. The lock of the
     old room never sees the new card (it is for a different room), so the old card keeps opening
