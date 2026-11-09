@@ -2143,7 +2143,10 @@ def room_detail_data(db, dfrom, dto):
         frauds = []
         for a in _cands:
             if a.booking_id == b.booking_id:
-                frauds.append(a)
+                # v8y (owner, 7 Nov PDF: room 4's viewing-card alert printed on rooms 11 and 13 too) - an
+                # alert about one room of the stay belongs to that room only
+                if a.room_id is None or a.room_id == it.room_id:
+                    frauds.append(a)
                 continue
             _ev = _event_time(a)
             if _ev is None or _lo <= _ev <= _hi:

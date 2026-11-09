@@ -8,6 +8,7 @@ The desktop records every card in its local outbox BEFORE encoding, then posts h
   - invalid and encoded=False -> plain 409, nothing recorded (pre-check / encode never ran)
 """
 import json
+from datetime import timedelta
 import logging
 import os
 
@@ -148,11 +149,32 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
         # nothing cut yet) but a card that is ALREADY encoded is still recorded and flagged —
         # a live card is never silently dropped. Consumed here so the code is only spent if the
         # issuance commits. Opt-in via CARD_ISSUE_OTP_REQUIRED (default off).
-        if data.issue_type in _OTP_GATED_ISSUE_TYPES and _card_issue_otp_required(db):
+        # v8y: a "re-cut" (issue_type extend from the Keys panel) for a room that STILL has a live card,
+        # on a stay that does not need a new card, is an extra key in all but name (prod: 9 in 30 days) -
+        # it needs the same approval.
+        _gated = data.issue_type in _OTP_GATED_ISSUE_TYPES
+        if (data.issue_type == "extend" and booking is not None and room is not None
+                and not getattr(booking, "card_reencode_required", False)
+                and db.query(CardIssuance.id).filter(
+                    CardIssuance.booking_id == booking.booking_id, CardIssuance.room_id == room.room_id,
+                    CardIssuance.card_type == "guest", CardIssuance.status == "active").first() is not None):
+            _gated = True
+        # v8y (owner): the approval is the owner's code, or an admin login
+        if _gated and _card_issue_otp_required(db) and (user or {}).get("role") != "admin":
             try:
                 consume_otp(db, data.owner_otp_id, data.owner_otp_code, "card_issue", user)
             except HTTPException:
                 reasons.append("card_issue_without_approval")
+
+        # v8y: a key may not outlive the stay it belongs to (the room's checkout moment + the grace)
+        # (only the Keys panel's cards - check-in / shift / extension cards are cut to the server's own window)
+        if booking is not None and assigned is not None and data.valid_to is not None                 and data.issue_type in ("extra", "lost_reissue", "extend"):
+            from routers.reception import _card_window
+            from utils import clock as _clock
+            _vt = _clock.to_local(data.valid_to) if data.valid_to.tzinfo else data.valid_to
+            _, _win_to = _card_window(booking, assigned)
+            if _vt > _win_to + timedelta(minutes=15):
+                reasons.append("card_validity_beyond_stay")
 
         # A key-lock room has a physical metal key — a guest key card should never be cut for it.
         if room and getattr(room, "lock_type", "card") == "key":
@@ -162,6 +184,20 @@ def issue_card(data: CardIssueRequest, db: Session = Depends(get_db),
             reasons.append("max_cards_exceeded")
 
         reasons = list(dict.fromkeys(reasons))  # dedupe, keep order
+
+        # ---- v8y: dry run - say whether this card may be cut; record nothing, spend no code ----
+        if data.dry_run:
+            db.rollback()
+            # G (owner): a card before any payment stays an ALERT only (agents / companies pay later)
+            reasons = [r for r in reasons if r != "card_without_payment"]
+            if reasons:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(("owner_otp_required: " if "card_issue_without_approval" in reasons else "")
+                            + "; ".join(reasons)))
+            return {"ok": True, "dry_run": True, "issue_type": data.issue_type,
+                    "max_cards": room.max_cards if room else None,
+                    "active_cards": _active_count(db, room.room_id) if room else None}
 
         # ---- invalid + no card encoded: plain reject, nothing recorded ----
         if reasons and not data.encoded:

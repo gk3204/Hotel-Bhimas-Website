@@ -26,6 +26,7 @@ from models import Room, RoomType, Booking, Guest, RoomTypeAvailability, Booking
     Folio, FolioCharge, CardIssuance, TravelAgent, Company, BookingGuest, StayEvent
 from utils import ordering
 from utils import arrival_rules
+from utils import card_data   # v8y
 from utils.booking_source import channel_label as _channel_label   # v8w: "Walk-in booking: no early fee"
 from utils import secure_id_store
 from utils import availability
@@ -1437,6 +1438,14 @@ def check_in(data: CheckinRequest, db: Session = Depends(get_db),
                 if room.status != "vacant":
                     raise HTTPException(status_code=409,
                                         detail=f"Room {room.room_number} is not vacant (status: {room.status})")
+                # v8y (owner, prod #1236 room 2: a viewing card cut 04:08 stayed out until 11:32 while the
+                # guest checked in at 04:17): the viewing card comes back first
+                from utils.housekeeping import active_viewing_card as _avc
+                if room.lock_type != "key" and _avc(db, room.room_id) is not None:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=f"A viewing card for room {room.room_number} is still out - take it back and "
+                               f"wipe it (Housekeeping -> Return viewing card), or record it lost, then check in.")
                 if room.room_type_id != item.room_type_id:
                     # v4b7: a room may be sold as its configured ALTERNATE type — but only
                     # when the booked type has genuinely run out. See _assert_booked_type_sold_out.
@@ -2381,8 +2390,44 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
                           for it in leaving if it.room_id]
         _leaving_card_rooms = [r for r in _leaving_rooms if r is not None and r.lock_type != "key"]
         has_card_room = bool(_leaving_card_rooms)
-        if has_card_room and not erased_uids \
+        # v8y (owner, 8 Nov - prod #1183 room 3: two live cards, one wiped, the other opened the door until
+        # 13:00 next day with no approval; 34 such cards in 30 days). EVERY live card of a leaving room must
+        # be wiped - matched card by card on the key the card holds, never "some card was wiped". A blank
+        # card says nothing about which card it was, so it accounts for nothing.
+        _erased_keys = {k for k in (card_data.key_block(u) for u in erased_uids) if k}
+        _live_cards = db.query(CardIssuance).filter(
+            CardIssuance.booking_id == booking.booking_id, CardIssuance.status == "active",
+            CardIssuance.card_type == "guest",
+            CardIssuance.room_id.in_([r.room_id for r in _leaving_card_rooms] or [-1])).all()
+        _erased_raw = {u.strip().lower() for u in erased_uids}
+        _wiped_ids = {c.id for c in _live_cards if card_data.key_block(c.card_uid) in _erased_keys
+                      or (c.card_uid and c.card_uid.strip().lower() in _erased_raw)}
+        # a card recorded without its data (an older desk) is accounted for by a wiped card that opens its
+        # room and is no other card on record
+        _known = {card_data.key_block(c.card_uid) for c in _live_cards} - {None}
+        _spare = [card_data.card_lock_room(u) for u in erased_uids
+                  if card_data.key_block(u) and card_data.key_block(u) not in _known]
+        _room_by_id = {r.room_id: r for r in _leaving_card_rooms}
+        for c in _live_cards:
+            if c.id in _wiped_ids or c.card_uid:
+                continue
+            _lr = card_data.room_lock_number(_room_by_id.get(c.room_id))
+            if _lr is not None and _lr in _spare:
+                _spare.remove(_lr)
+                _wiped_ids.add(c.id)
+        _unwiped = [c for c in _live_cards if c.id not in _wiped_ids]
+        if has_card_room and _unwiped \
                 and app_settings.get_fraud_config(db).get("checkout_no_card_otp_required"):
+            if not data.owner_otp_id:
+                _by_room = {}
+                for c in _unwiped:
+                    _n = _room_by_id[c.room_id].room_number if c.room_id in _room_by_id else "?"
+                    _by_room[_n] = _by_room.get(_n, 0) + 1
+                raise HTTPException(
+                    status_code=403,
+                    detail="owner_otp_required: key card(s) not wiped - "
+                           + ", ".join(f"room {n}: {k} card{'s' if k > 1 else ''}" for n, k in _by_room.items())
+                           + ". Wipe every card the guest was given, or get the owner's code.")
             consume_otp(db, data.owner_otp_id, data.owner_otp_code, "checkout_no_card", user)
 
         before = {"booking_status": booking.status, "folio_balance": balance}
@@ -2434,6 +2479,7 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         # Only the departing rooms' cards. A partial checkout must not kill the key of a guest who
         # is still in the building.
         _leaving_room_ids = {i.room_id for i in leaving if i.room_id}
+        _foreign_wiped = []   # v8y
         cards = [c for c in db.query(CardIssuance).filter(
             CardIssuance.booking_id == booking.booking_id,
             CardIssuance.status == "active",
@@ -2444,10 +2490,10 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         # (CardIssuance.card_uid), falling back to "everything on this booking" when the desk
         # erased cards but the UIDs don't line up (an older desk build, or a card issued before
         # UIDs were captured) — the physical wipe happened either way.
-        uid_set = {u.lower() for u in erased_uids}
-        matched = [c for c in cards if (c.card_uid or "").lower() in uid_set] if uid_set else []
-        if erased_uids and not matched:
-            matched = cards
+        # v8y: only the cards actually matched. This used to fall back to "every card of the stay" when
+        # the wiped card matched none of them - so wiping ANY card (another booking's, a blank one)
+        # recorded all of a 10-room group's cards as wiped (prod #998, 30 Oct).
+        matched = [c for c in cards if c.id in _wiped_ids]
         now_ts = clock.now_utc()                   # F-03: erased_at is an instant, stored UTC
         uid_by_id = {c.id: c for c in matched}
         for c in cards:
@@ -2461,17 +2507,30 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
         # v6m.5: the card the guest hands back may be one the system had already SUPERSEDED (an
         # extension / overstay whose re-cut was never done - prod #314). Its uid still identifies
         # it; record that wipe too instead of reporting "0 erased".
-        if uid_set:
+        if erased_uids:
             for c in db.query(CardIssuance).filter(
                     CardIssuance.booking_id == booking.booking_id,
                     CardIssuance.status == "superseded",
                     CardIssuance.card_type == "guest").all():
-                if (c.card_uid or "").lower() in uid_set and (
+                if (card_data.key_block(c.card_uid) in _erased_keys
+                        or (c.card_uid and c.card_uid.strip().lower() in _erased_raw)) and (
                         not _leaving_room_ids or c.room_id in _leaving_room_ids):
                     c.status = "erased"
                     c.erased_at = now_ts
                     c.erased_by = _resolve_user_id(db, user)
                     cards_erased_count += 1
+            # v8y: a wiped card that is ANOTHER stay's live key (prod #998 was checked out with #999's room-5
+            # card) is dead now - record it there, so that stay's checkout asks for the right thing
+            _mine = {card_data.key_block(c.card_uid) for c in cards} - {None}
+            for c in db.query(CardIssuance).filter(
+                    CardIssuance.booking_id != booking.booking_id, CardIssuance.status == "active",
+                    CardIssuance.card_uid.isnot(None)).all():
+                _k = card_data.key_block(c.card_uid)
+                if _k and _k in _erased_keys and _k not in _mine:
+                    c.status = "erased"
+                    c.erased_at = now_ts
+                    c.erased_by = _resolve_user_id(db, user)
+                    _foreign_wiped.append({"card_id": c.id, "booking_id": c.booking_id, "room_id": c.room_id})
 
         # v6e: the desk's choice - raise the departing room's tax invoice now, or leave it to be
         # raised from the folio screen later. Deliberately never automatic: an invoice number is
@@ -2510,6 +2569,8 @@ def check_out(data: CheckoutRequest, db: Session = Depends(get_db),
                            # a card actually come back?" is answerable from the audit log.
                            "cards_erased": cards_erased_count,
                            "cards_erased_uids": erased_uids,
+                           "cards_not_wiped": [c.id for c in _unwiped],          # v8y
+                           "other_stays_cards_wiped": _foreign_wiped,             # v8y
                            "encoder_unavailable": data.encoder_unavailable,
                            "no_card_otp_id": data.owner_otp_id,
                            "rooms": [r.room_number for r in rooms],
@@ -2903,9 +2964,28 @@ def shift_old_card(data: ShiftOldCardRequest, db: Session = Depends(get_db),
                     CardIssuance.status == "superseded")
             .order_by(CardIssuance.id.asc()).all())
     marked = []
+    if not data.erased and user.get("role") != "admin":
+        # v8y (owner): the old room's card keeps opening that room until it expires - leaving it live
+        # needs the owner's code (or an admin login), not just a typed reason
+        consume_otp(db, data.owner_otp_id, data.owner_otp_code, "card_not_wiped", user)
     if data.erased:
-        uid = (data.card_uid or "").strip().lower()
-        hit = [c for c in olds if uid and (c.card_uid or "").lower() == uid] or olds[:1]
+        # v8y: the wiped card must BE this room's old card - matched on the key it held. It used to fall
+        # back to "the oldest old card" whatever was wiped, so any card on the encoder would do.
+        key = card_data.key_block(data.card_uid)
+        _raw = (data.card_uid or "").strip().lower()
+        hit = [c for c in olds if (key and card_data.key_block(c.card_uid) == key)
+               or (_raw and (c.card_uid or "").strip().lower() == _raw)]
+        if not hit:
+            _lr = card_data.card_lock_room(data.card_uid)
+            if _lr is not None and _lr == card_data.room_lock_number(room):
+                hit = [c for c in olds if not c.card_uid][:1]      # recorded without its data (older desk)
+        if not hit:
+            _what = ("a blank card - it cannot be told from any other blank card"
+                     if card_data.is_blank(data.card_uid) or not card_data.is_card(data.card_uid)
+                     else f"a card for room {card_data.card_lock_room(data.card_uid) or '?'}")
+            raise HTTPException(status_code=409,
+                                detail=f"That was {_what}, not the guest's old room {room.room_number} card. "
+                                       f"Place the old card, or record that it cannot be wiped (owner's code).")
         for c in hit:
             c.status = "erased"
             c.erased_at = clock.now_utc()

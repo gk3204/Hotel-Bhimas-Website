@@ -16,6 +16,7 @@ Anti-fraud design:
 Skeleton created in Milestone 0 (prompt 01); implemented here in prompt 13.
 """
 import json
+from utils import card_data   # v8y
 import logging
 from datetime import datetime, timedelta
 
@@ -170,6 +171,7 @@ def list_rooms(mine: bool = Query(False), db: Session = Depends(get_db),
             "photo_url": hk.photo_url if hk else None,
             # card-lock rooms are cleaning-card driven (no manual start); key rooms keep manual buttons.
             "lock_type": r.lock_type,
+            "lock_room": card_data.room_lock_number(r),   # v8y: the number on the door's cards
             "open_task": _task_dict(db, task, r) if task else None,
             "cleaned_by": _name(last.assigned_to) if last and last.assigned_to else None,  # ALT-7
             # v4b8: the PICKED names, shown as their own columns on the housekeeping board.
@@ -474,6 +476,32 @@ class CardReturnRequest(BaseModel):
     recorded LOST (not wiped: it still opens the door until it expires) and the owner is alerted."""
     card_missing: bool = False
     reason: Optional[str] = Field(None, max_length=200)
+    # v8y: what was on the encoder - the card's data (it names the room it opened), or `blank` when the
+    # card read blank. An older desk sends neither and is taken at its word, as before.
+    card_uid: Optional[str] = Field(None, max_length=64)
+    blank: bool = False
+
+
+def _check_returned_card(room, card, data, kind):
+    """v8y (owner): a returned cleaning / viewing card must be THIS room's card. A blank card cannot be
+    told from any other blank card, so it is accepted only once the real card has expired (then it opens
+    nothing whichever card it was); before that the real card may still be out - record it lost instead."""
+    if data is None or data.card_missing:
+        return
+    if data.blank:
+        if card.valid_to is not None and datetime.now() < card.valid_to:
+            raise HTTPException(
+                status_code=409,
+                detail=f"That card is blank - a blank card cannot be checked (every wiped card looks the same). Room "
+                       f"{room.room_number}'s {kind} card still opens the door until {card.valid_to:%H:%M}: place the "
+                       f"real card, or record it lost.")
+        return
+    lr = card_data.card_lock_room(data.card_uid)
+    mine = card_data.room_lock_number(room)
+    if lr is not None and mine is not None and lr != mine:
+        raise HTTPException(status_code=409,
+                            detail=f"That card opens room {lr}, not room {room.room_number} - place room "
+                                   f"{room.room_number}'s {kind} card.")
 
 
 def _record_card_lost(db, room, card, data, user, kind):
@@ -514,6 +542,7 @@ def return_cleaning_card(room_id: int, data: Optional[CardReturnRequest] = Body(
         raise HTTPException(status_code=409, detail="No outstanding cleaning card for this room")
     room_was_cleaning = room.status == "cleaning"
 
+    _check_returned_card(room, card, data, "cleaning")   # v8y
     lost_reason = None
     if data is not None and data.card_missing:      # v7r: lost, not wiped - recorded and alerted
         lost_reason = _record_card_lost(db, room, card, data, user, "cleaning")
@@ -657,6 +686,7 @@ def return_viewing_card(room_id: int, data: Optional[CardReturnRequest] = Body(d
     if not card:
         raise HTTPException(status_code=409, detail="No viewing card is out for this room")
     late = card.valid_to is not None and datetime.now() > card.valid_to
+    _check_returned_card(room, card, data, "viewing")   # v8y
     lost_reason = None
     if data is not None and data.card_missing:      # v7r: lost, not wiped - recorded and alerted
         lost_reason = _record_card_lost(db, room, card, data, user, "viewing")

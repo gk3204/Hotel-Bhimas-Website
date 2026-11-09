@@ -571,6 +571,9 @@ class CardIssueRequest(BaseModel):
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     station_id: Optional[str] = Field(None, max_length=50)
     encoded: bool = True      # False = pre-check only (nothing recorded on failure)
+    # v8y: validate only - nothing recorded, no approval code spent. The desk asks this BEFORE it cuts
+    # an extra / replacement / re-cut card, so a refused card is never written.
+    dry_run: bool = False
     offline: bool = False     # issued while the desktop was offline (evidence for fraud review)
     client_issued_at: Optional[datetime] = None               # desktop clock (evidence only)
     client_ref: Optional[str] = Field(None, max_length=64)
@@ -627,6 +630,9 @@ class ShiftOldCardRequest(BaseModel):
     card_uid: Optional[str] = None     # read off the card before the wipe, when the encoder gave one
     reason: Optional[str] = None       # required when erased is false
     client_ref: Optional[str] = None
+    # v8y: not wiping the old card needs the owner's code (or an admin login)
+    owner_otp_id: Optional[int] = Field(None, gt=0)
+    owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
 
 
 class RoomShiftRequest(BaseModel):

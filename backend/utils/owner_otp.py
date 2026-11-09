@@ -58,6 +58,7 @@ OTP_ACTIONS = frozenset({
     "lost_card_waive",         # v6m: reception waives the lost-key-card fee (charged by default)
     "alt_room_booking",        # v7g: book into an ALTERNATE room type because the booked type is full
     "no_show",                 # v7i: reception marks a booking a no-show (admin needs no code)
+    "card_not_wiped",          # v8y: a room shift leaves the old room's key card live
     "early_checkout_drop",     # v7j: drop the unused nights of a WEBSITE booking at early check-out
     "bank_refund",             # v7j: hand money back on a booking that was paid (partly) by BANK transfer
 })
@@ -347,6 +348,10 @@ _SUMMARY_BUILDERS = {
     "ota_unverified": _sum_ota_unverified,
     "arrival_fee": _sum_arrival_fee,
     "extend_hours": _sum_extend_hours,
+    "card_not_wiped": lambda ctx: (f"Leave the guest's OLD room key card live after a room shift (it opens that "
+                                   f"room until it expires) — {_rooms_label(ctx.get('rooms'))}, "
+                                   f"{_guest_label(ctx)} ({_booking_label(ctx)})"
+                                   + (f" — reason: {ctx.get('reason')}" if ctx.get('reason') else "")),
 }
 
 
