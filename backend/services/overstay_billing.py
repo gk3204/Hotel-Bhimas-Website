@@ -140,21 +140,43 @@ def _auto_charges(db: Session, booking: Booking):
               .all())
 
 
-def _alert(db: Session, *, type_, severity, booking, detail):
-    """Raise a fraud alert, deduped on the booking + the night it concerns."""
+def _alert(db: Session, *, type_, severity, booking, detail, by_key=False):
+    """Raise a fraud alert, deduped on the booking + the night it concerns.
+
+    by_key (v8z): dedupe on the exact key (booking + check-out) instead of "any open alert of this type
+    for the booking" - so a situation that recurs AFTER a person acted (the stay was extended, then ran
+    over again) is a new alert, not swallowed by the old one still open."""
     key = f"{type_}:{booking.booking_id}:{booking.check_out}"
     detail = dict(detail or {})
     detail["dedupe_key"] = key
-    exists = (db.query(FraudAlert.id)
-                .filter(FraudAlert.type == type_,
-                        FraudAlert.booking_id == booking.booking_id,
-                        FraudAlert.status == "open")
-                .first())
+    q = (db.query(FraudAlert)
+           .filter(FraudAlert.type == type_,
+                   FraudAlert.booking_id == booking.booking_id,
+                   FraudAlert.status == "open"))
+    if by_key:
+        exists = any(f'"dedupe_key": "{key}"' in (a.detail or "") for a in q.all())
+    else:
+        exists = q.first() is not None
     if exists:
         return None
     db.add(FraudAlert(type=type_, severity=severity, booking_id=booking.booking_id,
                       detail=json.dumps(detail, default=str), status="open"))
     return key
+
+
+def _last_extension_check_out(db: Session, booking_id: int):
+    """v8z: the check-out a person last extended this stay to (reception.extend), or None."""
+    from datetime import date as _date
+    from models import AuditLog
+    try:
+        row = (db.query(AuditLog.after)
+                 .filter(AuditLog.action == "reception.extend", AuditLog.entity_type == "booking",
+                         AuditLog.entity_id == str(booking_id))
+                 .order_by(AuditLog.log_id.desc()).first())
+        co = json.loads(row[0]).get("check_out") if row and row[0] else None
+        return _date.fromisoformat(str(co)[:10]) if co else None
+    except Exception:
+        return None
 
 
 def _bill_one(db: Session, booking_id: int, *, now, cfg) -> dict:
@@ -184,11 +206,19 @@ def _bill_one(db: Session, booking_id: int, *, now, cfg) -> dict:
         # Runaway guard. A forgotten checkout — guest left days ago, nobody processed it —
         # must not silently accrue 40 nights of rent and 40 audit rows.
         booked_co = booking.original_check_out or old_co
+        # v8z (owner, 22 Nov - prod #1523 room 23): a stay a PERSON has since extended is approved up to
+        # that new check-out, so the runaway count starts again from there. It counted from the original
+        # booking for ever: booked 17 Nov, 3 automatic nights, then reception extended to 22 Nov - and on
+        # 22 Nov the guard still saw "6 days over" and billed nothing, silently (its alert was already open).
+        _ext = _last_extension_check_out(db, booking.booking_id)
+        if _ext is not None and _ext > booked_co:
+            booked_co = _ext
         if (new_co - booked_co).days > cfg["max_auto_days"]:
             _alert(db, type_="overstay_unattended", severity="high", booking=booking,
                    detail={"booked_check_out": str(booked_co), "current_check_out": str(old_co),
                            "max_auto_days": cfg["max_auto_days"],
-                           "note": "Automatic billing stopped — this stay needs a human."})
+                           "note": "Automatic billing stopped — this stay needs a human."},
+                   by_key=True)
             db.commit()
             out["reason"] = "runaway_guard"
             return out
