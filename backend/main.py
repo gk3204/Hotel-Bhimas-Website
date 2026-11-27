@@ -14,7 +14,7 @@ from routers import booking_lifecycle   # v5m: no-show / reinstate / admin re-da
 
 # Bumped once per shipped batch so /health tells you which build is live (Railway also injects
 # the git sha). "Is it deployed yet?" used to be unanswerable from outside.
-APP_BUILD = "v8z.1"   # v8u: website early arrival keeps its nights; v8v: multi-room stays on the cashier reports; v8w: every non-OTA booking; v8x: complimentary extend/shift/overstay; v8y: key-card loopholes
+APP_BUILD = "v8z.2"   # v8u: website early arrival keeps its nights; v8v: multi-room stays on the cashier reports; v8w: every non-OTA booking; v8x: complimentary extend/shift/overstay; v8y: key-card loopholes
 from routers.bookings import router as booking_router
 from routers.room_type_availability import router as availability_router
 from routers.enquiry import router as enquiry_router

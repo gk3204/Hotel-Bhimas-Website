@@ -3113,23 +3113,38 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
         #   same type      -> no gate, no adjustment (unchanged)
         #   ALTERNATE sale -> the room can be let as the booked type; guest keeps their price
         #   cross type     -> a real re-type, priced as before (unchanged)
-        is_alt_sale = cross_type and new_room.alt_room_type_id == item.room_type_id
+        # v8z.2 (owner, 27 Nov: "room 17 -> 10 shows the extra amount, but room 14 and 26 show 0 although
+        # they are also AC"): 14 and 26 are AC rooms that can ALSO be let as Double Deluxe Non-AC. Moving a
+        # non-AC guest there was always an alternate sale (no charge, owner code). Reception now chooses:
+        # as_upgrade=True makes it a real upgrade to the room's own type - priced like room 10.
+        alt_possible = cross_type and new_room.alt_room_type_id == item.room_type_id
+        is_alt_sale = alt_possible and not bool(data.as_upgrade)
 
-        # Cross-type shifts consume the new type's capacity for the remaining dates —
-        # don't strand a future confirmed reservation of that type.
-        # An alternate sale does NOT: the reservation stays in its booked bucket.
-        if cross_type and not is_alt_sale and today < booking.check_out:
+        def _upgrade_capacity_problem():
+            """Why the guest cannot be RE-TYPED into the target type for the remaining dates, or None."""
+            if today >= booking.check_out:
+                return None
             if _blocked(db, new_type.room_type_id, today, booking.check_out):
-                raise HTTPException(status_code=409,
-                                    detail=f"{new_type.name} is blocked for the remaining dates")
+                return f"{new_type.name} is blocked for the remaining dates"
             # v7f: not this booking itself; v7b alternates; v7v the tightest night
             if int(availability.free_rooms(db, new_type.room_type_id, today, booking.check_out,
                                            total=new_type.total_rooms, lock=True,
                                            exclude_booking_id=booking.booking_id,
                                            exclude_ota_booking_id=booking.ota_booking_id)["available"]) <= 0:
-                raise HTTPException(status_code=409,
-                                    detail=f"No {new_type.name} capacity left for the remaining dates "
-                                           f"— a future reservation needs it")
+                return (f"No {new_type.name} capacity left for the remaining dates "
+                        f"— a future reservation needs it")
+            return None
+
+        # Cross-type shifts consume the new type's capacity for the remaining dates —
+        # don't strand a future confirmed reservation of that type.
+        # An alternate sale does NOT: the reservation stays in its booked bucket.
+        upgrade_blocked = None
+        if cross_type and not is_alt_sale:
+            upgrade_blocked = _upgrade_capacity_problem()
+            if upgrade_blocked:
+                raise HTTPException(status_code=409, detail=upgrade_blocked)
+        elif alt_possible:
+            upgrade_blocked = _upgrade_capacity_problem()   # only reported: the choice is offered or not
 
         # ---- rate difference (remaining calendar nights x GST-inclusive rack rates) ----
         remaining_nights = max(0, (booking.check_out - today).days)
@@ -3140,6 +3155,7 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
         # precisely why it needs an owner code: the fraud vector is a receptionist putting a
         # guest into a ₹4,000 room booked at ₹2,000, or pocketing the difference in cash.
         suggested = 0.0 if is_alt_sale else round((new_rate - old_rate) * remaining_nights, 2)
+        upgrade_adjustment = round((new_rate - old_rate) * remaining_nights, 2)   # v8z.2: the other choice
         # v8x (owner, 8 Nov): a COMPLIMENTARY stay is not billed a rate difference (the room is free -
         # it used to post a charged 'misc' line on a free stay), and moving its guest to a COSTLIER type
         # gives away more, so that needs an approval: an admin login, or the owner's code.
@@ -3194,6 +3210,12 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
             # submit, and explain that an alternate sale costs the guest nothing extra.
             "is_alt_room_type_sale": is_alt_sale,
             "is_comp_upgrade": comp_upgrade,   # v8x
+            # v8z.2: the target can be used EITHER as the booked type or as a real upgrade
+            "alt_upgrade_possible": alt_possible,
+            "as_upgrade": bool(alt_possible and not is_alt_sale),
+            "upgrade_adjustment": (0.0 if _comp else upgrade_adjustment) if alt_possible else None,
+            "upgrade_blocked": upgrade_blocked if alt_possible else None,
+            "booked_type_name": old_type.name,
             "requires_owner_otp": bool(
                 (comp_upgrade and user.get("role") != "admin") or
                 (bool(old_type.is_ac) and not bool(new_type.is_ac)
@@ -3220,7 +3242,7 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
         reasons = []
         if bool(old_type.is_ac) and not bool(new_type.is_ac) and _fc["ac_downgrade_otp_required"]:
             reasons.append("ac_downgrade")
-        if new_room.alt_room_type_id == item.room_type_id and _fc["alt_room_type_otp_required"]:
+        if is_alt_sale and _fc["alt_room_type_otp_required"]:   # v8z.2: not when chosen as an upgrade
             # Same rule as check-in: an alternate sale is only for when the booked type is gone.
             _assert_booked_type_sold_out(db, item, new_room)
             reasons.append("alt_room_type")
@@ -3305,6 +3327,7 @@ def shift_room(data: RoomShiftRequest, db: Session = Depends(get_db),
                            "suggested_adjustment": suggested, "applied_adjustment": applied,
                            "reason": data.reason, "superseded_card_ids": superseded_ids,
                            "alt_room_type_sale": is_alt_sale,
+                           "as_upgrade": bool(alt_possible and not is_alt_sale),   # v8z.2
                            "sold_as_room_type_id": (new_room.room_type_id if is_alt_sale else None),
                            "approval_reasons": reasons,
                            "folio_balance": float(folio.balance or 0),

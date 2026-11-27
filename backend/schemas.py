@@ -659,6 +659,10 @@ class RoomShiftRequest(BaseModel):
     owner_otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
     dry_run: bool = False
     client_ref: Optional[str] = Field(None, max_length=64)
+    # v8z.2 (owner, 27 Nov): the target room can ALSO be let as the booked type (an AC room whose
+    # alternate type is the guest's non-AC type). None/False = use it as the booked type (no
+    # difference, owner code - unchanged); True = a real UPGRADE to the room's own type, priced.
+    as_upgrade: Optional[bool] = None
 
 
 class ExtendStayRequest(BaseModel):
