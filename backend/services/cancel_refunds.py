@@ -98,7 +98,7 @@ def refund_for_cancellation(db, booking, amount, reason, user, mode=None, refere
             ok, refund_id, msg = process_gateway_refund(db, p.payment_id, part, why)
             if not ok:
                 if not done:
-                    raise HTTPException(status_code=400, detail=f"Refund failed: {msg}")
+                    raise HTTPException(status_code=400, detail=(msg if str(msg).startswith("Refund failed") else f"Refund failed: {msg}"))
                 raise HTTPException(status_code=502, detail=(
                     f"Refund failed for RCPT-{p.payment_id}: {msg}. Already refunded: "
                     + ", ".join(f"RFND-{d.payment_id} Rs {float(d.refund_amount):,.2f}" for d in done)

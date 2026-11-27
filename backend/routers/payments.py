@@ -9,6 +9,7 @@ import os
 import json
 import uuid
 import logging
+import re
 from datetime import datetime, timedelta
 import hmac
 import hashlib
@@ -54,7 +55,9 @@ def get_db():
         db.close()
 
 
-def get_razorpay_client():
+def get_razorpay_client(proxy=None):
+    """`proxy` (v8z.1): an http(s) proxy URL every call of THIS client goes through. Only the refund
+    path passes one (refund_proxy_url) - all other Razorpay calls leave Railway directly as before."""
     if not RAZORPAY_AVAILABLE:
         return None
 
@@ -66,10 +69,33 @@ def get_razorpay_client():
         return None
 
     try:
+        if proxy:
+            import requests as _requests
+            session = _requests.Session()
+            session.proxies = {"http": proxy, "https": proxy}
+            session.trust_env = False      # the proxy above, never one from the environment
+            return razorpay.Client(session=session, auth=(key, secret))
         return razorpay.Client(auth=(key, secret))
     except Exception as e:
-        logger.error(f"❌ Razorpay init failed: {e}")
+        logger.error(f"❌ Razorpay init failed: {_scrub_secrets(e)}")
         return None
+
+
+# v8z.1 (owner, 26-27 Nov; Razorpay ticket #22072214): Razorpay now accepts REFUND (and Linked Account)
+# API calls only from whitelisted static IPs - every refund failed "Access is forbidden" (prod #1659).
+# Railway's Hobby plan has no static outbound IP, so refunds go through a static-IP proxy (Fixie) named
+# by RAZORPAY_REFUND_PROXY. Unset = straight from Railway, exactly as before.
+def refund_proxy_url():
+    return (os.getenv("RAZORPAY_REFUND_PROXY") or "").strip() or None
+
+
+_CRED_IN_URL = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/@\s:]+:[^/@\s]+@", re.I)
+
+
+def _scrub_secrets(err) -> str:
+    """An error text with any user:password@ in a URL masked - a proxy failure names the proxy URL,
+    and this text reaches the admin's screen and the logs."""
+    return _CRED_IN_URL.sub(r"\1***@", str(err))
 
 
 def process_razorpay_refund(db: Session, payment_id: int, refund_amount: float, reason: str):
@@ -91,8 +117,9 @@ def process_razorpay_refund(db: Session, payment_id: int, refund_amount: float, 
         if payment.refund_status and payment.refund_status != "failed":
             return False, payment.refund_id, "Payment already refunded"
         
-        # Get Razorpay client
-        razorpay_client = get_razorpay_client()
+        # Get Razorpay client - v8z.1: through the static-IP proxy when one is configured
+        proxy = refund_proxy_url()
+        razorpay_client = get_razorpay_client(proxy=proxy)
         if not razorpay_client:
             return False, None, "Razorpay service unavailable"
         
@@ -122,8 +149,13 @@ def process_razorpay_refund(db: Session, payment_id: int, refund_amount: float, 
         return True, payment.refund_id, "Refund processed successfully"
 
     except Exception as e:
-        logger.error(f"❌ Refund failed for payment {payment_id}: {str(e)}")
-        return False, None, f"Refund failed: {str(e)}"
+        msg = _scrub_secrets(e)
+        logger.error(f"❌ Refund failed for payment {payment_id} (proxy={'on' if refund_proxy_url() else 'off'}): {msg}")
+        if "access is forbidden" in msg.lower():
+            msg += (" - Razorpay accepts refunds only from whitelisted IP addresses"
+                    + (": check the proxy's IPs are whitelisted with Razorpay" if refund_proxy_url()
+                       else " (RAZORPAY_REFUND_PROXY is not set)"))
+        return False, None, f"Refund failed: {msg}"
 
 
 def process_phonepe_refund(db: Session, payment_id: int, refund_amount: float, reason: str):
