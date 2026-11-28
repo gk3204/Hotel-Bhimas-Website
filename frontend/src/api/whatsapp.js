@@ -119,3 +119,35 @@ export async function sendTest(data) {
   });
   return handle(res);
 }
+
+// ---- v8z.3: media (photos / voice notes / videos / files) ----
+// The file comes through the backend (WhatsApp's own link needs the server's token), so it is fetched
+// with the staff login and handed to the page as a blob URL. Cached per message for the session.
+const _mediaCache = new Map();
+
+export async function getMediaUrl(messageId) {
+  if (_mediaCache.has(messageId)) return _mediaCache.get(messageId);
+  const token = localStorage.getItem("adminToken");
+  const res = await fetch(`${BASE_URL}/whatsapp/media/${messageId}`, {
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+  });
+  if (!res.ok) {
+    let msg = `HTTP ${res.status}`;
+    try { const d = await res.json(); if (d?.detail) msg = String(d.detail); } catch { /* ignore */ }
+    throw new Error(msg);
+  }
+  const url = URL.createObjectURL(await res.blob());
+  _mediaCache.set(messageId, url);
+  return url;
+}
+
+export async function sendMedia(phone, file, caption) {
+  const token = localStorage.getItem("adminToken");
+  const form = new FormData();
+  form.append("file", file);
+  if (caption) form.append("caption", caption);
+  const res = await fetch(`${BASE_URL}/whatsapp/conversations/${encodeURIComponent(phone)}/media`, {
+    method: "POST", headers: token ? { Authorization: `Bearer ${token}` } : {}, body: form,
+  });
+  return handle(res);
+}

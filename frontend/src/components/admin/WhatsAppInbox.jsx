@@ -1,14 +1,55 @@
 // WhatsApp staff inbox (two-way conversations) — used inside the admin Messaging page.
 import { useEffect, useRef, useState } from "react";
-import { FaPlus } from "react-icons/fa";
+import { FaPlus, FaPaperclip, FaTimes } from "react-icons/fa";
 import {
   getConversations, getThread, markConversationRead, sendReply, getTemplates, getWebhookHealth,
+  getMediaUrl, sendMedia,
 } from "../../api/whatsapp";
 
 const API_BASE = import.meta.env.VITE_API_URL || "http://127.0.0.1:8000";
 
 const inputCls =
   "px-4 py-2 bg-slate-900/50 border border-slate-600 rounded-lg text-white focus:outline-none focus:border-[#E5C07B] focus:ring-2 focus:ring-[#E5C07B]/20 transition";
+
+// v8z.3: a photo shows inline (click = full size in a new tab); a voice note / video plays after one
+// click (so a long thread doesn't download every clip); a document opens or downloads.
+function MediaBlock({ id, media }) {
+  const [url, setUrl] = useState(null);
+  const [err, setErr] = useState("");
+  const [loading, setLoading] = useState(false);
+  const kind = media.kind;
+  const load = async () => {
+    if (url || loading) return url;
+    setLoading(true); setErr("");
+    try { const u = await getMediaUrl(id); setUrl(u); setLoading(false); return u; }
+    catch (e) { setErr(e.message); setLoading(false); return null; }
+  };
+  useEffect(() => { if (media.openable && (kind === "image" || kind === "sticker")) load(); }, [id]); // eslint-disable-line
+  if (!media.openable) return <div className="text-xs text-slate-500 italic">(test message — no file kept)</div>;
+  const name = media.filename || `whatsapp-${kind}-${id}`;
+  const btn = "text-xs px-3 py-1 rounded-lg border border-slate-500 text-slate-200 hover:bg-slate-600/50 mr-2";
+  const openNew = async () => { const u = await load(); if (u) window.open(u, "_blank", "noopener"); };
+  const download = async () => {
+    const u = await load(); if (!u) return;
+    const a = document.createElement("a"); a.href = u; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+  };
+  return (
+    <div className="mb-1">
+      {(kind === "image" || kind === "sticker") && (url
+        ? <img src={url} alt={kind} onClick={openNew}
+            className={`rounded-lg cursor-pointer ${kind === "sticker" ? "max-h-28" : "max-h-64"} max-w-full`} />
+        : <div className="text-xs text-slate-400">{loading ? "Loading photo…" : ""}</div>)}
+      {kind === "audio" && (url ? <audio src={url} controls autoPlay className="max-w-full" />
+        : <button className={btn} onClick={load}>{loading ? "Loading…" : "▶ Play voice message"}</button>)}
+      {kind === "video" && (url ? <video src={url} controls autoPlay className="rounded-lg max-h-72 max-w-full" />
+        : <button className={btn} onClick={load}>{loading ? "Loading…" : "▶ Play video"}</button>)}
+      {kind === "document" && <button className={btn} onClick={openNew}>{loading ? "Loading…" : "Open"}</button>}
+      {(kind === "document" || kind === "video" || kind === "audio" || kind === "image") && (
+        <button className={btn + " mt-1"} onClick={download}>Download</button>)}
+      {err && <div className="text-xs text-red-300 mt-1">{err}</div>}
+    </div>
+  );
+}
 
 export default function WhatsAppInbox({ showToast }) {
   const [convos, setConvos] = useState([]);
@@ -22,6 +63,8 @@ export default function WhatsAppInbox({ showToast }) {
   const [composePhone, setComposePhone] = useState("");
   const [sending, setSending] = useState(false);
   const [webhook, setWebhook] = useState(null);   // v5l: Meta webhook delivery health
+  const [attach, setAttach] = useState(null);     // v8z.3: a File to send (text box = its caption)
+  const fileRef = useRef(null);
   const activeRef = useRef(active);
   activeRef.current = active;
 
@@ -51,11 +94,19 @@ export default function WhatsAppInbox({ showToast }) {
     return () => clearInterval(id);
   }, []); // eslint-disable-line
 
-  const openConv = (phone) => { setActive(phone); setCompose(false); setText(""); loadThread(phone); };
+  const openConv = (phone) => { setActive(phone); setCompose(false); setText(""); setAttach(null); loadThread(phone); };
   const tplObj = templates.find((t) => t.name === tpl);
   const canFreeText = thread?.within_window && !compose;
 
+  const doSendMedia = async () => {
+    if (!active || !attach) return;
+    setSending(true);
+    try { await sendMedia(active, attach, text.trim()); setAttach(null); setText(""); await loadThread(active); }
+    catch (e) { showToast(e.message, "error"); }
+    setSending(false);
+  };
   const doSendText = async () => {
+    if (attach) { await doSendMedia(); return; }
     if (!active || !text.trim()) return;
     setSending(true);
     try { await sendReply(active, { text: text.trim() }); setText(""); await loadThread(active); }
@@ -165,6 +216,7 @@ export default function WhatsAppInbox({ showToast }) {
               {(thread?.messages || []).map((m) => (
                 <div key={m.id} className={`flex ${m.direction === "in" ? "justify-start" : "justify-end"}`}>
                   <div className={`max-w-[75%] rounded-xl px-3 py-2 ${m.direction === "in" ? "bg-slate-700/60" : "bg-[#3b3320]"}`}>
+                    {m.media && <MediaBlock id={m.id} media={m.media} />}
                     <div className="text-sm text-slate-100 whitespace-pre-wrap break-words">{m.body}</div>
                     <div className="text-[10px] text-slate-400 text-right mt-1">
                       {(m.created_at || "").replace("T", " ").slice(0, 16)}
@@ -176,12 +228,27 @@ export default function WhatsAppInbox({ showToast }) {
             </div>
             <div className="p-4 border-t border-slate-700">
               {canFreeText ? (
+                <div>
+                {attach && (
+                  <div className="flex items-center gap-2 mb-2 text-sm text-slate-200">
+                    <FaPaperclip size={12} /> <span className="truncate">{attach.name}</span>
+                    <span className="text-xs text-slate-500">({Math.max(1, Math.round(attach.size / 1024))} KB)</span>
+                    <button onClick={() => setAttach(null)} className="text-slate-400 hover:text-white" title="Remove"><FaTimes size={12} /></button>
+                  </div>
+                )}
                 <div className="flex gap-2">
-                  <input className={inputCls + " flex-1"} placeholder="Type a reply…" value={text}
+                  <input ref={fileRef} type="file" className="hidden"
+                    accept="image/*,video/*,audio/*,application/pdf,.doc,.docx,.xls,.xlsx,.txt"
+                    onChange={(e) => { const f = e.target.files?.[0]; if (f) setAttach(f); e.target.value = ""; }} />
+                  <button title="Attach a photo, voice note, video or file" onClick={() => fileRef.current?.click()}
+                    className="px-3 rounded-lg border border-slate-600 text-slate-300 hover:text-white"><FaPaperclip /></button>
+                  <input className={inputCls + " flex-1"} placeholder={attach ? "Caption (optional)…" : "Type a reply…"} value={text}
                     onChange={(e) => setText(e.target.value)}
                     onKeyDown={(e) => { if (e.key === "Enter") doSendText(); }} />
                   <button disabled={sending} onClick={doSendText}
-                    className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-semibold px-5 py-2 rounded-lg disabled:opacity-50">Send</button>
+                    className="bg-gradient-to-r from-[#E5C07B] to-[#D4AF37] text-slate-900 font-semibold px-5 py-2 rounded-lg disabled:opacity-50">{sending ? "Sending…" : "Send"}</button>
+                </div>
+                <p className="text-[11px] text-slate-500 mt-1">Photos (jpg/png) up to 5 MB · videos (mp4), voice notes and other files up to 16 MB.</p>
                 </div>
               ) : (
                 <div className="space-y-2">

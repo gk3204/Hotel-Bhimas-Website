@@ -21,8 +21,8 @@ import os
 import re
 from datetime import datetime, timedelta
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import PlainTextResponse
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, Request, UploadFile
+from fastapi.responses import PlainTextResponse, Response
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
@@ -151,7 +151,18 @@ def _msg_dict(m: WhatsAppMessage) -> dict:
         "error": m.error, "body": m.body, "guest_id": m.guest_id, "booking_id": m.booking_id,
         "sent_by": m.sent_by,
         "created_at": m.created_at.isoformat() if m.created_at else None,
+        "media": _media_public(m),
     }
+
+
+def _media_public(m: WhatsAppMessage):
+    """v8z.3: what the inbox needs to show and open a photo / voice note / video / file."""
+    md = wa.media_of(m)
+    if not md:
+        return None
+    return {"kind": md.get("kind"), "mime": md.get("mime"), "filename": md.get("filename"),
+            "caption": md.get("caption"), "url": f"/whatsapp/media/{m.id}",
+            "openable": md.get("id") not in (None, "stub")}
 
 
 @router.get("/messages")
@@ -299,6 +310,74 @@ def reply_conversation_ep(phone: str, data: WhatsAppReplyRequest, db: Session = 
         raise HTTPException(status_code=502, detail="Send failed unexpectedly")
     write_audit(db, user, "whatsapp.reply", "whatsapp_message", row.id,
                 after={"to": num, "kind": "template" if data.template else "text",
+                       "status": row.status}, client="desktop", commit=True)
+    _mark_read(db, num, uid)
+    return _msg_dict(row)
+
+
+@router.get("/media/{message_id}")
+def get_media_ep(message_id: int, download: bool = Query(False), db: Session = Depends(get_db),
+                 user=Depends(require_reception_or_admin)):
+    """v8z.3: the photo / voice note / video / file of one message, fetched from WhatsApp (which
+    keeps it about 30 days). Staff-sent media opens the same way."""
+    row = db.query(WhatsAppMessage).filter(WhatsAppMessage.id == message_id).first()
+    md = wa.media_of(row)
+    if not md:
+        raise HTTPException(status_code=404, detail="This message has no attachment.")
+    if md.get("id") == "stub":
+        raise HTTPException(status_code=404, detail="Test message - WhatsApp was not connected, no file was kept.")
+    try:
+        data, mime = wa.fetch_media(md["id"])
+    except wa.MediaError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    name = _download_name(md, mime, message_id)
+    disp = "attachment" if download else "inline"
+    return Response(content=data, media_type=mime,
+                    headers={"Content-Disposition": f'{disp}; filename="{name}"',
+                             "Cache-Control": "private, max-age=3600"})
+
+
+_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "video/mp4": ".mp4",
+        "video/3gpp": ".3gp", "audio/ogg": ".ogg", "audio/mpeg": ".mp3", "audio/mp4": ".m4a",
+        "audio/aac": ".aac", "audio/amr": ".amr", "application/pdf": ".pdf"}
+
+
+def _download_name(md, mime, message_id):
+    fn = (md.get("filename") or "").strip()
+    fn = re.sub(r'[^\w.\- ]', "_", fn)[:100]
+    if fn:
+        return fn
+    ext = _EXT.get((mime or "").split(";")[0].strip().lower(), "")
+    return f"whatsapp-{md.get('kind') or 'file'}-{message_id}{ext}"
+
+
+@router.post("/conversations/{phone}/media")
+async def send_media_ep(phone: str, file: UploadFile = File(...), caption: str = Form(None),
+                        db: Session = Depends(get_db), user=Depends(require_reception_or_admin)):
+    """v8z.3: send a photo (jpg/png, 5 MB), video (mp4, 16 MB), voice note / audio (mp3, m4a,
+    ogg, aac, amr; 16 MB) or any other file as a document (16 MB). Like free text, only inside the
+    guest's 24h window - WhatsApp's rule."""
+    num = wa.normalize_number(phone)
+    if not num:
+        raise HTTPException(status_code=400, detail="Invalid phone number")
+    ok, _ = wa.within_window(db, num)
+    if not ok:
+        raise HTTPException(
+            status_code=409,
+            detail="The 24-hour reply window has closed — send an approved template to reopen the chat.")
+    data = await file.read()
+    import mimetypes
+    mime = (file.content_type or "").split(";")[0].strip().lower()
+    if not mime or mime == "application/octet-stream":
+        mime = mimetypes.guess_type(file.filename or "")[0] or "application/octet-stream"
+    uid = _resolve_user_id(db, user)
+    try:
+        row = wa.send_media(db, num, data, (file.filename or "file")[:120], mime,
+                            (caption or "")[:1000], sent_by=uid)
+    except wa.MediaError as e:
+        raise HTTPException(status_code=e.status, detail=str(e))
+    write_audit(db, user, "whatsapp.reply", "whatsapp_message", row.id,
+                after={"to": num, "kind": "media", "media_kind": (wa.media_of(row) or {}).get("kind"),
                        "status": row.status}, client="desktop", commit=True)
     _mark_read(db, num, uid)
     return _msg_dict(row)
@@ -454,6 +533,42 @@ def _inbound_text_of(msg):
     return None
 
 
+def _inbound_media_of(msg):
+    """v8z.3: (display text, media dict, caption) for a non-text inbound message, or None.
+    Photos / videos / voice notes / documents / stickers keep their Meta media id so the inbox can
+    open them; a location, contact card or reaction becomes readable text."""
+    mtype = msg.get("type")
+    if mtype in wa.MEDIA_KINDS:
+        o = msg.get(mtype) or {}
+        caption = (o.get("caption") or "").strip() or None
+        kind = "audio" if mtype == "audio" else mtype
+        media = {"kind": kind, "id": o.get("id"), "mime": o.get("mime_type"),
+                 "filename": o.get("filename"), "caption": caption,
+                 "voice": bool(o.get("voice")) if mtype == "audio" else None}
+        if not media["id"]:
+            return None
+        return wa.media_label(kind, o.get("filename"), caption), media, caption
+    if mtype == "location":
+        o = msg.get("location") or {}
+        lat, lng = o.get("latitude"), o.get("longitude")
+        where = " ".join(x for x in (o.get("name"), o.get("address")) if x)
+        text = "\U0001F4CD Location" + (f": {where}" if where else "")
+        if lat is not None and lng is not None:
+            text += f"\nhttps://maps.google.com/?q={lat},{lng}"
+        return text, None, None
+    if mtype == "contacts":
+        parts = []
+        for c in msg.get("contacts") or []:
+            name = ((c.get("name") or {}).get("formatted_name")) or "Contact"
+            phones = ", ".join(p.get("phone") for p in (c.get("phones") or []) if p.get("phone"))
+            parts.append(f"{name}{(' - ' + phones) if phones else ''}")
+        return "\U0001F464 Contact: " + ("; ".join(parts) or "(empty)"), None, None
+    if mtype == "reaction":
+        emoji = (msg.get("reaction") or {}).get("emoji")
+        return (f"Reacted {emoji} to a message" if emoji else "Removed a reaction"), None, None
+    return None
+
+
 def _resolve_guest_and_booking(db, from_number):
     """(normalised number, guest, booking_id) for an inbound sender: match the stored phone
     exactly, then on the last 10 digits, then take their latest booking. Shared by the complaint
@@ -526,12 +641,14 @@ def _handle_extend_request(db, from_number, guest, booking_id, provider_id=None)
                 req.id if req is not None else None)
 
 
-def _handle_inbound_text(db, from_number, text, provider_id=None):
-    """Route an inbound reply: opt-out keyword, extension request, or complaint -> ticket + ack."""
+def _handle_inbound_text(db, from_number, text, provider_id=None, media=None, body=None):
+    """Route an inbound reply: opt-out keyword, extension request, or complaint -> ticket + ack.
+    v8z.3: a photo's caption is routed too ("AC not working" + a photo is still a complaint); the
+    logged row then carries the media and `body` (the "Photo - caption" label)."""
     from routers.maintenance import create_guest_ticket
 
     norm_text = _normalize_keyword_text(text)
-    inbound_row = wa.log_inbound(db, from_number, text, provider_id)
+    inbound_row = wa.log_inbound(db, from_number, body or text, provider_id, media=media)
 
     # Opt-out: whole-message match, or a short message opening with a stop word.
     words = norm_text.split()
@@ -638,8 +755,15 @@ async def receive_webhook(request: Request, db: Session = Depends(get_db)):
                     logger.info("whatsapp inbound %s from %s", msg.get("type"), msg.get("from"))
                     try:
                         body = _inbound_text_of(msg)
+                        other = _inbound_media_of(msg) if body is None else None
                         if body is not None:
                             _handle_inbound_text(db, msg.get("from"), body, msg.get("id"))
+                        elif other is not None and other[2]:
+                            # media WITH a caption: the caption goes through the keyword routing
+                            _handle_inbound_text(db, msg.get("from"), other[2], msg.get("id"),
+                                                 media=other[1], body=other[0])
+                        elif other is not None:
+                            wa.log_inbound(db, msg.get("from"), other[0], msg.get("id"), media=other[1])
                         else:
                             wa.log_inbound(db, msg.get("from"), f"[{msg.get('type')}]", msg.get("id"))
                     except Exception as e:

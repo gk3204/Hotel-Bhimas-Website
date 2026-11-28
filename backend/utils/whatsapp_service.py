@@ -482,12 +482,14 @@ def _resolve_guest_id(db, num):
         return None
 
 
-def log_inbound(db, from_number, text, provider_id=None, commit=True):
+def log_inbound(db, from_number, text, provider_id=None, commit=True, media=None):
     """Record an inbound reply for the admin log + inbox. Resolves the guest (by phone) so the
-    inbox can show a name."""
+    inbox can show a name. v8z.3: `media` (kind/id/mime/filename/caption) is kept in `params` so the
+    desk and the web can open the photo/voice note/video/file later - before this only "[image]"
+    was stored and the media id Meta sends exactly once was thrown away."""
     num = normalize_number(from_number) or str(from_number or "")
-    return _log_row(db, "in", num, "inbound", None, text, status="received",
-                    provider="meta", provider_id=provider_id,
+    return _log_row(db, "in", num, "inbound", {"media": media} if media else None, text,
+                    status="received", provider="meta", provider_id=provider_id,
                     guest_id=_resolve_guest_id(db, num), commit=commit)
 
 
@@ -637,3 +639,159 @@ def send_daily_digest(db, digest, commit=True):
                           "revenue": f"{digest.get('revenue_today', 0):.2f}",
                           "open_alerts": digest.get("open_alerts", 0)},
                          f"daily_digest:{day}", commit)
+
+
+# ---------------------------------------------------------------------------
+# v8z.3: media - open what guests send, and let staff send a photo / file / voice note / video.
+# ---------------------------------------------------------------------------
+# Meta's accepted types per message kind (anything else goes as a document) and its size caps.
+MEDIA_KINDS = ("image", "video", "audio", "document", "sticker")
+_SEND_IMAGE_MIMES = {"image/jpeg", "image/png"}
+_SEND_VIDEO_MIMES = {"video/mp4", "video/3gpp"}
+_SEND_AUDIO_MIMES = {"audio/aac", "audio/amr", "audio/mpeg", "audio/mp4", "audio/ogg"}
+MEDIA_MAX_BYTES = {"image": 5 * 1024 * 1024, "video": 16 * 1024 * 1024,
+                   "audio": 16 * 1024 * 1024, "document": 16 * 1024 * 1024}
+
+
+class MediaError(Exception):
+    """A media fetch/send failed; `status` is the HTTP status the endpoint should answer with."""
+    def __init__(self, message, status=502):
+        super().__init__(message)
+        self.status = status
+
+
+def media_of(row) -> dict | None:
+    """The media details stored on a message row (inbound or staff-sent), or None."""
+    if row is None or not row.params:
+        return None
+    try:
+        m = (json.loads(row.params) or {}).get("media")
+    except Exception:
+        return None
+    return m if isinstance(m, dict) and m.get("id") else None
+
+
+def send_kind_for(mime: str) -> str:
+    mime = (mime or "").split(";")[0].strip().lower()
+    if mime in _SEND_IMAGE_MIMES:
+        return "image"
+    if mime in _SEND_VIDEO_MIMES:
+        return "video"
+    if mime in _SEND_AUDIO_MIMES:
+        return "audio"
+    return "document"
+
+
+def media_label(kind, filename=None, caption=None) -> str:
+    """The text shown for a media message in the thread and the conversation preview."""
+    base = {"image": "\U0001F4F7 Photo", "video": "\U0001F3AC Video", "audio": "\U0001F3A4 Voice message",
+            "sticker": "Sticker", "document": "\U0001F4C4 " + (filename or "Document")}.get(kind, f"[{kind}]")
+    return f"{base} \u2014 {caption}" if caption else base
+
+
+def fetch_media(media_id):
+    """(bytes, mime) for a Meta media id. Meta gives a short-lived download URL that itself needs
+    the bearer token, so the backend downloads it and hands the bytes to the desk / web. Meta keeps
+    media for about 30 days."""
+    cfg = _provider_config()
+    if cfg is None:
+        raise MediaError("WhatsApp is not connected on this server, so the file cannot be fetched.", 404)
+    auth = {"Authorization": f"Bearer {cfg['token']}"}
+    try:
+        meta = requests.get(f"https://graph.facebook.com/{cfg['api_version']}/{media_id}",
+                            headers=auth, timeout=_GRAPH_TIMEOUT)
+    except Exception as e:
+        raise MediaError(f"Could not reach WhatsApp: {str(e)[:150]}")
+    if meta.status_code != 200:
+        logger.warning("whatsapp media lookup %s failed %s: %s", media_id, meta.status_code, meta.text[:200])
+        raise MediaError("WhatsApp no longer has this file (it keeps media for about 30 days).", 410)
+    info = meta.json() or {}
+    try:
+        resp = requests.get(info.get("url"), headers=auth, timeout=_GRAPH_TIMEOUT * 4)
+    except Exception as e:
+        raise MediaError(f"Could not download the file from WhatsApp: {str(e)[:150]}")
+    if resp.status_code != 200:
+        raise MediaError(f"WhatsApp refused the download (http {resp.status_code}).")
+    return resp.content, (info.get("mime_type") or resp.headers.get("Content-Type") or "application/octet-stream")
+
+
+def _upload_media_bytes(cfg, data, filename, mime) -> str:
+    url = f"https://graph.facebook.com/{cfg['api_version']}/{cfg['phone_id']}/media"
+    try:
+        resp = requests.post(url, headers={"Authorization": f"Bearer {cfg['token']}"},
+                             data={"messaging_product": "whatsapp", "type": mime},
+                             files={"file": (filename, data, mime)}, timeout=_GRAPH_TIMEOUT * 4)
+    except Exception as e:
+        raise MediaError(f"Upload to WhatsApp failed: {str(e)[:150]}")
+    if resp.status_code != 200 or not (resp.json() or {}).get("id"):
+        logger.error("whatsapp media upload failed %s: %s", resp.status_code, resp.text[:250])
+        raise MediaError(f"WhatsApp did not accept the file (http {resp.status_code}): {resp.text[:200]}")
+    return resp.json()["id"]
+
+
+def send_media(db, to, data: bytes, filename, mime, caption=None, *, sent_by=None,
+               guest_id=None, booking_id=None, commit=True):
+    """Send a photo / video / voice note / document inside the 24h window (staff inbox). Returns the
+    logged row; the row's `params.media` lets the thread open what was sent. Stub-logs when the
+    provider is off and refuses to send in SAFE_MODE (logged 'failed', like every other send).
+    Raises MediaError for a bad file or a refused upload - the endpoint shows it to the user."""
+    num = normalize_number(to)
+    if not num:
+        raise MediaError("Invalid phone number", 400)
+    mime = (mime or "application/octet-stream").split(";")[0].strip().lower()
+    kind = send_kind_for(mime)
+    cap = MEDIA_MAX_BYTES[kind]
+    if not data:
+        raise MediaError("The file is empty.", 400)
+    if len(data) > cap:
+        what = {"image": "photo", "video": "video", "audio": "voice note / audio file"}.get(kind, "file")
+        raise MediaError(f"Too large for WhatsApp: a {what} can be at most {cap // (1024 * 1024)} MB.", 413)
+    caption = (caption or "").strip() or None
+    if kind == "audio":
+        caption = None             # WhatsApp audio messages carry no caption
+    media = {"kind": kind, "id": None, "mime": mime, "filename": filename, "caption": caption,
+             "size": len(data)}
+    body = media_label(kind, filename, caption)
+
+    cfg = _provider_config()
+    if cfg is None:
+        media["id"] = "stub"
+        logger.info(f"\U0001F4E4 [whatsapp:stub] to={num} {kind} {filename}")
+        return _log_row(db, "out", num, "media", {"media": media}, body, status="sent", provider="stub",
+                        guest_id=guest_id, booking_id=booking_id, sent_by=sent_by, commit=commit)
+    if (os.getenv("SAFE_MODE", "") or "").strip().lower() in ("1", "true", "yes", "on"):
+        logger.warning("SAFE_MODE: not sending WhatsApp media to %s", num)
+        return _log_row(db, "out", num, "media", {"media": media}, body, status="failed", provider="meta",
+                        guest_id=guest_id, booking_id=booking_id, sent_by=sent_by,
+                        error="SAFE_MODE - not sent", commit=commit)
+
+    media["id"] = _upload_media_bytes(cfg, data, filename, mime)
+    obj = {"id": media["id"]}
+    if kind in ("image", "video", "document") and caption:
+        obj["caption"] = caption
+    if kind == "document":
+        obj["filename"] = filename
+    row = _log_row(db, "out", num, "media", {"media": media}, body, status="queued", provider="meta",
+                   guest_id=guest_id, booking_id=booking_id, sent_by=sent_by, commit=False)
+    try:
+        resp = requests.post(
+            f"https://graph.facebook.com/{cfg['api_version']}/{cfg['phone_id']}/messages",
+            json={"messaging_product": "whatsapp", "to": num, "type": kind, kind: obj},
+            headers={"Authorization": f"Bearer {cfg['token']}", "Content-Type": "application/json"},
+            timeout=_GRAPH_TIMEOUT)
+        if resp.status_code == 200:
+            row.status = "sent"
+            row.provider_id = (resp.json().get("messages") or [{}])[0].get("id")
+        else:
+            row.status = "failed"
+            row.error = f"http {resp.status_code}: {resp.text[:250]}"
+            logger.error(f"whatsapp media send failed {resp.status_code}: {resp.text[:250]}")
+    except Exception as e:
+        row.status = "failed"
+        row.error = f"request error: {str(e)[:250]}"
+    row.updated_at = datetime.utcnow()
+    if commit:
+        db.commit()
+    else:
+        db.flush()
+    return row
